@@ -1,0 +1,38 @@
+# tooling and design notes — never commit
+.devlog-meta/
+PLAN.md
+Research.md
+improvements/
+
+# secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# data
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+
+# editor / os
+.DS_Store
+.vscode/
+.idea/
+*.swp
