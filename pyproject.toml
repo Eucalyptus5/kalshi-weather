@@ -1,0 +1,33 @@
+[project]
+name = "kalshi-weather"
+version = "0.0.0"
+description = "Paper trading bot for Kalshi weather markets."
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1",
+    "kalshi-python-async>=3.2.0",
+    "numpy>=2.4.4",
+    "pandas>=3.0.2",
+    "properscoring>=0.1",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.14.0",
+    "python-dotenv>=1.2.2",
+    "pytz>=2026.2",
+    "scipy>=1.17.1",
+    "scoringrules>=0.10.0",
+    "urllib3>=2.6.3",
+]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.15.12",
+]
