@@ -1,0 +1,156 @@
+from __future__ import annotations
+
+import logging
+from datetime import date
+from decimal import Decimal
+
+import pytest
+
+from bot.markets.parser import ParsedTicker, event_yes_sum_ok, parse_ticker
+
+
+@pytest.mark.parametrize(
+    "ticker, series, event_date, is_monthly, strikes, is_bracket, is_tail",
+    [
+        (
+            "KXHIGHDEN-26APR28-T70.5-72.5",
+            "KXHIGHDEN",
+            date(2026, 4, 28),
+            False,
+            (Decimal("70.5"), Decimal("72.5")),
+            True,
+            False,
+        ),
+        (
+            "KXHIGHDEN-26APR28-T70.5",
+            "KXHIGHDEN",
+            date(2026, 4, 28),
+            False,
+            (Decimal("70.5"),),
+            False,
+            True,
+        ),
+        (
+            "KXHIGHDEN-26APR28-T96.5",
+            "KXHIGHDEN",
+            date(2026, 4, 28),
+            False,
+            (Decimal("96.5"),),
+            False,
+            True,
+        ),
+        (
+            "KXLOWNY-26MAR15-T35.5-37.5",
+            "KXLOWNY",
+            date(2026, 3, 15),
+            False,
+            (Decimal("35.5"), Decimal("37.5")),
+            True,
+            False,
+        ),
+        (
+            "KXHIGHTBOS-26JUL04-T82.5-84.5",
+            "KXHIGHTBOS",
+            date(2026, 7, 4),
+            False,
+            (Decimal("82.5"), Decimal("84.5")),
+            True,
+            False,
+        ),
+        (
+            "KXHIGHDEN-26DEC15-T30.5-32.5",
+            "KXHIGHDEN",
+            date(2026, 12, 15),
+            False,
+            (Decimal("30.5"), Decimal("32.5")),
+            True,
+            False,
+        ),
+    ],
+)
+def test_parse_ticker_golden(
+    ticker: str,
+    series: str,
+    event_date: date,
+    is_monthly: bool,
+    strikes: tuple[Decimal, ...],
+    is_bracket: bool,
+    is_tail: bool,
+) -> None:
+    parsed = parse_ticker(ticker)
+    assert isinstance(parsed, ParsedTicker)
+    assert parsed.series == series
+    assert parsed.event_date == event_date
+    assert parsed.is_monthly is is_monthly
+    assert parsed.strikes == strikes
+    assert parsed.is_bracket is is_bracket
+    assert parsed.is_tail is is_tail
+    assert parsed.raw == ticker
+
+
+def test_decimal_is_string_constructed_not_float() -> None:
+    parsed = parse_ticker("KXHIGHDEN-26APR28-T70.5-72.5")
+    assert parsed.strikes[0] == Decimal("70.5")
+    assert parsed.strikes[1] == Decimal("72.5")
+    assert str(parsed.strikes[0]) == "70.5"
+
+
+def test_monthly_ticker() -> None:
+    parsed = parse_ticker("KXRAINSFOM-26JUN-T1.0")
+    assert parsed.is_monthly is True
+    assert parsed.event_date == date(2026, 6, 1)
+    assert parsed.strikes == (Decimal("1.0"),)
+    assert parsed.is_tail is True
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "XXHIGHDEN-26APR28-T70.5-72.5",
+        "KXHIGHDEN-26ZZZ28-T70.5-72.5",
+        "KXHIGHDEN-26FEB30-T70.5-72.5",
+        "KXHIGHDEN-26APR28-70.5-72.5",
+        "KXHIGHDEN-26APR28-T72.5-70.5",
+        "KXHIGHDEN-26APR28-T70.5-72.5-74.5",
+    ],
+)
+def test_parse_ticker_rejects_malformed(bad: str) -> None:
+    with pytest.raises(ValueError):
+        parse_ticker(bad)
+
+
+def test_event_yes_sum_ok_exact_one() -> None:
+    prices = [
+        Decimal("0.05"),
+        Decimal("0.10"),
+        Decimal("0.30"),
+        Decimal("0.30"),
+        Decimal("0.20"),
+        Decimal("0.05"),
+    ]
+    assert event_yes_sum_ok(prices) is True
+
+
+def test_event_yes_sum_ok_below_tolerance_warns(caplog: pytest.LogCaptureFixture) -> None:
+    prices = [Decimal("0.20")] * 4 + [Decimal("0.06"), Decimal("0.06")]
+    assert sum(prices) == Decimal("0.92")
+    caplog.set_level(logging.WARNING, logger="bot.markets.parser")
+    result = event_yes_sum_ok(prices)
+    assert result is False
+    assert any("yes sum off" in r.getMessage() for r in caplog.records)
+    assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_event_yes_sum_ok_at_upper_edge() -> None:
+    prices = [Decimal("0.20")] * 5 + [Decimal("0.04")]
+    assert sum(prices) == Decimal("1.04")
+    assert event_yes_sum_ok(prices) is True
+
+
+def test_event_yes_sum_ok_custom_tolerance(caplog: pytest.LogCaptureFixture) -> None:
+    prices = [Decimal("0.20")] * 4 + [Decimal("0.06"), Decimal("0.06")]
+    caplog.set_level(logging.WARNING, logger="bot.markets.parser")
+    result = event_yes_sum_ok(prices, tolerance=Decimal("0.10"))
+    assert result is True
+    assert not any(r.levelno == logging.WARNING for r in caplog.records)
