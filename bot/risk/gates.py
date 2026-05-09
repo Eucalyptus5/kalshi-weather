@@ -4,7 +4,6 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Optional
 
 
 log = logging.getLogger(__name__)
@@ -17,7 +16,7 @@ class GateMode(Enum):
 
 @dataclass(frozen=True, slots=True)
 class GateContext:
-    fair_yes: Optional[Decimal]
+    fair_yes: Decimal | None
     model_age_hours: Decimal
     ensemble_spread: Decimal
     edge: Decimal
@@ -36,7 +35,7 @@ class GateContext:
 class GateResult:
     name: str
     passed: bool
-    reason: Optional[str]
+    reason: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,7 +80,7 @@ def _fail(name: str, reason: str) -> GateResult:
     return GateResult(name=name, passed=False, reason=reason)
 
 
-def _check_fair_value(fair_yes: Optional[Decimal], params: GateParams) -> GateResult:
+def _check_fair_value(fair_yes: Decimal | None, params: GateParams) -> GateResult:
     name = "fair_value_sane"
     if fair_yes is None:
         return _fail(name, "fair_yes is None")
