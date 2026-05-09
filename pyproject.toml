@@ -4,6 +4,7 @@ version = "0.0.0"
 description = "Paper trading bot for Kalshi weather markets."
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.18.4",
     "httpx>=0.28.1",
     "kalshi-python-async>=3.2.0",
     "numpy>=2.4.4",
@@ -15,6 +16,7 @@ dependencies = [
     "pytz>=2026.2",
     "scipy>=1.17.1",
     "scoringrules>=0.10.0",
+    "sqlalchemy>=2.0.49",
     "urllib3>=2.6.3",
 ]
 
