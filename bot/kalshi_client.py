@@ -6,11 +6,14 @@ from datetime import datetime
 from datetime import timezone as _timezone
 from decimal import Decimal
 
-from kalshi_python_async import ApiClient, Configuration, KalshiAuth, MarketApi
+import httpx
+from kalshi_python_async import KalshiAuth
 
 from bot.config import Settings
 
 logger = logging.getLogger(__name__)
+
+_API_PREFIX = "/trade-api/v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,16 +41,14 @@ class KalshiDemoClient:
     def __init__(
         self,
         settings: Settings,
-        _market_api: MarketApi | object | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._settings = settings
-        self._api_client: ApiClient | None = None
-        self._market_api = _market_api
-        self._injected = _market_api is not None
+        self._owns_http = http_client is None
+        self._http: httpx.AsyncClient | None = http_client
+        self._auth: KalshiAuth | None = None
 
     async def aopen(self) -> None:
-        if self._injected:
-            return
         if not self._settings.kalshi_demo_key_id:
             raise RuntimeError("kalshi_demo_key_id is not configured")
         key_path = self._settings.kalshi_demo_private_key_path
@@ -55,61 +56,83 @@ class KalshiDemoClient:
             raise RuntimeError(f"private key file not found at {key_path}")
 
         private_key_pem = key_path.read_text()
-        config = Configuration(host=self._settings.kalshi_demo_api_base)
-        api_client = ApiClient(configuration=config)
-        api_client.kalshi_auth = KalshiAuth(
+        self._auth = KalshiAuth(
             key_id=self._settings.kalshi_demo_key_id,
             private_key_pem=private_key_pem,
         )
-        self._api_client = api_client
-        self._market_api = MarketApi(api_client)
-        logger.info("kalshi_client_open host=%s", self._settings.kalshi_demo_api_base)
+        if self._http is None:
+            self._http = httpx.AsyncClient(
+                base_url=self._settings.kalshi_demo_api_base,
+                timeout=30.0,
+            )
+            logger.info("kalshi_client_open host=%s", self._settings.kalshi_demo_api_base)
 
     async def aclose(self) -> None:
-        if self._injected:
-            return
-        if self._api_client is not None:
-            await self._api_client.close()
-            self._api_client = None
-            self._market_api = None
+        if self._http is not None and self._owns_http:
+            await self._http.aclose()
+        self._http = None
+        self._auth = None
 
     async def list_open_markets_for_series(self, series_prefix: str) -> list[KalshiMarket]:
-        if self._market_api is None:
-            raise RuntimeError("kalshi client not opened")
-        response = await self._market_api.get_markets(status="open", limit=1000)
+        assert self._http is not None and self._auth is not None
+        path = "/markets"
+        headers = self._auth.create_auth_headers("GET", f"{_API_PREFIX}{path}")
+        response = await self._http.get(
+            path, params={"status": "open", "limit": 1000}, headers=headers
+        )
+        response.raise_for_status()
+        payload = response.json()
+
+        raw_markets = payload.get("markets") or []
         out: list[KalshiMarket] = []
-        for m in response.markets:
-            ticker = m.ticker
+        skipped_null = 0
+        for m in raw_markets:
+            if m.get("yes_ask_dollars") is None or m.get("yes_bid_dollars") is None:
+                skipped_null += 1
+                continue
+            ticker = m["ticker"]
             if not ticker.startswith(series_prefix):
                 continue
             series = ticker.split("-", 1)[0]
+            close_time = _parse_close_time(m.get("close_time"))
             out.append(
                 KalshiMarket(
                     ticker=ticker,
-                    event_ticker=m.event_ticker,
+                    event_ticker=m["event_ticker"],
                     series=series,
-                    status=m.status,
-                    close_time=m.close_time,
-                    yes_ask=Decimal(str(m.yes_ask_dollars)),
-                    yes_bid=Decimal(str(m.yes_bid_dollars)),
+                    status=m["status"],
+                    close_time=close_time,
+                    yes_ask=Decimal(str(m["yes_ask_dollars"])),
+                    yes_bid=Decimal(str(m["yes_bid_dollars"])),
                 )
             )
+
+        if payload.get("cursor"):
+            logger.warning(
+                "kalshi_list_markets_pagination_unimplemented series=%s",
+                series_prefix,
+            )
+
         logger.info(
-            "kalshi_list_markets series=%s total=%d matched=%d",
+            "kalshi_list_markets series=%s total=%d matched=%d skipped_null=%d",
             series_prefix,
-            len(response.markets),
+            len(raw_markets),
             len(out),
+            skipped_null,
         )
         return out
 
     async def get_orderbook(self, ticker: str) -> KalshiOrderbook:
-        if self._market_api is None:
-            raise RuntimeError("kalshi client not opened")
-        response = await self._market_api.get_market_orderbook(ticker=ticker)
-        ob = response.orderbook
+        assert self._http is not None and self._auth is not None
+        path = f"/markets/{ticker}/orderbook"
+        headers = self._auth.create_auth_headers("GET", f"{_API_PREFIX}{path}")
+        response = await self._http.get(path, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+        ob = payload["orderbook"]
 
-        yes_bid = _best_price(ob.yes_dollars)
-        no_bid = _best_price(ob.no_dollars)
+        yes_bid = _best_price(ob.get("yes_dollars"))
+        no_bid = _best_price(ob.get("no_dollars"))
         yes_ask = Decimal("1") - no_bid
         no_ask = Decimal("1") - yes_bid
 
@@ -121,6 +144,15 @@ class KalshiDemoClient:
             no_bid=no_bid,
             snapshot_at=datetime.now(tz=_timezone.utc),
         )
+
+
+def _parse_close_time(raw: object) -> datetime | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"unexpected close_time type: {type(raw).__name__}")
+    text = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+    return datetime.fromisoformat(text)
 
 
 def _best_price(levels: list[list[str]] | None) -> Decimal:
