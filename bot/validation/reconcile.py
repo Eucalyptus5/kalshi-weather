@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from enum import Enum
 
 import httpx
 
@@ -12,11 +11,6 @@ from bot.markets.parser import ParsedTicker
 from bot.validation.scoring import realized_pnl_for_trade
 
 ACIS_URL = "https://data.rcc-acis.org/StnData"
-
-
-class TailSide(Enum):
-    LOW = "low"
-    HIGH = "high"
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,11 +71,11 @@ def settle_bracket(parsed: ParsedTicker, observed_high: Decimal) -> bool:
     return low <= observed_high < high
 
 
-def settle_tail(parsed: ParsedTicker, tail_side: TailSide, observed_high: Decimal) -> bool:
+def settle_tail(parsed: ParsedTicker, observed_high: Decimal) -> bool:
     if not parsed.is_tail:
         raise ValueError(f"settle_tail called on non-tail ticker: {parsed.raw}")
     (strike,) = parsed.strikes
-    if tail_side is TailSide.LOW:
+    if parsed.kind == "below":
         return observed_high < strike
     return observed_high >= strike
 
@@ -90,16 +84,11 @@ def reconcile_trade(
     trade: PaperTrade,
     parsed: ParsedTicker,
     observed_high: Decimal,
-    tail_side: TailSide | None = None,
 ) -> Reconciliation:
     if parsed.is_bracket:
-        if tail_side is not None:
-            raise ValueError(f"tail_side must be None for bracket ticker {parsed.raw}")
         yes_settled = settle_bracket(parsed, observed_high)
     else:
-        if tail_side is None:
-            raise ValueError(f"tail_side required for tail ticker {parsed.raw}")
-        yes_settled = settle_tail(parsed, tail_side, observed_high)
+        yes_settled = settle_tail(parsed, observed_high)
 
     if trade.side is TradeSide.BUY_YES:
         won = yes_settled

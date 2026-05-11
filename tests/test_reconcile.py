@@ -12,7 +12,6 @@ from bot.markets.parser import parse_ticker
 from bot.validation.reconcile import (
     ACISClient,
     Reconciliation,
-    TailSide,
     reconcile_trade,
     settle_bracket,
     settle_tail,
@@ -194,24 +193,24 @@ def test_settle_bracket_rejects_tail() -> None:
         settle_bracket(parsed, Decimal("71"))
 
 
-def test_settle_tail_low() -> None:
-    parsed = parse_ticker("KXHIGHDEN-26APR28-T70.5")
-    assert settle_tail(parsed, TailSide.LOW, Decimal("70")) is True
-    assert settle_tail(parsed, TailSide.LOW, Decimal("71")) is False
-    assert settle_tail(parsed, TailSide.LOW, Decimal("70.5")) is False
+def test_settle_tail_below() -> None:
+    parsed = parse_ticker("KXHIGHDEN-26MAY06-B42.5")
+    assert settle_tail(parsed, Decimal("42")) is True
+    assert settle_tail(parsed, Decimal("43")) is False
+    assert settle_tail(parsed, Decimal("42.5")) is False
 
 
-def test_settle_tail_high() -> None:
-    parsed = parse_ticker("KXHIGHDEN-26APR28-T96.5")
-    assert settle_tail(parsed, TailSide.HIGH, Decimal("97")) is True
-    assert settle_tail(parsed, TailSide.HIGH, Decimal("96")) is False
-    assert settle_tail(parsed, TailSide.HIGH, Decimal("96.5")) is True
+def test_settle_tail_above() -> None:
+    parsed = parse_ticker("KXHIGHDEN-26MAY06-T96")
+    assert settle_tail(parsed, Decimal("97")) is True
+    assert settle_tail(parsed, Decimal("95")) is False
+    assert settle_tail(parsed, Decimal("96")) is True
 
 
 def test_settle_tail_rejects_bracket() -> None:
     parsed = parse_ticker("KXHIGHDEN-26APR28-T70.5-72.5")
     with pytest.raises(ValueError):
-        settle_tail(parsed, TailSide.LOW, Decimal("71"))
+        settle_tail(parsed, Decimal("71"))
 
 
 def test_reconcile_trade_buy_yes_yes_true() -> None:
@@ -252,12 +251,17 @@ def test_reconcile_trade_sell_yes_yes_true() -> None:
     assert out.realized_pnl == Decimal("-1.54")
 
 
-def test_reconcile_trade_requires_tail_side_for_tail_markets() -> None:
-    tail = parse_ticker("KXHIGHDEN-26APR28-T70.5")
+def test_reconcile_trade_dispatches_below_tail() -> None:
+    parsed = parse_ticker("KXHIGHDEN-26MAY06-B42.5")
     trade = _make_trade(TradeSide.BUY_YES, Decimal("0.40"), 10, Decimal("0.05"))
-    with pytest.raises(ValueError):
-        reconcile_trade(trade, tail, Decimal("70"))
+    out = reconcile_trade(trade, parsed, Decimal("42"))
+    assert out.yes_settled is True
+    assert out.won is True
 
-    bracket = parse_ticker("KXHIGHDEN-26APR28-T70.5-72.5")
-    with pytest.raises(ValueError):
-        reconcile_trade(trade, bracket, Decimal("71"), tail_side=TailSide.LOW)
+
+def test_reconcile_trade_dispatches_above_tail() -> None:
+    parsed = parse_ticker("KXHIGHDEN-26MAY06-T96")
+    trade = _make_trade(TradeSide.BUY_YES, Decimal("0.40"), 10, Decimal("0.05"))
+    out = reconcile_trade(trade, parsed, Decimal("95"))
+    assert out.yes_settled is False
+    assert out.won is False

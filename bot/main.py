@@ -23,7 +23,7 @@ from bot.forecast.cdf import EnsembleCDF
 from bot.forecast.open_meteo import OpenMeteoClient, StationForecast
 from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook
 from bot.markets.observation_window import observation_window
-from bot.markets.parser import parse_ticker
+from bot.markets.parser import ParsedTicker, parse_ticker
 from bot.risk.gates import GateContext, GateMode, evaluate as evaluate_gates
 from bot.storage.sqlite import (
     Base,
@@ -32,11 +32,13 @@ from bot.storage.sqlite import (
     Market,
     OrderbookSnapshot,
     PaperTradeRow,
+    SimulatedPnl,
     make_engine,
     make_session_factory,
 )
 from bot.strategy import edge as edge_strategy
 from bot.strategy import tails as tails_strategy
+from bot.validation.reconcile import ACISClient, reconcile_trade
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,8 @@ SERIES_POSITION_CAP: Decimal = Decimal("400")
 
 MARKET_REFRESH_INTERVAL = 60.0
 EVAL_INTERVAL = 60.0
+SETTLEMENT_INTERVAL_SECONDS: float = 6 * 3600
+_SETTLEMENT_GRACE_DAYS: int = 1
 GFS_CYCLES_HOURS: tuple[int, ...] = (0, 6, 12, 18)
 GFS_CYCLE_OFFSET_MINUTES = 30
 
@@ -77,6 +81,7 @@ class App:
     session_factory: sessionmaker[Session]
     meteo: OpenMeteoClient
     kalshi: KalshiDemoClient
+    acis: ACISClient
     series: str
     forecast_cdfs: dict[tuple[str, date], EnsembleCDF] = field(default_factory=dict)
     ensemble_spreads: dict[tuple[str, date], Decimal] = field(default_factory=dict)
@@ -87,6 +92,7 @@ class App:
     async def aclose(self) -> None:
         await self.meteo.aclose()
         await self.kalshi.aclose()
+        await self.acis.aclose()
         self.engine.dispose()
 
 
@@ -428,6 +434,98 @@ async def _eval_loop(app: App, stop: asyncio.Event) -> None:
             pass
 
 
+async def reconcile_settled_trades(app: App, now: datetime) -> int:
+    cutoff = (now - timedelta(days=_SETTLEMENT_GRACE_DAYS)).date()
+    cfg = STATIONS[app.series]
+
+    reconciled = 0
+    pending = 0
+    skipped = 0
+
+    with app.session_factory() as session:
+        unreconciled_q = (
+            select(PaperTradeRow)
+            .where(~PaperTradeRow.id.in_(select(SimulatedPnl.paper_trade_id)))
+            .order_by(PaperTradeRow.id.asc())
+        )
+        rows = list(session.scalars(unreconciled_q).all())
+
+        eligible: list[tuple[PaperTradeRow, ParsedTicker]] = []
+        for row in rows:
+            try:
+                parsed = parse_ticker(row.market_ticker)
+            except ValueError as err:
+                logger.warning(
+                    "settlement_unparseable_ticker ticker=%s err=%s",
+                    row.market_ticker,
+                    err,
+                )
+                skipped += 1
+                continue
+            if parsed.event_date >= cutoff:
+                continue
+            eligible.append((row, parsed))
+
+        observed_by_date: dict[date, Decimal | None] = {}
+        for _row, parsed in eligible:
+            if parsed.event_date in observed_by_date:
+                continue
+            observed = await app.acis.fetch_daily_high(cfg.station, parsed.event_date)
+            observed_by_date[parsed.event_date] = observed
+            if observed is None:
+                logger.info(
+                    "settlement_pending station=%s date=%s",
+                    cfg.station,
+                    parsed.event_date.isoformat(),
+                )
+
+        for row, parsed in eligible:
+            observed = observed_by_date[parsed.event_date]
+            if observed is None:
+                pending += 1
+                continue
+            paper_trade_value = PaperTrade(
+                intended_at=row.intended_at,
+                market_ticker=row.market_ticker,
+                side=TradeSide(row.side),
+                contracts=row.contracts,
+                simulated_price=row.simulated_price,
+                fee_dollars=row.fee_dollars,
+                fair_at_entry=row.fair_at_entry,
+                strategy=row.strategy,
+            )
+            recon = reconcile_trade(paper_trade_value, parsed, observed)
+            session.add(
+                SimulatedPnl(
+                    paper_trade_id=row.id,
+                    settled_at=now,
+                    outcome="won" if recon.won else "lost",
+                    realized_pnl=recon.realized_pnl,
+                )
+            )
+            reconciled += 1
+
+        session.commit()
+
+    logger.info(
+        "reconcile_settled_trades reconciled=%d pending=%d skipped=%d",
+        reconciled,
+        pending,
+        skipped,
+    )
+    return reconciled
+
+
+async def _settlement_loop(app: App, stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        now = datetime.now(tz=_timezone.utc)
+        await reconcile_settled_trades(app, now)
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=SETTLEMENT_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _forecast_loop(app: App, stop: asyncio.Event) -> None:
     await refresh_forecasts(app)
     while not stop.is_set():
@@ -458,6 +556,7 @@ async def run(app: App, duration: timedelta) -> None:
         asyncio.create_task(_forecast_loop(app, stop), name="forecast_loop"),
         asyncio.create_task(_market_loop(app, stop), name="market_loop"),
         asyncio.create_task(_eval_loop(app, stop), name="eval_loop"),
+        asyncio.create_task(_settlement_loop(app, stop), name="settlement_loop"),
     ]
 
     try:
@@ -495,6 +594,7 @@ def main() -> None:
     session_factory = make_session_factory(engine)
     meteo = OpenMeteoClient()
     kalshi = KalshiDemoClient(settings)
+    acis = ACISClient()
 
     app = App(
         settings=settings,
@@ -502,6 +602,7 @@ def main() -> None:
         session_factory=session_factory,
         meteo=meteo,
         kalshi=kalshi,
+        acis=acis,
         series=args.series,
     )
 

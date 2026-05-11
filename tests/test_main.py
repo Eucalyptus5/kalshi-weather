@@ -15,6 +15,7 @@ from bot.main import (
     _parse_duration,
     evaluate_strategies,
     main,
+    reconcile_settled_trades,
     refresh_forecasts,
     refresh_markets,
 )
@@ -24,6 +25,7 @@ from bot.storage.sqlite import (
     Market,
     OrderbookSnapshot,
     PaperTradeRow,
+    SimulatedPnl,
     make_engine,
     make_session_factory,
 )
@@ -71,7 +73,24 @@ class _StubKalshi:
         return self._orderbooks[ticker]
 
 
-def _make_app(meteo: _StubMeteo | None = None, kalshi: _StubKalshi | None = None) -> App:
+class _StubACIS:
+    def __init__(self, value: Decimal | None) -> None:
+        self.value = value
+        self.calls: list[tuple[str, date]] = []
+
+    async def fetch_daily_high(self, station: str, settled_date: date) -> Decimal | None:
+        self.calls.append((station, settled_date))
+        return self.value
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _make_app(
+    meteo: _StubMeteo | None = None,
+    kalshi: _StubKalshi | None = None,
+    acis: _StubACIS | None = None,
+) -> App:
     from bot.config import Settings
 
     engine = make_engine(":memory:")
@@ -84,6 +103,7 @@ def _make_app(meteo: _StubMeteo | None = None, kalshi: _StubKalshi | None = None
         session_factory=sf,
         meteo=meteo,  # type: ignore[arg-type]
         kalshi=kalshi,  # type: ignore[arg-type]
+        acis=acis if acis is not None else _StubACIS(None),  # type: ignore[arg-type]
         series="KXHIGHDEN",
     )
 
@@ -376,3 +396,158 @@ def test_stations_map_has_kxhighden() -> None:
     cfg = STATIONS["KXHIGHDEN"]
     assert cfg.station == "KDEN"
     assert cfg.timezone == "America/Denver"
+
+
+def _insert_paper_trade(
+    app: App,
+    *,
+    market_ticker: str,
+    side: str,
+    contracts: int,
+    simulated_price: Decimal,
+    fee_dollars: Decimal,
+    fair_at_entry: Decimal,
+    strategy: str,
+    intended_at: datetime,
+) -> int:
+    with app.session_factory() as session:
+        row = PaperTradeRow(
+            intended_at=intended_at,
+            market_ticker=market_ticker,
+            side=side,
+            contracts=contracts,
+            simulated_price=simulated_price,
+            fee_dollars=fee_dollars,
+            fair_at_entry=fair_at_entry,
+            strategy=strategy,
+        )
+        session.add(row)
+        session.commit()
+        return row.id
+
+
+async def test_reconcile_settled_trades_writes_simulated_pnl() -> None:
+    acis = _StubACIS(Decimal("71"))
+    app = _make_app(acis=acis)
+
+    intended = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
+    bracket_id = _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-26MAY05-T70.5-72.5",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=intended,
+    )
+    tail_id = _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-26MAY05-B70.5",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.30"),
+        fee_dollars=Decimal("0.04"),
+        fair_at_entry=Decimal("0.20"),
+        strategy="tails",
+        intended_at=intended,
+    )
+
+    now = datetime(2026, 5, 7, 12, 0, tzinfo=timezone.utc)
+    n = await reconcile_settled_trades(app, now)
+
+    assert n == 2
+    with app.session_factory() as session:
+        rows = session.scalars(select(SimulatedPnl).order_by(SimulatedPnl.paper_trade_id)).all()
+
+    assert {r.paper_trade_id for r in rows} == {bracket_id, tail_id}
+    by_id = {r.paper_trade_id: r for r in rows}
+
+    assert by_id[bracket_id].outcome == "won"
+    assert by_id[bracket_id].realized_pnl == Decimal("5.95")
+    assert by_id[bracket_id].settled_at == now
+
+    assert by_id[tail_id].outcome == "lost"
+    assert by_id[tail_id].realized_pnl == Decimal("-3.04")
+    assert by_id[tail_id].settled_at == now
+
+    assert acis.calls == [("KDEN", date(2026, 5, 5))]
+
+
+async def test_reconcile_settled_trades_skips_eligibility() -> None:
+    acis = _StubACIS(Decimal("71"))
+    app = _make_app(acis=acis)
+
+    _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-26MAY06-T70.5-72.5",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=datetime(2026, 5, 6, 18, 0, tzinfo=timezone.utc),
+    )
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    n = await reconcile_settled_trades(app, now)
+
+    assert n == 0
+    with app.session_factory() as session:
+        rows = session.scalars(select(SimulatedPnl)).all()
+    assert rows == []
+    assert acis.calls == []
+
+
+async def test_reconcile_settled_trades_idempotent() -> None:
+    acis = _StubACIS(Decimal("71"))
+    app = _make_app(acis=acis)
+
+    _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-26MAY05-T70.5-72.5",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+    )
+
+    now = datetime(2026, 5, 7, 12, 0, tzinfo=timezone.utc)
+    first = await reconcile_settled_trades(app, now)
+    second = await reconcile_settled_trades(app, now)
+
+    assert first == 1
+    assert second == 0
+    with app.session_factory() as session:
+        rows = session.scalars(select(SimulatedPnl)).all()
+    assert len(rows) == 1
+
+
+async def test_reconcile_settled_trades_pending_when_acis_returns_none() -> None:
+    acis = _StubACIS(None)
+    app = _make_app(acis=acis)
+
+    _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-26MAY05-T70.5-72.5",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+    )
+
+    now = datetime(2026, 5, 7, 12, 0, tzinfo=timezone.utc)
+    n = await reconcile_settled_trades(app, now)
+
+    assert n == 0
+    with app.session_factory() as session:
+        rows = session.scalars(select(SimulatedPnl)).all()
+    assert rows == []
