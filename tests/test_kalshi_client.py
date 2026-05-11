@@ -92,11 +92,54 @@ async def test_aopen_succeeds_with_valid_pem(rsa_pem: Path) -> None:
         await client.aclose()
 
 
-async def test_list_open_markets_filters_prefix_and_skips_null_priced(rsa_pem: Path) -> None:
+async def test_list_open_markets_sends_series_filter_and_skips_null_priced(
+    rsa_pem: Path,
+) -> None:
+    captured: dict[str, httpx.Request] = {}
     payload = {
         "markets": [
             _market_dict("KXHIGHDEN-26MAY06-T70-75", "0.4500", "0.4300"),
             _market_dict("KXHIGHDEN-26MAY06-T75-80", None, "0.1000"),
+        ],
+        "cursor": "",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["req"] = request
+        return httpx.Response(200, json=payload)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        markets = await client.list_open_markets_for_series("KXHIGHDEN")
+
+    req = captured["req"]
+    assert req.url.params.get("series_ticker") == "KXHIGHDEN"
+    assert req.url.params.get("status") == "open"
+    assert req.url.params.get("limit") == "1000"
+
+    assert len(markets) == 1
+    market = markets[0]
+    assert isinstance(market, KalshiMarket)
+    assert market.ticker == "KXHIGHDEN-26MAY06-T70-75"
+    assert market.series == "KXHIGHDEN"
+    assert market.event_ticker == "KXHIGHDEN-26MAY06"
+    assert market.status == "open"
+    assert market.yes_ask == Decimal("0.4500")
+    assert market.yes_bid == Decimal("0.4300")
+    assert isinstance(market.yes_ask, Decimal)
+    assert isinstance(market.yes_bid, Decimal)
+
+
+async def test_list_open_markets_warns_on_series_mismatch(
+    rsa_pem: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    payload = {
+        "markets": [
+            _market_dict("KXHIGHDEN-26MAY06-T70-75", "0.4500", "0.4300"),
             _market_dict("KXHIGHAUS-26MAY06-T80-85", "0.5000", "0.4900"),
         ],
         "cursor": "",
@@ -111,19 +154,18 @@ async def test_list_open_markets_filters_prefix_and_skips_null_priced(rsa_pem: P
     ) as http:
         client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
         await client.aopen()
+        caplog.set_level(logging.WARNING, logger="bot.kalshi_client")
         markets = await client.list_open_markets_for_series("KXHIGHDEN")
 
     assert len(markets) == 1
-    market = markets[0]
-    assert isinstance(market, KalshiMarket)
-    assert market.ticker == "KXHIGHDEN-26MAY06-T70-75"
-    assert market.series == "KXHIGHDEN"
-    assert market.event_ticker == "KXHIGHDEN-26MAY06"
-    assert market.status == "open"
-    assert market.yes_ask == Decimal("0.4500")
-    assert market.yes_bid == Decimal("0.4300")
-    assert isinstance(market.yes_ask, Decimal)
-    assert isinstance(market.yes_bid, Decimal)
+    assert markets[0].ticker == "KXHIGHDEN-26MAY06-T70-75"
+    mismatch_warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "series_mismatch" in r.getMessage()
+    ]
+    assert len(mismatch_warnings) == 1
+    assert "KXHIGHAUS-26MAY06-T80-85" in mismatch_warnings[0].getMessage()
 
 
 async def test_list_open_markets_parses_close_time_with_z(rsa_pem: Path) -> None:
@@ -207,7 +249,7 @@ async def test_list_open_markets_handles_null_close_time(rsa_pem: Path) -> None:
     assert markets[0].close_time is None
 
 
-async def test_list_open_markets_warns_on_non_empty_cursor(
+async def test_list_open_markets_ignores_non_empty_cursor(
     rsa_pem: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     payload = {
@@ -228,8 +270,10 @@ async def test_list_open_markets_warns_on_non_empty_cursor(
         markets = await client.list_open_markets_for_series("KXHIGHDEN")
 
     assert len(markets) == 1
-    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warning_records) == 1
+    pagination_warnings = [
+        r for r in caplog.records if r.levelno == logging.WARNING and "pagination" in r.getMessage()
+    ]
+    assert pagination_warnings == []
 
 
 async def test_list_open_markets_sends_signing_headers(rsa_pem: Path) -> None:

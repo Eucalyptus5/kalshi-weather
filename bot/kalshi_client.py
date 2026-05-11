@@ -73,12 +73,14 @@ class KalshiDemoClient:
         self._http = None
         self._auth = None
 
-    async def list_open_markets_for_series(self, series_prefix: str) -> list[KalshiMarket]:
+    async def list_open_markets_for_series(self, series_ticker: str) -> list[KalshiMarket]:
         assert self._http is not None and self._auth is not None
         path = "/markets"
         headers = self._auth.create_auth_headers("GET", f"{_API_PREFIX}{path}")
         response = await self._http.get(
-            path, params={"status": "open", "limit": 1000}, headers=headers
+            path,
+            params={"status": "open", "series_ticker": series_ticker, "limit": 1000},
+            headers=headers,
         )
         response.raise_for_status()
         payload = response.json()
@@ -91,9 +93,14 @@ class KalshiDemoClient:
                 skipped_null += 1
                 continue
             ticker = m["ticker"]
-            if not ticker.startswith(series_prefix):
-                continue
             series = ticker.split("-", 1)[0]
+            if series != series_ticker:
+                logger.warning(
+                    "kalshi_list_markets_series_mismatch ticker=%s expected=%s",
+                    ticker,
+                    series_ticker,
+                )
+                continue
             close_time = _parse_close_time(m.get("close_time"))
             out.append(
                 KalshiMarket(
@@ -107,15 +114,9 @@ class KalshiDemoClient:
                 )
             )
 
-        if payload.get("cursor"):
-            logger.warning(
-                "kalshi_list_markets_pagination_unimplemented series=%s",
-                series_prefix,
-            )
-
         logger.info(
             "kalshi_list_markets series=%s total=%d matched=%d skipped_null=%d",
-            series_prefix,
+            series_ticker,
             len(raw_markets),
             len(out),
             skipped_null,

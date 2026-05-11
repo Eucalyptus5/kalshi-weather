@@ -11,6 +11,8 @@ from bot.kalshi_client import KalshiDemoClient
 
 logger = logging.getLogger(__name__)
 
+SERIES: tuple[str, ...] = ("KXHIGHDEN",)
+
 
 async def run() -> None:
     settings = get_settings()
@@ -30,21 +32,23 @@ async def run() -> None:
     client = KalshiDemoClient(settings)
     await client.aopen()
     try:
-        logger.info("fetching open KXHIGH markets")
-        markets = await client.list_open_markets_for_series("KXHIGH")
-        logger.info("fetched %d KXHIGH markets", len(markets))
+        for series in SERIES:
+            logger.info("fetching open %s markets", series)
+            markets = await client.list_open_markets_for_series(series)
+            logger.info("fetched %d %s markets", len(markets), series)
 
-        by_event: dict[str, list] = defaultdict(list)
-        for m in markets:
-            by_event[m.event_ticker].append(m)
+            by_event: dict[str, list] = defaultdict(list)
+            for m in markets:
+                by_event[m.event_ticker].append(m)
 
-        for event_ticker in list(by_event)[:5]:
-            print(f"event {event_ticker}")
-            for market in by_event[event_ticker]:
-                print(
-                    f"  {market.ticker}  yes_bid={market.yes_bid}  yes_ask={market.yes_ask}  "
-                    f"close={market.close_time}"
-                )
+            print(f"series {series}")
+            for event_ticker in list(by_event)[:5]:
+                print(f"  event {event_ticker}")
+                for market in by_event[event_ticker]:
+                    print(
+                        f"    {market.ticker}  yes_bid={market.yes_bid}  "
+                        f"yes_ask={market.yes_ask}  close={market.close_time}"
+                    )
     finally:
         await client.aclose()
 
