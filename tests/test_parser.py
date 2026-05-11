@@ -10,7 +10,7 @@ from bot.markets.parser import ParsedTicker, event_yes_sum_ok, parse_ticker
 
 
 @pytest.mark.parametrize(
-    "ticker, series, event_date, is_monthly, strikes, is_bracket, is_tail",
+    "ticker, series, event_date, is_monthly, strikes, kind, is_bracket, is_tail",
     [
         (
             "KXHIGHDEN-26APR28-T70.5-72.5",
@@ -18,6 +18,7 @@ from bot.markets.parser import ParsedTicker, event_yes_sum_ok, parse_ticker
             date(2026, 4, 28),
             False,
             (Decimal("70.5"), Decimal("72.5")),
+            "bracket",
             True,
             False,
         ),
@@ -27,6 +28,7 @@ from bot.markets.parser import ParsedTicker, event_yes_sum_ok, parse_ticker
             date(2026, 4, 28),
             False,
             (Decimal("70.5"),),
+            "above",
             False,
             True,
         ),
@@ -36,6 +38,7 @@ from bot.markets.parser import ParsedTicker, event_yes_sum_ok, parse_ticker
             date(2026, 4, 28),
             False,
             (Decimal("96.5"),),
+            "above",
             False,
             True,
         ),
@@ -45,6 +48,7 @@ from bot.markets.parser import ParsedTicker, event_yes_sum_ok, parse_ticker
             date(2026, 3, 15),
             False,
             (Decimal("35.5"), Decimal("37.5")),
+            "bracket",
             True,
             False,
         ),
@@ -54,6 +58,7 @@ from bot.markets.parser import ParsedTicker, event_yes_sum_ok, parse_ticker
             date(2026, 7, 4),
             False,
             (Decimal("82.5"), Decimal("84.5")),
+            "bracket",
             True,
             False,
         ),
@@ -63,8 +68,29 @@ from bot.markets.parser import ParsedTicker, event_yes_sum_ok, parse_ticker
             date(2026, 12, 15),
             False,
             (Decimal("30.5"), Decimal("32.5")),
+            "bracket",
             True,
             False,
+        ),
+        (
+            "KXHIGHDEN-26MAY06-T43",
+            "KXHIGHDEN",
+            date(2026, 5, 6),
+            False,
+            (Decimal("43"),),
+            "above",
+            False,
+            True,
+        ),
+        (
+            "KXHIGHDEN-26MAY06-B42.5",
+            "KXHIGHDEN",
+            date(2026, 5, 6),
+            False,
+            (Decimal("42.5"),),
+            "below",
+            False,
+            True,
         ),
     ],
 )
@@ -74,6 +100,7 @@ def test_parse_ticker_golden(
     event_date: date,
     is_monthly: bool,
     strikes: tuple[Decimal, ...],
+    kind: str,
     is_bracket: bool,
     is_tail: bool,
 ) -> None:
@@ -83,6 +110,7 @@ def test_parse_ticker_golden(
     assert parsed.event_date == event_date
     assert parsed.is_monthly is is_monthly
     assert parsed.strikes == strikes
+    assert parsed.kind == kind
     assert parsed.is_bracket is is_bracket
     assert parsed.is_tail is is_tail
     assert parsed.raw == ticker
@@ -118,6 +146,16 @@ def test_monthly_ticker() -> None:
 def test_parse_ticker_rejects_malformed(bad: str) -> None:
     with pytest.raises(ValueError):
         parse_ticker(bad)
+
+
+def test_b_form_rejects_two_strikes() -> None:
+    with pytest.raises(ValueError, match="B-form must be single-strike"):
+        parse_ticker("KXHIGHDEN-26MAY06-B42.5-43.5")
+
+
+def test_strike_component_unknown_prefix() -> None:
+    with pytest.raises(ValueError, match=r"T<number>.*B<number>"):
+        parse_ticker("KXHIGHDEN-26MAY06-X70")
 
 
 def test_event_yes_sum_ok_exact_one() -> None:

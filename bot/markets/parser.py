@@ -4,11 +4,13 @@ import logging
 import re
 from datetime import date
 from decimal import Decimal
-from typing import Sequence
+from typing import Literal, Sequence
 
 from pydantic import BaseModel, ConfigDict
 
 logger = logging.getLogger(__name__)
+
+TickerKind = Literal["above", "below", "bracket"]
 
 _MONTHS = {
     "JAN": 1,
@@ -27,7 +29,8 @@ _MONTHS = {
 
 _DAILY_DATE = re.compile(r"^(\d{2})([A-Z]{3})(\d{2})$")
 _MONTHLY_DATE = re.compile(r"^(\d{2})([A-Z]{3})$")
-_LOW_STRIKE = re.compile(r"^T(\d+(?:\.\d+)?)$")
+_ABOVE_STRIKE = re.compile(r"^T(\d+(?:\.\d+)?)$")
+_BELOW_STRIKE = re.compile(r"^B(\d+(?:\.\d+)?)$")
 _HIGH_STRIKE = re.compile(r"^\d+(?:\.\d+)?$")
 
 
@@ -38,6 +41,7 @@ class ParsedTicker(BaseModel):
     event_date: date
     is_monthly: bool
     strikes: tuple[Decimal, ...]
+    kind: TickerKind
     raw: str
 
     @property
@@ -65,26 +69,39 @@ def parse_ticker(ticker: str) -> ParsedTicker:
     series = parts[0]
     event_date, is_monthly = _parse_date(parts[1], ticker)
 
-    low_match = _LOW_STRIKE.match(parts[2])
-    if not low_match:
-        raise ValueError(f"strike component must match T<number>: got {parts[2]!r} in {ticker!r}")
-    low = Decimal(low_match.group(1))
+    below_match = _BELOW_STRIKE.match(parts[2])
+    above_match = _ABOVE_STRIKE.match(parts[2])
 
-    if len(parts) == 3:
-        strikes: tuple[Decimal, ...] = (low,)
+    if below_match:
+        if len(parts) == 4:
+            raise ValueError(f"B-form must be single-strike: got {ticker!r}")
+        threshold = Decimal(below_match.group(1))
+        strikes: tuple[Decimal, ...] = (threshold,)
+        kind: TickerKind = "below"
+    elif above_match:
+        low = Decimal(above_match.group(1))
+        if len(parts) == 3:
+            strikes = (low,)
+            kind = "above"
+        else:
+            if not _HIGH_STRIKE.match(parts[3]):
+                raise ValueError(f"high strike must match <number>: got {parts[3]!r} in {ticker!r}")
+            high = Decimal(parts[3])
+            if high <= low:
+                raise ValueError(f"high strike {high} must exceed low {low} in {ticker!r}")
+            strikes = (low, high)
+            kind = "bracket"
     else:
-        if not _HIGH_STRIKE.match(parts[3]):
-            raise ValueError(f"high strike must match <number>: got {parts[3]!r} in {ticker!r}")
-        high = Decimal(parts[3])
-        if high <= low:
-            raise ValueError(f"high strike {high} must exceed low {low} in {ticker!r}")
-        strikes = (low, high)
+        raise ValueError(
+            f"strike component must match T<number> or B<number>: got {parts[2]!r} in {ticker!r}"
+        )
 
     return ParsedTicker(
         series=series,
         event_date=event_date,
         is_monthly=is_monthly,
         strikes=strikes,
+        kind=kind,
         raw=ticker,
     )
 
