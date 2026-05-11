@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -7,12 +9,14 @@ import numpy as np
 import pytest
 from sqlalchemy import select
 
+import bot.main as bot_main
 from bot.forecast.open_meteo import StationForecast
 from bot.kalshi_client import KalshiMarket, KalshiOrderbook
 from bot.main import (
     STATIONS,
     App,
     _parse_duration,
+    _settlement_loop,
     evaluate_strategies,
     main,
     reconcile_settled_trades,
@@ -551,3 +555,57 @@ async def test_reconcile_settled_trades_pending_when_acis_returns_none() -> None
     with app.session_factory() as session:
         rows = session.scalars(select(SimulatedPnl)).all()
     assert rows == []
+
+
+class _FailingACIS:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def fetch_daily_high(self, station: str, settled_date: date) -> Decimal | None:
+        self.calls += 1
+        raise RuntimeError("simulated transient failure")
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_settlement_loop_logs_and_continues_on_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    acis = _FailingACIS()
+    app = _make_app(acis=acis)  # type: ignore[arg-type]
+
+    _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-25JAN02-T70.5-72.5",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=datetime(2025, 1, 2, 18, 0, tzinfo=timezone.utc),
+    )
+
+    monkeypatch.setattr(bot_main, "SETTLEMENT_INTERVAL_SECONDS", 0.05)
+
+    stop = asyncio.Event()
+    caplog.set_level(logging.ERROR, logger="bot.main")
+
+    task = asyncio.create_task(_settlement_loop(app, stop))
+    for _ in range(200):
+        if acis.calls >= 1:
+            break
+        await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert task.exception() is None
+    matches = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR
+        and "loop_iteration_failed" in r.getMessage()
+        and "name=settlement_loop" in r.getMessage()
+    ]
+    assert matches, "expected an ERROR log with loop_iteration_failed name=settlement_loop"

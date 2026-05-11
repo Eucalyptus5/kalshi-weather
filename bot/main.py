@@ -417,7 +417,10 @@ def _next_gfs_cycle(now: datetime) -> datetime:
 
 async def _market_loop(app: App, stop: asyncio.Event) -> None:
     while not stop.is_set():
-        await refresh_markets(app)
+        try:
+            await refresh_markets(app)
+        except Exception:
+            logger.exception("loop_iteration_failed name=market_loop")
         try:
             await asyncio.wait_for(stop.wait(), timeout=MARKET_REFRESH_INTERVAL)
         except asyncio.TimeoutError:
@@ -426,8 +429,11 @@ async def _market_loop(app: App, stop: asyncio.Event) -> None:
 
 async def _eval_loop(app: App, stop: asyncio.Event) -> None:
     while not stop.is_set():
-        now = datetime.now(tz=_timezone.utc)
-        await evaluate_strategies(app, now)
+        try:
+            now = datetime.now(tz=_timezone.utc)
+            await evaluate_strategies(app, now)
+        except Exception:
+            logger.exception("loop_iteration_failed name=eval_loop")
         try:
             await asyncio.wait_for(stop.wait(), timeout=EVAL_INTERVAL)
         except asyncio.TimeoutError:
@@ -518,8 +524,11 @@ async def reconcile_settled_trades(app: App, now: datetime) -> int:
 
 async def _settlement_loop(app: App, stop: asyncio.Event) -> None:
     while not stop.is_set():
-        now = datetime.now(tz=_timezone.utc)
-        await reconcile_settled_trades(app, now)
+        try:
+            now = datetime.now(tz=_timezone.utc)
+            await reconcile_settled_trades(app, now)
+        except Exception:
+            logger.exception("loop_iteration_failed name=settlement_loop")
         try:
             await asyncio.wait_for(stop.wait(), timeout=SETTLEMENT_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
@@ -527,7 +536,10 @@ async def _settlement_loop(app: App, stop: asyncio.Event) -> None:
 
 
 async def _forecast_loop(app: App, stop: asyncio.Event) -> None:
-    await refresh_forecasts(app)
+    try:
+        await refresh_forecasts(app)
+    except Exception:
+        logger.exception("loop_iteration_failed name=forecast_loop")
     while not stop.is_set():
         next_cycle = _next_gfs_cycle(datetime.now(tz=_timezone.utc))
         delay = (next_cycle - datetime.now(tz=_timezone.utc)).total_seconds()
@@ -538,7 +550,10 @@ async def _forecast_loop(app: App, stop: asyncio.Event) -> None:
                 pass
         if stop.is_set():
             return
-        await refresh_forecasts(app)
+        try:
+            await refresh_forecasts(app)
+        except Exception:
+            logger.exception("loop_iteration_failed name=forecast_loop")
 
 
 async def run(app: App, duration: timedelta) -> None:

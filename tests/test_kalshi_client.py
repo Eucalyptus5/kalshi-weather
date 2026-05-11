@@ -331,7 +331,7 @@ async def test_list_open_markets_raises_on_500(rsa_pem: Path) -> None:
 
 async def test_get_orderbook_reconstructs_asks(rsa_pem: Path) -> None:
     payload = {
-        "orderbook": {
+        "orderbook_fp": {
             "yes_dollars": [["0.30", "100"]],
             "no_dollars": [["0.55", "50"]],
         }
@@ -359,7 +359,7 @@ async def test_get_orderbook_reconstructs_asks(rsa_pem: Path) -> None:
 
 async def test_get_orderbook_picks_best_bid_across_levels(rsa_pem: Path) -> None:
     payload = {
-        "orderbook": {
+        "orderbook_fp": {
             "yes_dollars": [["0.20", "100"], ["0.30", "50"], ["0.25", "10"]],
             "no_dollars": [["0.55", "50"], ["0.50", "10"]],
         }
@@ -382,7 +382,7 @@ async def test_get_orderbook_picks_best_bid_across_levels(rsa_pem: Path) -> None
 
 async def test_get_orderbook_round_trips_six_decimals(rsa_pem: Path) -> None:
     payload = {
-        "orderbook": {
+        "orderbook_fp": {
             "yes_dollars": [["0.987654", "1"]],
             "no_dollars": [["0.001000", "1"]],
         }
@@ -404,7 +404,7 @@ async def test_get_orderbook_round_trips_six_decimals(rsa_pem: Path) -> None:
 
 
 async def test_get_orderbook_empty_book_returns_zero_bids(rsa_pem: Path) -> None:
-    payload = {"orderbook": {"yes_dollars": None, "no_dollars": None}}
+    payload = {"orderbook_fp": {"yes_dollars": None, "no_dollars": None}}
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=payload)
@@ -430,7 +430,7 @@ async def test_get_orderbook_hits_absolute_path(rsa_pem: Path) -> None:
         captured["req"] = request
         return httpx.Response(
             200,
-            json={"orderbook": {"yes_dollars": None, "no_dollars": None}},
+            json={"orderbook_fp": {"yes_dollars": None, "no_dollars": None}},
         )
 
     transport = httpx.MockTransport(handler)
@@ -442,6 +442,50 @@ async def test_get_orderbook_hits_absolute_path(rsa_pem: Path) -> None:
         await client.get_orderbook("KXHIGHDEN-26MAY06-T70-75")
 
     assert captured["req"].url.path == "/trade-api/v2/markets/KXHIGHDEN-26MAY06-T70-75/orderbook"
+
+
+async def test_get_orderbook_falls_back_to_legacy_orderbook_key(rsa_pem: Path) -> None:
+    payload = {
+        "orderbook": {
+            "yes_dollars": [["0.30", "100"]],
+            "no_dollars": [["0.55", "50"]],
+        }
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        book = await client.get_orderbook("KXHIGHDEN-26MAY06-T70-75")
+
+    assert isinstance(book, KalshiOrderbook)
+    assert book.yes_bid == Decimal("0.30")
+    assert book.no_bid == Decimal("0.55")
+    assert book.yes_ask == Decimal("0.45")
+    assert book.no_ask == Decimal("0.70")
+
+
+async def test_get_orderbook_raises_when_both_keys_missing(rsa_pem: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"foo": "bar"})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        with pytest.raises(KeyError) as excinfo:
+            await client.get_orderbook("KXHIGHDEN-26MAY06-T70-75")
+
+    msg = str(excinfo.value)
+    assert "orderbook" in msg
+    assert "KXHIGHDEN-26MAY06-T70-75" in msg
 
 
 async def test_default_client_is_closed_by_aclose(

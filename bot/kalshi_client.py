@@ -130,7 +130,9 @@ class KalshiDemoClient:
         response = await self._http.get(path, headers=headers)
         response.raise_for_status()
         payload = response.json()
-        ob = payload["orderbook"]
+        ob = payload.get("orderbook_fp") or payload.get("orderbook")
+        if ob is None:
+            raise KeyError(f"orderbook response missing orderbook_fp / orderbook key: {ticker}")
 
         yes_bid = _best_price(ob.get("yes_dollars"))
         no_bid = _best_price(ob.get("no_dollars"))
