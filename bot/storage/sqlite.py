@@ -159,9 +159,12 @@ def make_engine(db_path: Path | str) -> Engine:
     engine = create_engine(url, future=True)
 
     @event.listens_for(engine, "connect")
-    def _enable_fk(dbapi_conn, _connection_record):  # type: ignore[no-untyped-def]
+    def _set_pragmas(dbapi_conn, _connection_record):  # type: ignore[no-untyped-def]
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
 
     return engine

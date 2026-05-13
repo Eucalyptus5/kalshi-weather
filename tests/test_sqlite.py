@@ -309,6 +309,37 @@ def test_named_indexes_exist(engine):
         assert names <= present, f"{table}: missing {names - present}"
 
 
+def test_make_engine_enables_wal_on_disk_db(tmp_path):
+    eng = make_engine(tmp_path / "test.db")
+    with eng.connect() as conn:
+        mode = conn.exec_driver_sql("PRAGMA journal_mode").scalar()
+    eng.dispose()
+    assert mode == "wal"
+
+
+def test_make_engine_sets_synchronous_normal(tmp_path):
+    eng = make_engine(tmp_path / "test.db")
+    with eng.connect() as conn:
+        sync = conn.exec_driver_sql("PRAGMA synchronous").scalar()
+    eng.dispose()
+    assert sync == 1
+
+
+def test_make_engine_sets_busy_timeout(tmp_path):
+    eng = make_engine(tmp_path / "test.db")
+    with eng.connect() as conn:
+        timeout = conn.exec_driver_sql("PRAGMA busy_timeout").scalar()
+    eng.dispose()
+    assert timeout == 5000
+
+
+def test_make_engine_in_memory_db_pragmas_are_safe():
+    eng = make_engine(":memory:")
+    with eng.connect() as conn:
+        conn.exec_driver_sql("PRAGMA journal_mode").scalar()
+    eng.dispose()
+
+
 def test_alembic_upgrade_head_creates_all_tables(tmp_path):
     db_file = tmp_path / "state.db"
     ini_path = tmp_path / "alembic.ini"
