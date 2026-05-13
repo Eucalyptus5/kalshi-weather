@@ -54,6 +54,7 @@ SETTLEMENT_INTERVAL_SECONDS: float = 6 * 3600
 _SETTLEMENT_GRACE_DAYS: int = 1
 GFS_CYCLES_HOURS: tuple[int, ...] = (0, 6, 12, 18)
 GFS_CYCLE_OFFSET_MINUTES = 30
+FORECAST_RETRY_INTERVAL_SECONDS: float = 60.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -536,24 +537,26 @@ async def _settlement_loop(app: App, stop: asyncio.Event) -> None:
 
 
 async def _forecast_loop(app: App, stop: asyncio.Event) -> None:
-    try:
-        await refresh_forecasts(app)
-    except Exception:
-        logger.exception("loop_iteration_failed name=forecast_loop")
+    last_succeeded = False
     while not stop.is_set():
-        next_cycle = _next_gfs_cycle(datetime.now(tz=_timezone.utc))
-        delay = (next_cycle - datetime.now(tz=_timezone.utc)).total_seconds()
+        try:
+            await refresh_forecasts(app)
+            last_succeeded = True
+        except Exception:
+            last_succeeded = False
+            logger.exception("loop_iteration_failed name=forecast_loop")
+        if stop.is_set():
+            return
+        if last_succeeded:
+            next_cycle = _next_gfs_cycle(datetime.now(tz=_timezone.utc))
+            delay = (next_cycle - datetime.now(tz=_timezone.utc)).total_seconds()
+        else:
+            delay = FORECAST_RETRY_INTERVAL_SECONDS
         if delay > 0:
             try:
                 await asyncio.wait_for(stop.wait(), timeout=delay)
             except asyncio.TimeoutError:
                 pass
-        if stop.is_set():
-            return
-        try:
-            await refresh_forecasts(app)
-        except Exception:
-            logger.exception("loop_iteration_failed name=forecast_loop")
 
 
 async def run(app: App, duration: timedelta) -> None:

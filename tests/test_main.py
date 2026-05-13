@@ -4,6 +4,7 @@ import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 import numpy as np
 import pytest
@@ -15,6 +16,7 @@ from bot.kalshi_client import KalshiMarket, KalshiOrderbook
 from bot.main import (
     STATIONS,
     App,
+    _forecast_loop,
     _parse_duration,
     _settlement_loop,
     evaluate_strategies,
@@ -609,3 +611,35 @@ async def test_settlement_loop_logs_and_continues_on_failure(
         and "name=settlement_loop" in r.getMessage()
     ]
     assert matches, "expected an ERROR log with loop_iteration_failed name=settlement_loop"
+
+
+async def test_forecast_loop_retries_quickly_on_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    app = _make_app()
+
+    monkeypatch.setattr(bot_main, "FORECAST_RETRY_INTERVAL_SECONDS", 0.05)
+    refresh_mock = AsyncMock(side_effect=[RuntimeError("transient"), 7, 7, 7, 7])
+    monkeypatch.setattr(bot_main, "refresh_forecasts", refresh_mock)
+
+    stop = asyncio.Event()
+    caplog.set_level(logging.ERROR, logger="bot.main")
+
+    task = asyncio.create_task(_forecast_loop(app, stop))
+    for _ in range(200):
+        if refresh_mock.await_count >= 2:
+            break
+        await asyncio.sleep(0.01)
+    stop.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert task.exception() is None
+    assert refresh_mock.await_count >= 2
+    matches = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR
+        and "loop_iteration_failed" in r.getMessage()
+        and "name=forecast_loop" in r.getMessage()
+    ]
+    assert matches, "expected an ERROR log with loop_iteration_failed name=forecast_loop"

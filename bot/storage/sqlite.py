@@ -156,7 +156,7 @@ def make_engine(db_path: Path | str) -> Engine:
     else:
         url = f"sqlite:///{db_path}"
 
-    engine = create_engine(url, future=True)
+    engine = create_engine(url, future=True, connect_args={"timeout": 30})
 
     @event.listens_for(engine, "connect")
     def _set_pragmas(dbapi_conn, _connection_record):  # type: ignore[no-untyped-def]

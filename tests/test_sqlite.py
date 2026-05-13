@@ -333,6 +333,15 @@ def test_make_engine_sets_busy_timeout(tmp_path):
     assert timeout == 5000
 
 
+def test_make_engine_sets_connect_timeout(tmp_path):
+    eng = make_engine(tmp_path / "test.db")
+    creator = eng.pool._creator
+    closure = dict(zip(creator.__code__.co_freevars, creator.__closure__ or ()))
+    cparams = closure["cparams"].cell_contents
+    eng.dispose()
+    assert cparams.get("timeout") == 30
+
+
 def test_make_engine_in_memory_db_pragmas_are_safe():
     eng = make_engine(":memory:")
     with eng.connect() as conn:
