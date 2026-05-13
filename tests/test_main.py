@@ -613,6 +613,78 @@ async def test_settlement_loop_logs_and_continues_on_failure(
     assert matches, "expected an ERROR log with loop_iteration_failed name=settlement_loop"
 
 
+async def test_db_lock_serializes_concurrent_writes(monkeypatch: pytest.MonkeyPatch) -> None:
+    meteo = _StubMeteo(_forecast_with_two_days())
+
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    market = KalshiMarket(
+        ticker="KXHIGHDEN-26MAY07-T70-75",
+        event_ticker="KXHIGHDEN-26MAY07",
+        series="KXHIGHDEN",
+        status="open",
+        close_time=close_at,
+        yes_ask=Decimal("0.45"),
+        yes_bid=Decimal("0.43"),
+    )
+    book = KalshiOrderbook(
+        ticker=market.ticker,
+        yes_ask=Decimal("0.45"),
+        yes_bid=Decimal("0.43"),
+        no_ask=Decimal("0.57"),
+        no_bid=Decimal("0.55"),
+        snapshot_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+    )
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+
+    assert isinstance(app.db_lock, asyncio.Lock)
+
+    in_flight = 0
+    overlap_detected = False
+
+    real_persist = bot_main._persist_forecast
+
+    def slow_persist(app_arg: App, forecast: StationForecast) -> int:
+        nonlocal in_flight, overlap_detected
+        in_flight += 1
+        if in_flight > 1:
+            overlap_detected = True
+        try:
+            return real_persist(app_arg, forecast)
+        finally:
+            in_flight -= 1
+
+    async def slow_get_orderbook(ticker: str) -> KalshiOrderbook:
+        await asyncio.sleep(0.02)
+        return book
+
+    monkeypatch.setattr(bot_main, "_persist_forecast", slow_persist)
+    monkeypatch.setattr(kalshi, "get_orderbook", slow_get_orderbook)
+
+    async def forecast_writer() -> int:
+        n = 0
+        for _ in range(5):
+            n = await refresh_forecasts(app)
+        return n
+
+    async def market_writer() -> int:
+        n = 0
+        for _ in range(5):
+            n = await refresh_markets(app)
+        return n
+
+    f, m = await asyncio.gather(forecast_writer(), market_writer())
+    assert f == 2
+    assert m == 1
+    assert not overlap_detected
+
+    await asyncio.wait_for(app.db_lock.acquire(), timeout=0.05)
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(app.db_lock.acquire(), timeout=0.05)
+    app.db_lock.release()
+
+
 async def test_forecast_loop_retries_quickly_on_failure(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

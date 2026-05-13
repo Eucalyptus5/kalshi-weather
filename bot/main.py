@@ -84,6 +84,7 @@ class App:
     kalshi: KalshiDemoClient
     acis: ACISClient
     series: str
+    db_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     forecast_cdfs: dict[tuple[str, date], EnsembleCDF] = field(default_factory=dict)
     ensemble_spreads: dict[tuple[str, date], Decimal] = field(default_factory=dict)
     forecast_run_times: dict[tuple[str, date], datetime] = field(default_factory=dict)
@@ -121,7 +122,8 @@ async def refresh_forecasts(app: App) -> int:
         longitude=cfg.longitude,
         timezone=cfg.timezone,
     )
-    return _persist_forecast(app, forecast)
+    async with app.db_lock:
+        return _persist_forecast(app, forecast)
 
 
 def _persist_forecast(app: App, forecast: StationForecast) -> int:
@@ -163,47 +165,51 @@ def _persist_forecast(app: App, forecast: StationForecast) -> int:
 async def refresh_markets(app: App) -> int:
     markets = await app.kalshi.list_open_markets_for_series(app.series)
     now = datetime.now(tz=_timezone.utc)
+    pairs: list[tuple[KalshiMarket, KalshiOrderbook]] = []
+    for m in markets:
+        book = await app.kalshi.get_orderbook(m.ticker)
+        pairs.append((m, book))
     n = 0
-    with app.session_factory() as session:
-        for m in markets:
-            book = await app.kalshi.get_orderbook(m.ticker)
-            parsed = parse_ticker(m.ticker)
-            existing = session.scalars(
-                select(Market).where(Market.ticker == m.ticker)
-            ).one_or_none()
-            if existing is None:
+    async with app.db_lock:
+        with app.session_factory() as session:
+            for m, book in pairs:
+                parsed = parse_ticker(m.ticker)
+                existing = session.scalars(
+                    select(Market).where(Market.ticker == m.ticker)
+                ).one_or_none()
+                if existing is None:
+                    session.add(
+                        Market(
+                            ticker=m.ticker,
+                            series=parsed.series,
+                            event_date=parsed.event_date,
+                            is_monthly=parsed.is_monthly,
+                            is_tail=parsed.is_tail,
+                            strike_low=parsed.strikes[0],
+                            strike_high=parsed.strikes[1] if parsed.is_bracket else None,
+                            close_time=m.close_time,
+                            status=m.status,
+                            last_seen_at=now,
+                        )
+                    )
+                else:
+                    existing.status = m.status
+                    existing.close_time = m.close_time
+                    existing.last_seen_at = now
                 session.add(
-                    Market(
+                    OrderbookSnapshot(
                         ticker=m.ticker,
-                        series=parsed.series,
-                        event_date=parsed.event_date,
-                        is_monthly=parsed.is_monthly,
-                        is_tail=parsed.is_tail,
-                        strike_low=parsed.strikes[0],
-                        strike_high=parsed.strikes[1] if parsed.is_bracket else None,
-                        close_time=m.close_time,
-                        status=m.status,
-                        last_seen_at=now,
+                        snapshot_at=book.snapshot_at,
+                        yes_ask=book.yes_ask,
+                        yes_bid=book.yes_bid,
+                        no_ask=book.no_ask,
+                        no_bid=book.no_bid,
                     )
                 )
-            else:
-                existing.status = m.status
-                existing.close_time = m.close_time
-                existing.last_seen_at = now
-            session.add(
-                OrderbookSnapshot(
-                    ticker=m.ticker,
-                    snapshot_at=book.snapshot_at,
-                    yes_ask=book.yes_ask,
-                    yes_bid=book.yes_bid,
-                    no_ask=book.no_ask,
-                    no_bid=book.no_bid,
-                )
-            )
-            app.latest_markets[m.ticker] = m
-            app.latest_orderbooks[m.ticker] = book
-            n += 1
-        session.commit()
+                app.latest_markets[m.ticker] = m
+                app.latest_orderbooks[m.ticker] = book
+                n += 1
+            session.commit()
     logger.info("refresh_markets series=%s pairs=%d", app.series, n)
     return n
 
@@ -211,69 +217,70 @@ async def refresh_markets(app: App) -> int:
 async def evaluate_strategies(app: App, now: datetime) -> int:
     cfg = STATIONS[app.series]
     n_trades = 0
-    with app.session_factory() as session:
-        for ticker, market in app.latest_markets.items():
-            book = app.latest_orderbooks.get(ticker)
-            if book is None:
-                continue
-            parsed = parse_ticker(ticker)
-            if parsed.is_tail:
-                logger.debug("skip_tail ticker=%s", ticker)
-                continue
+    async with app.db_lock:
+        with app.session_factory() as session:
+            for ticker, market in app.latest_markets.items():
+                book = app.latest_orderbooks.get(ticker)
+                if book is None:
+                    continue
+                parsed = parse_ticker(ticker)
+                if parsed.is_tail:
+                    logger.debug("skip_tail ticker=%s", ticker)
+                    continue
 
-            cdf_key = (cfg.station, parsed.event_date)
-            cdf = app.forecast_cdfs.get(cdf_key)
-            if cdf is None:
-                continue
-            spread = app.ensemble_spreads[cdf_key]
-            run_time = app.forecast_run_times[cdf_key]
+                cdf_key = (cfg.station, parsed.event_date)
+                cdf = app.forecast_cdfs.get(cdf_key)
+                if cdf is None:
+                    continue
+                spread = app.ensemble_spreads[cdf_key]
+                run_time = app.forecast_run_times[cdf_key]
 
-            lo = float(parsed.strikes[0])
-            hi = float(parsed.strikes[1])
-            fair_yes = Decimal(str(cdf.prob_range(lo, hi)))
+                lo = float(parsed.strikes[0])
+                hi = float(parsed.strikes[1])
+                fair_yes = Decimal(str(cdf.prob_range(lo, hi)))
 
-            start_utc, end_utc = observation_window(cfg.timezone, parsed.event_date)
-            is_same_day = start_utc <= now < end_utc
+                start_utc, end_utc = observation_window(cfg.timezone, parsed.event_date)
+                is_same_day = start_utc <= now < end_utc
 
-            mid = (book.yes_ask + book.yes_bid) / Decimal("2")
+                mid = (book.yes_ask + book.yes_bid) / Decimal("2")
 
-            for intent in _build_intents(
-                ticker=ticker,
-                market=market,
-                book=book,
-                fair_yes=fair_yes,
-                spread=spread,
-                mid=mid,
-                is_same_day=is_same_day,
-                now=now,
-            ):
-                gate_ctx = _gate_ctx_for(
-                    intent=intent,
+                for intent in _build_intents(
+                    ticker=ticker,
                     market=market,
+                    book=book,
                     fair_yes=fair_yes,
                     spread=spread,
                     mid=mid,
-                    run_time=run_time,
+                    is_same_day=is_same_day,
                     now=now,
-                )
-                check = evaluate_gates(gate_ctx, GateMode.PAPER)
-                for failure in check.failures:
-                    session.add(
-                        GateFailure(
-                            evaluated_at=now,
-                            gate_name=failure.name,
-                            reason=failure.reason or "",
-                            mode="paper",
-                            market_ticker=ticker,
-                        )
+                ):
+                    gate_ctx = _gate_ctx_for(
+                        intent=intent,
+                        market=market,
+                        fair_yes=fair_yes,
+                        spread=spread,
+                        mid=mid,
+                        run_time=run_time,
+                        now=now,
                     )
-                if not check.overall_passed:
-                    continue
+                    check = evaluate_gates(gate_ctx, GateMode.PAPER)
+                    for failure in check.failures:
+                        session.add(
+                            GateFailure(
+                                evaluated_at=now,
+                                gate_name=failure.name,
+                                reason=failure.reason or "",
+                                mode="paper",
+                                market_ticker=ticker,
+                            )
+                        )
+                    if not check.overall_passed:
+                        continue
 
-                trade = simulate_taker_fill(intent, Orderbook(book.yes_ask, book.yes_bid), now)
-                session.add(_paper_trade_row(trade))
-                n_trades += 1
-        session.commit()
+                    trade = simulate_taker_fill(intent, Orderbook(book.yes_ask, book.yes_bid), now)
+                    session.add(_paper_trade_row(trade))
+                    n_trades += 1
+            session.commit()
     logger.info("evaluate_strategies trades=%d markets=%d", n_trades, len(app.latest_markets))
     return n_trades
 
@@ -456,63 +463,66 @@ async def reconcile_settled_trades(app: App, now: datetime) -> int:
             .order_by(PaperTradeRow.id.asc())
         )
         rows = list(session.scalars(unreconciled_q).all())
+        for r in rows:
+            session.expunge(r)
 
-        eligible: list[tuple[PaperTradeRow, ParsedTicker]] = []
-        for row in rows:
-            try:
-                parsed = parse_ticker(row.market_ticker)
-            except ValueError as err:
-                logger.warning(
-                    "settlement_unparseable_ticker ticker=%s err=%s",
-                    row.market_ticker,
-                    err,
-                )
-                skipped += 1
-                continue
-            if parsed.event_date >= cutoff:
-                continue
-            eligible.append((row, parsed))
-
-        observed_by_date: dict[date, Decimal | None] = {}
-        for _row, parsed in eligible:
-            if parsed.event_date in observed_by_date:
-                continue
-            observed = await app.acis.fetch_daily_high(cfg.station, parsed.event_date)
-            observed_by_date[parsed.event_date] = observed
-            if observed is None:
-                logger.info(
-                    "settlement_pending station=%s date=%s",
-                    cfg.station,
-                    parsed.event_date.isoformat(),
-                )
-
-        for row, parsed in eligible:
-            observed = observed_by_date[parsed.event_date]
-            if observed is None:
-                pending += 1
-                continue
-            paper_trade_value = PaperTrade(
-                intended_at=row.intended_at,
-                market_ticker=row.market_ticker,
-                side=TradeSide(row.side),
-                contracts=row.contracts,
-                simulated_price=row.simulated_price,
-                fee_dollars=row.fee_dollars,
-                fair_at_entry=row.fair_at_entry,
-                strategy=row.strategy,
+    eligible: list[tuple[PaperTradeRow, ParsedTicker]] = []
+    for row in rows:
+        try:
+            parsed = parse_ticker(row.market_ticker)
+        except ValueError as err:
+            logger.warning(
+                "settlement_unparseable_ticker ticker=%s err=%s",
+                row.market_ticker,
+                err,
             )
-            recon = reconcile_trade(paper_trade_value, parsed, observed)
-            session.add(
-                SimulatedPnl(
-                    paper_trade_id=row.id,
-                    settled_at=now,
-                    outcome="won" if recon.won else "lost",
-                    realized_pnl=recon.realized_pnl,
-                )
-            )
-            reconciled += 1
+            skipped += 1
+            continue
+        if parsed.event_date >= cutoff:
+            continue
+        eligible.append((row, parsed))
 
-        session.commit()
+    observed_by_date: dict[date, Decimal | None] = {}
+    unique_dates = sorted({parsed.event_date for _row, parsed in eligible})
+    for event_date in unique_dates:
+        observed = await app.acis.fetch_daily_high(cfg.station, event_date)
+        observed_by_date[event_date] = observed
+        if observed is None:
+            logger.info(
+                "settlement_pending station=%s date=%s",
+                cfg.station,
+                event_date.isoformat(),
+            )
+
+    async with app.db_lock:
+        with app.session_factory() as session:
+            for row, parsed in eligible:
+                observed = observed_by_date[parsed.event_date]
+                if observed is None:
+                    pending += 1
+                    continue
+                paper_trade_value = PaperTrade(
+                    intended_at=row.intended_at,
+                    market_ticker=row.market_ticker,
+                    side=TradeSide(row.side),
+                    contracts=row.contracts,
+                    simulated_price=row.simulated_price,
+                    fee_dollars=row.fee_dollars,
+                    fair_at_entry=row.fair_at_entry,
+                    strategy=row.strategy,
+                )
+                recon = reconcile_trade(paper_trade_value, parsed, observed)
+                session.add(
+                    SimulatedPnl(
+                        paper_trade_id=row.id,
+                        settled_at=now,
+                        outcome="won" if recon.won else "lost",
+                        realized_pnl=recon.realized_pnl,
+                    )
+                )
+                reconciled += 1
+
+            session.commit()
 
     logger.info(
         "reconcile_settled_trades reconciled=%d pending=%d skipped=%d",
