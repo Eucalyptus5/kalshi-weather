@@ -380,13 +380,13 @@ async def test_evaluate_strategies_skips_tail_markets() -> None:
 def test_cli_rejects_unsupported_series(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         "sys.argv",
-        ["bot.main", "--mode=paper", "--series=KXHIGHAUS", "--duration=1m"],
+        ["bot.main", "--mode=paper", "--series=KXHIGHFAKE", "--duration=1m"],
     )
     with pytest.raises(SystemExit) as excinfo:
         main()
     assert excinfo.value.code != 0
     captured = capsys.readouterr()
-    assert "KXHIGHAUS" in (captured.err + captured.out)
+    assert "KXHIGHFAKE" in (captured.err + captured.out)
 
 
 def test_cli_rejects_non_paper_mode(monkeypatch) -> None:
