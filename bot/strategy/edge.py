@@ -54,12 +54,12 @@ def evaluate(
     kelly_multiplier: Decimal = KELLY_MULTIPLIER,
 ) -> EdgeSignal:
     mid = (ctx.yes_ask + ctx.yes_bid) / Decimal("2")
+    if ctx.is_blacklisted:
+        return _skip("blacklisted")
     if abs(ctx.fair_yes - mid) <= EDGE_THRESHOLD:
         return _skip("edge_too_small")
     if ctx.ensemble_spread <= min_spread:
         return _skip("spread_too_tight")
-    if ctx.is_blacklisted:
-        return _skip("blacklisted")
     if ctx.is_same_day:
         return _skip("same_day")
     if ctx.nbm_divergence is not None and ctx.nbm_divergence > NBM_DIVERGENCE_LIMIT:

@@ -198,7 +198,6 @@ def test_first_skip_wins_edge_before_spread() -> None:
             yes_bid=Decimal("0.20"),
             fair_yes=Decimal("0.38"),
             ensemble_spread=Decimal("0.5"),
-            is_blacklisted=True,
         )
     )
     assert sig.action is EdgeAction.SKIP
