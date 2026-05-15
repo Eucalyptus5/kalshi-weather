@@ -1228,6 +1228,71 @@ async def test_reconcile_settled_trades_routes_per_series_station() -> None:
     assert ("KNYC", date(2026, 5, 5)) in called
 
 
+class _FlakyACIS:
+    def __init__(self, results: list[Decimal | Exception]) -> None:
+        self._results = list(results)
+        self.calls: list[tuple[str, date]] = []
+
+    async def fetch_daily_high(self, station: str, settled_date: date) -> Decimal | None:
+        self.calls.append((station, settled_date))
+        result = self._results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_acis_http_error_logs_and_continues(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    acis = _FlakyACIS([httpx.RequestError("boom"), Decimal("82")])
+    app = _make_app(acis=acis, series_list=("KXHIGHDEN", "KXHIGHNY"))
+
+    intended = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
+    den_id = _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-26MAY05-T70-72",
+        side="buy_yes",
+        contracts=5,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.02"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=intended,
+    )
+    nyc_id = _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHNY-26MAY05-T80-83",
+        side="buy_yes",
+        contracts=5,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.02"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=intended,
+    )
+
+    now = datetime(2026, 5, 7, 12, 0, tzinfo=timezone.utc)
+    caplog.set_level(logging.WARNING, logger="bot.main")
+    n = await reconcile_settled_trades(app, now)
+
+    assert n == 1
+    with app.session_factory() as session:
+        rows = session.scalars(select(SimulatedPnl)).all()
+    settled_ids = {r.paper_trade_id for r in rows}
+    assert den_id not in settled_ids
+    assert nyc_id in settled_ids
+    assert len(acis.calls) == 2
+    matches = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "acis_fetch_failed" in r.getMessage()
+    ]
+    assert matches, "expected a WARNING log with acis_fetch_failed"
+
+
 class _FailingACIS:
     def __init__(self) -> None:
         self.calls = 0

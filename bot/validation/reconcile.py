@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -11,6 +12,8 @@ from bot.markets.parser import ParsedTicker
 from bot.validation.scoring import realized_pnl_for_trade
 
 ACIS_URL = "https://data.rcc-acis.org/StnData"
+
+_ACIS_FETCH_TIMEOUT_SECONDS: float = 30.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,7 +49,10 @@ class ACISClient:
             "output": "json",
         }
         headers = {"User-Agent": self._user_agent} if not self._owns_http else None
-        response = await self._http.get(ACIS_URL, params=params, headers=headers)
+        response = await asyncio.wait_for(
+            self._http.get(ACIS_URL, params=params, headers=headers),
+            timeout=_ACIS_FETCH_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
         payload = response.json()
         rows = payload.get("data")

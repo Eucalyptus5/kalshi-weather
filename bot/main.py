@@ -676,7 +676,16 @@ async def reconcile_settled_trades(app: App, now: datetime) -> int:
         (STATIONS[parsed.series].station, parsed.event_date) for _row, parsed in eligible
     }
     for station, event_date in sorted(unique_keys):
-        observed = await app.acis.fetch_daily_high(station, event_date)
+        try:
+            observed = await app.acis.fetch_daily_high(station, event_date)
+        except (httpx.HTTPError, json.JSONDecodeError, KeyError, asyncio.TimeoutError) as err:
+            logger.warning(
+                "acis_fetch_failed station=%s date=%s err=%s",
+                station,
+                event_date,
+                err,
+            )
+            continue
         observed_by_station_date[(station, event_date)] = observed
         if observed is None:
             logger.info(
@@ -689,7 +698,7 @@ async def reconcile_settled_trades(app: App, now: datetime) -> int:
         with app.session_factory() as session:
             for row, parsed in eligible:
                 key = (STATIONS[parsed.series].station, parsed.event_date)
-                observed = observed_by_station_date[key]
+                observed = observed_by_station_date.get(key)
                 if observed is None:
                     pending += 1
                     continue

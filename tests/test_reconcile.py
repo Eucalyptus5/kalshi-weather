@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import date
 from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
@@ -9,6 +11,7 @@ import pytest
 
 from bot.execution.paper import PaperTrade, TradeSide
 from bot.markets.parser import parse_ticker
+from bot.validation import reconcile as reconcile_mod
 from bot.validation.reconcile import (
     ACISClient,
     Reconciliation,
@@ -171,6 +174,22 @@ async def test_caller_owned_client_not_closed_by_aclose() -> None:
         await client.fetch_daily_high("KDEN", date(2026, 4, 28))
         await client.aclose()
         assert not http.is_closed
+
+
+async def test_acis_wait_for_fires_on_hung_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(60)
+        return httpx.Response(200, json=_resp("57"))
+
+    monkeypatch.setattr(reconcile_mod, "_ACIS_FETCH_TIMEOUT_SECONDS", 0.5)
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = ACISClient(http_client=http)
+        start = time.monotonic()
+        with pytest.raises(asyncio.TimeoutError):
+            await client.fetch_daily_high("KDEN", date(2026, 4, 28))
+        elapsed = time.monotonic() - start
+    assert 0.4 < elapsed < 2.0
 
 
 def test_settle_bracket_interior() -> None:
