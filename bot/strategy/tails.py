@@ -55,6 +55,8 @@ def evaluate(
 ) -> TailsSignal:
     if ctx.yes_ask <= ASK_THRESHOLD:
         return _skip("ask_too_low")
+    if ctx.no_bid <= Decimal("0"):
+        return _skip("no_no_bid")
     if ctx.fair_yes >= FAIR_THRESHOLD:
         return _skip("fair_too_high")
     if ctx.is_same_day:

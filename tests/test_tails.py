@@ -155,6 +155,44 @@ def test_skip_reason_priority_order() -> None:
     assert sig.reason == "ask_too_low"
 
 
+def test_no_bid_zero_skips_without_division_error() -> None:
+    sig = evaluate(_ctx(no_bid=Decimal("0")))
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == "no_no_bid"
+    assert sig.contracts == 0
+    assert sig.notional_dollars == Decimal("0")
+
+
+def test_no_bid_negative_also_skipped() -> None:
+    sig = evaluate(_ctx(no_bid=Decimal("-0.01")))
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == "no_no_bid"
+
+
+def test_no_bid_positive_still_trades() -> None:
+    sig = evaluate(_ctx(no_bid=Decimal("0.93"), fair_yes=Decimal("0.05")))
+    assert sig.action is TailsAction.SELL_YES
+    assert sig.contracts >= 1
+
+
+def test_no_no_bid_fires_before_fair_too_high() -> None:
+    sig = evaluate(
+        _ctx(
+            no_bid=Decimal("0"),
+            yes_ask=Decimal("0.50"),
+            fair_yes=Decimal("0.05"),
+        )
+    )
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == "no_no_bid"
+
+
+def test_ask_too_low_wins_over_no_no_bid() -> None:
+    sig = evaluate(_ctx(no_bid=Decimal("0"), yes_ask=Decimal("0.05")))
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == "ask_too_low"
+
+
 def test_kelly_formula_correctness() -> None:
     sig = evaluate(_ctx(bankroll=Decimal("100")))
     assert sig.action is TailsAction.SELL_YES
