@@ -4,20 +4,27 @@ import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import AsyncMock
 
+import httpx
 import numpy as np
 import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from sqlalchemy import select
 
 import bot.main as bot_main
 from bot.forecast.open_meteo import StationForecast
-from bot.kalshi_client import KalshiMarket, KalshiOrderbook
+from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook
 from bot.main import (
     STATIONS,
+    STRATEGY_BLACKLIST,
     App,
+    _build_intents,
     _forecast_loop,
     _parse_duration,
+    _parse_series_arg,
     _settlement_loop,
     evaluate_strategies,
     main,
@@ -25,6 +32,7 @@ from bot.main import (
     refresh_forecasts,
     refresh_markets,
 )
+from bot.markets.parser import parse_ticker
 from bot.storage.sqlite import (
     Base,
     Forecast,
@@ -38,8 +46,11 @@ from bot.storage.sqlite import (
 
 
 class _StubMeteo:
-    def __init__(self, forecast: StationForecast) -> None:
-        self._forecast = forecast
+    def __init__(self, forecasts: dict[str, StationForecast] | StationForecast) -> None:
+        if isinstance(forecasts, StationForecast):
+            self._forecasts = {forecasts.station: forecasts}
+        else:
+            self._forecasts = forecasts
         self.calls: list[tuple[str, float, float, str]] = []
 
     async def fetch_station(
@@ -51,7 +62,7 @@ class _StubMeteo:
         forecast_days: int = 7,
     ) -> StationForecast:
         self.calls.append((station, latitude, longitude, timezone))
-        return self._forecast
+        return self._forecasts[station]
 
     async def aclose(self) -> None:
         return None
@@ -73,7 +84,7 @@ class _StubKalshi:
         return None
 
     async def list_open_markets_for_series(self, series_prefix: str) -> list[KalshiMarket]:
-        return [m for m in self._markets if m.ticker.startswith(series_prefix)]
+        return [m for m in self._markets if m.ticker.startswith(f"{series_prefix}-")]
 
     async def get_orderbook(self, ticker: str) -> KalshiOrderbook:
         return self._orderbooks[ticker]
@@ -92,10 +103,24 @@ class _StubACIS:
         return None
 
 
+class _MultiStationACIS:
+    def __init__(self, values: dict[tuple[str, date], Decimal | None]) -> None:
+        self._values = values
+        self.calls: list[tuple[str, date]] = []
+
+    async def fetch_daily_high(self, station: str, settled_date: date) -> Decimal | None:
+        self.calls.append((station, settled_date))
+        return self._values.get((station, settled_date))
+
+    async def aclose(self) -> None:
+        return None
+
+
 def _make_app(
     meteo: _StubMeteo | None = None,
     kalshi: _StubKalshi | None = None,
-    acis: _StubACIS | None = None,
+    acis: object | None = None,
+    series_list: tuple[str, ...] = ("KXHIGHDEN",),
 ) -> App:
     from bot.config import Settings
 
@@ -110,7 +135,7 @@ def _make_app(
         meteo=meteo,  # type: ignore[arg-type]
         kalshi=kalshi,  # type: ignore[arg-type]
         acis=acis if acis is not None else _StubACIS(None),  # type: ignore[arg-type]
-        series="KXHIGHDEN",
+        series_list=series_list,
     )
 
 
@@ -128,6 +153,31 @@ def _forecast_with_two_days() -> StationForecast:
             date(2026, 5, 7): members_a,
             date(2026, 5, 8): members_b,
         },
+    )
+
+
+def _book_from(ticker: str, yes_ask: str, yes_bid: str) -> KalshiOrderbook:
+    return KalshiOrderbook(
+        ticker=ticker,
+        yes_ask=Decimal(yes_ask),
+        yes_bid=Decimal(yes_bid),
+        no_ask=Decimal("1") - Decimal(yes_bid),
+        no_bid=Decimal("1") - Decimal(yes_ask),
+        snapshot_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+def _market_from(ticker: str, yes_ask: str, yes_bid: str, close_at: datetime) -> KalshiMarket:
+    series = ticker.split("-", 1)[0]
+    event_ticker = "-".join(ticker.split("-")[:2])
+    return KalshiMarket(
+        ticker=ticker,
+        event_ticker=event_ticker,
+        series=series,
+        status="open",
+        close_time=close_at,
+        yes_ask=Decimal(yes_ask),
+        yes_bid=Decimal(yes_bid),
     )
 
 
@@ -150,6 +200,19 @@ def test_parse_duration_rejects_garbage() -> None:
         _parse_duration("3d")
     with pytest.raises(ValueError):
         _parse_duration("")
+
+
+def test_stations_map_has_all_twenty() -> None:
+    assert len(STATIONS) == 20
+    assert "KXHIGHINFLATION" not in STATIONS
+    assert STATIONS["KXHIGHTPHX"].timezone == "America/Phoenix"
+    assert STATIONS["KXHIGHDEN"].station == "KDEN"
+    for series, cfg in STATIONS.items():
+        assert cfg.series == series
+
+
+def test_strategy_blacklist_is_lax_and_mia_only() -> None:
+    assert STRATEGY_BLACKLIST == frozenset({"KXHIGHLAX", "KXHIGHMIA"})
 
 
 async def test_refresh_forecasts_persists_rows_and_populates_cache() -> None:
@@ -175,42 +238,45 @@ async def test_refresh_forecasts_persists_rows_and_populates_cache() -> None:
     assert app.ensemble_spreads[("KDEN", date(2026, 5, 7))] > Decimal("0")
 
 
+async def test_refresh_forecasts_runs_for_each_series() -> None:
+    rng = np.random.default_rng(7)
+    den_fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): rng.normal(72.0, 5.0, size=31)},
+    )
+    nyc_fc = StationForecast(
+        station="KNYC",
+        latitude=40.7790,
+        longitude=-73.9692,
+        timezone="America/New_York",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): rng.normal(85.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo({"KDEN": den_fc, "KNYC": nyc_fc})
+    app = _make_app(meteo=meteo, series_list=("KXHIGHDEN", "KXHIGHNY"))
+
+    count = await refresh_forecasts(app)
+
+    assert count == 2
+    assert ("KDEN", date(2026, 5, 8)) in app.forecast_cdfs
+    assert ("KNYC", date(2026, 5, 8)) in app.forecast_cdfs
+    with app.session_factory() as session:
+        stations = sorted({r.station for r in session.scalars(select(Forecast)).all()})
+    assert stations == ["KDEN", "KNYC"]
+    called_stations = sorted({c[0] for c in meteo.calls})
+    assert called_stations == ["KDEN", "KNYC"]
+
+
 async def test_refresh_markets_persists_markets_and_orderbooks() -> None:
     close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
-    market_a = KalshiMarket(
-        ticker="KXHIGHDEN-26MAY07-T70-75",
-        event_ticker="KXHIGHDEN-26MAY07",
-        series="KXHIGHDEN",
-        status="open",
-        close_time=close_at,
-        yes_ask=Decimal("0.45"),
-        yes_bid=Decimal("0.43"),
-    )
-    market_b = KalshiMarket(
-        ticker="KXHIGHDEN-26MAY07-T75-80",
-        event_ticker="KXHIGHDEN-26MAY07",
-        series="KXHIGHDEN",
-        status="open",
-        close_time=close_at,
-        yes_ask=Decimal("0.30"),
-        yes_bid=Decimal("0.28"),
-    )
-    book_a = KalshiOrderbook(
-        ticker=market_a.ticker,
-        yes_ask=Decimal("0.45"),
-        yes_bid=Decimal("0.43"),
-        no_ask=Decimal("0.57"),
-        no_bid=Decimal("0.55"),
-        snapshot_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
-    )
-    book_b = KalshiOrderbook(
-        ticker=market_b.ticker,
-        yes_ask=Decimal("0.30"),
-        yes_bid=Decimal("0.28"),
-        no_ask=Decimal("0.72"),
-        no_bid=Decimal("0.70"),
-        snapshot_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
-    )
+    market_a = _market_from("KXHIGHDEN-26MAY07-T70-75", "0.45", "0.43", close_at)
+    market_b = _market_from("KXHIGHDEN-26MAY07-T75-80", "0.30", "0.28", close_at)
+    book_a = _book_from(market_a.ticker, "0.45", "0.43")
+    book_b = _book_from(market_b.ticker, "0.30", "0.28")
 
     kalshi = _StubKalshi(
         markets=[market_a, market_b],
@@ -231,25 +297,32 @@ async def test_refresh_markets_persists_markets_and_orderbooks() -> None:
     assert app.latest_orderbooks[market_b.ticker] is book_b
 
 
+async def test_refresh_markets_persists_per_series() -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    den = _market_from("KXHIGHDEN-26MAY07-T70-75", "0.45", "0.43", close_at)
+    nyc = _market_from("KXHIGHNY-26MAY07-T80-85", "0.30", "0.28", close_at)
+    den_book = _book_from(den.ticker, "0.45", "0.43")
+    nyc_book = _book_from(nyc.ticker, "0.30", "0.28")
+
+    kalshi = _StubKalshi(
+        markets=[den, nyc],
+        orderbooks={den.ticker: den_book, nyc.ticker: nyc_book},
+    )
+    app = _make_app(kalshi=kalshi, series_list=("KXHIGHDEN", "KXHIGHNY"))
+
+    count = await refresh_markets(app)
+
+    assert count == 2
+    with app.session_factory() as session:
+        rows = session.scalars(select(Market)).all()
+    by_series = {r.series for r in rows}
+    assert by_series == {"KXHIGHDEN", "KXHIGHNY"}
+
+
 async def test_refresh_markets_upserts_existing_ticker() -> None:
     close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
-    market = KalshiMarket(
-        ticker="KXHIGHDEN-26MAY07-T70-75",
-        event_ticker="KXHIGHDEN-26MAY07",
-        series="KXHIGHDEN",
-        status="open",
-        close_time=close_at,
-        yes_ask=Decimal("0.45"),
-        yes_bid=Decimal("0.43"),
-    )
-    book = KalshiOrderbook(
-        ticker=market.ticker,
-        yes_ask=Decimal("0.45"),
-        yes_bid=Decimal("0.43"),
-        no_ask=Decimal("0.57"),
-        no_bid=Decimal("0.55"),
-        snapshot_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
-    )
+    market = _market_from("KXHIGHDEN-26MAY07-T70-75", "0.45", "0.43", close_at)
+    book = _book_from(market.ticker, "0.45", "0.43")
     kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
     app = _make_app(kalshi=kalshi)
 
@@ -259,6 +332,286 @@ async def test_refresh_markets_upserts_existing_ticker() -> None:
     with app.session_factory() as session:
         rows = session.scalars(select(Market)).all()
     assert len(rows) == 1
+
+
+class _PartialFailKalshi(_StubKalshi):
+    def __init__(
+        self,
+        markets: list[KalshiMarket],
+        orderbooks: dict[str, KalshiOrderbook],
+        fail_on: str,
+        exc: Exception,
+    ) -> None:
+        super().__init__(markets, orderbooks)
+        self._fail_on = fail_on
+        self._exc = exc
+
+    async def get_orderbook(self, ticker: str) -> KalshiOrderbook:
+        if ticker == self._fail_on:
+            raise self._exc
+        return self._orderbooks[ticker]
+
+
+async def test_refresh_markets_isolates_orderbook_http_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    tickers = [
+        "KXHIGHDEN-26MAY07-T60-65",
+        "KXHIGHDEN-26MAY07-T65-70",
+        "KXHIGHDEN-26MAY07-T70-75",
+        "KXHIGHDEN-26MAY07-T75-80",
+        "KXHIGHDEN-26MAY07-T80-85",
+    ]
+    markets = [_market_from(t, "0.20", "0.18", close_at) for t in tickers]
+    books = {t: _book_from(t, "0.20", "0.18") for t in tickers}
+
+    fail_ticker = tickers[2]
+    response = httpx.Response(502, request=httpx.Request("GET", "https://x"))
+    exc = httpx.HTTPStatusError("502", request=response.request, response=response)
+    kalshi = _PartialFailKalshi(markets, books, fail_on=fail_ticker, exc=exc)
+
+    app = _make_app(kalshi=kalshi)
+    caplog.set_level(logging.WARNING, logger="bot.main")
+
+    count = await refresh_markets(app)
+
+    assert count == 4
+    with app.session_factory() as session:
+        ob_tickers = {ob.ticker for ob in session.scalars(select(OrderbookSnapshot)).all()}
+    assert fail_ticker not in ob_tickers
+    assert len(ob_tickers) == 4
+    assert fail_ticker not in app.latest_markets
+    assert fail_ticker not in app.latest_orderbooks
+    matches = [
+        r
+        for r in caplog.records
+        if "kalshi_orderbook_fetch_failed" in r.getMessage() and fail_ticker in r.getMessage()
+    ]
+    assert matches
+
+
+async def test_refresh_markets_isolates_orderbook_key_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    good = _market_from("KXHIGHDEN-26MAY07-T60-65", "0.20", "0.18", close_at)
+    bad = _market_from("KXHIGHDEN-26MAY07-T65-70", "0.30", "0.28", close_at)
+    books = {good.ticker: _book_from(good.ticker, "0.20", "0.18")}
+
+    kalshi = _PartialFailKalshi(
+        [good, bad], books, fail_on=bad.ticker, exc=KeyError("orderbook_fp")
+    )
+    app = _make_app(kalshi=kalshi)
+    caplog.set_level(logging.WARNING, logger="bot.main")
+
+    count = await refresh_markets(app)
+
+    assert count == 1
+    assert bad.ticker not in app.latest_markets
+    assert good.ticker in app.latest_markets
+    matches = [
+        r
+        for r in caplog.records
+        if "kalshi_orderbook_fetch_failed" in r.getMessage() and bad.ticker in r.getMessage()
+    ]
+    assert matches
+
+
+@pytest.fixture(scope="module")
+def _rsa_pem(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(Encoding.PEM, PrivateFormat.TraditionalOpenSSL, NoEncryption())
+    path = tmp_path_factory.mktemp("kalshi") / "demo.pem"
+    path.write_bytes(pem)
+    return path
+
+
+async def test_refresh_markets_isolates_orderbook_json_error(
+    _rsa_pem: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from bot.config import Settings as _Settings
+
+    close_at = "2026-05-08T23:00:00Z"
+    good_ticker = "KXHIGHDEN-26MAY07-T70-75"
+    bad_ticker = "KXHIGHDEN-26MAY07-T75-80"
+
+    good_orderbook = {
+        "orderbook_fp": {
+            "yes_dollars": [["0.30", "100"]],
+            "no_dollars": [["0.55", "50"]],
+        }
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/markets"):
+            return httpx.Response(
+                200,
+                json={
+                    "markets": [
+                        {
+                            "ticker": good_ticker,
+                            "event_ticker": "KXHIGHDEN-26MAY07",
+                            "status": "open",
+                            "close_time": close_at,
+                            "yes_ask_dollars": "0.45",
+                            "yes_bid_dollars": "0.43",
+                        },
+                        {
+                            "ticker": bad_ticker,
+                            "event_ticker": "KXHIGHDEN-26MAY07",
+                            "status": "open",
+                            "close_time": close_at,
+                            "yes_ask_dollars": "0.30",
+                            "yes_bid_dollars": "0.28",
+                        },
+                    ]
+                },
+            )
+        if good_ticker in path:
+            return httpx.Response(200, json=good_orderbook)
+        return httpx.Response(200, content=b"<html>not json</html>")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        settings = _Settings(
+            paper_mode=True,
+            kalshi_demo_key_id="demo-key-id",
+            kalshi_demo_private_key_path=_rsa_pem,
+        )
+        client = KalshiDemoClient(settings, http_client=http)
+        await client.aopen()
+
+        engine = make_engine(":memory:")
+        Base.metadata.create_all(engine)
+        sf = make_session_factory(engine)
+        app = App(
+            settings=settings,
+            engine=engine,
+            session_factory=sf,
+            meteo=None,  # type: ignore[arg-type]
+            kalshi=client,
+            acis=_StubACIS(None),  # type: ignore[arg-type]
+            series_list=("KXHIGHDEN",),
+        )
+
+        caplog.set_level(logging.WARNING, logger="bot.main")
+        count = await refresh_markets(app)
+
+    assert count == 1
+    assert good_ticker in app.latest_markets
+    assert bad_ticker not in app.latest_markets
+    matches = [
+        r
+        for r in caplog.records
+        if "kalshi_orderbook_fetch_failed" in r.getMessage() and bad_ticker in r.getMessage()
+    ]
+    assert matches
+
+
+async def test_refresh_markets_evicts_stale_tickers_per_city() -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    persistent = _market_from("KXHIGHDEN-26MAY07-T70-75", "0.45", "0.43", close_at)
+    vanishing = _market_from("KXHIGHDEN-26MAY07-T75-80", "0.30", "0.28", close_at)
+    books = {
+        persistent.ticker: _book_from(persistent.ticker, "0.45", "0.43"),
+        vanishing.ticker: _book_from(vanishing.ticker, "0.30", "0.28"),
+    }
+    kalshi = _StubKalshi(markets=[persistent, vanishing], orderbooks=books)
+    app = _make_app(kalshi=kalshi)
+
+    await refresh_markets(app)
+    assert vanishing.ticker in app.latest_markets
+
+    kalshi._markets = [persistent]
+    await refresh_markets(app)
+
+    assert persistent.ticker in app.latest_markets
+    assert vanishing.ticker not in app.latest_markets
+    assert vanishing.ticker not in app.latest_orderbooks
+
+
+class _ListFailKalshi(_StubKalshi):
+    def __init__(
+        self,
+        markets: list[KalshiMarket],
+        orderbooks: dict[str, KalshiOrderbook],
+        fail_series: str,
+    ) -> None:
+        super().__init__(markets, orderbooks)
+        self._fail_series = fail_series
+
+    async def list_open_markets_for_series(self, series_prefix: str) -> list[KalshiMarket]:
+        if series_prefix == self._fail_series:
+            raise httpx.ConnectError("connection refused")
+        return [m for m in self._markets if m.ticker.startswith(f"{series_prefix}-")]
+
+
+async def test_refresh_markets_keeps_cache_when_list_fetch_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    den = _market_from("KXHIGHDEN-26MAY07-T70-75", "0.45", "0.43", close_at)
+    nyc = _market_from("KXHIGHNY-26MAY07-T80-85", "0.30", "0.28", close_at)
+    books = {
+        den.ticker: _book_from(den.ticker, "0.45", "0.43"),
+        nyc.ticker: _book_from(nyc.ticker, "0.30", "0.28"),
+    }
+    kalshi = _StubKalshi(markets=[den, nyc], orderbooks=books)
+    app = _make_app(kalshi=kalshi, series_list=("KXHIGHDEN", "KXHIGHNY"))
+
+    await refresh_markets(app)
+    assert den.ticker in app.latest_markets
+    assert nyc.ticker in app.latest_markets
+
+    failing = _ListFailKalshi(markets=[den, nyc], orderbooks=books, fail_series="KXHIGHNY")
+    app.kalshi = failing  # type: ignore[assignment]
+    caplog.set_level(logging.WARNING, logger="bot.main")
+    await refresh_markets(app)
+
+    assert nyc.ticker in app.latest_markets
+    matches = [
+        r
+        for r in caplog.records
+        if "kalshi_list_markets_failed" in r.getMessage() and "KXHIGHNY" in r.getMessage()
+    ]
+    assert matches
+
+
+async def test_refresh_markets_skips_unparseable_ticker(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    good = _market_from("KXHIGHDEN-26MAY07-T70-75", "0.45", "0.43", close_at)
+    bad = KalshiMarket(
+        ticker="KXHIGHDEN-not-a-real-ticker",
+        event_ticker="KXHIGHDEN-26MAY07",
+        series="KXHIGHDEN",
+        status="open",
+        close_time=close_at,
+        yes_ask=Decimal("0.30"),
+        yes_bid=Decimal("0.28"),
+    )
+    books = {
+        good.ticker: _book_from(good.ticker, "0.45", "0.43"),
+        bad.ticker: _book_from(bad.ticker, "0.30", "0.28"),
+    }
+    kalshi = _StubKalshi(markets=[good, bad], orderbooks=books)
+    app = _make_app(kalshi=kalshi)
+
+    caplog.set_level(logging.WARNING, logger="bot.main")
+    count = await refresh_markets(app)
+
+    assert count == 1
+    with app.session_factory() as session:
+        rows = session.scalars(select(Market)).all()
+    assert {r.ticker for r in rows} == {good.ticker}
+    matches = [r for r in caplog.records if "market_unparseable_ticker" in r.getMessage()]
+    assert matches
 
 
 async def test_evaluate_strategies_runs_edge_buy_path() -> None:
@@ -272,23 +625,13 @@ async def test_evaluate_strategies_runs_edge_buy_path() -> None:
     )
     meteo = _StubMeteo(fc)
 
-    market = KalshiMarket(
-        ticker="KXHIGHDEN-26MAY08-T70-75",
-        event_ticker="KXHIGHDEN-26MAY08",
-        series="KXHIGHDEN",
-        status="open",
-        close_time=datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
-        yes_ask=Decimal("0.20"),
-        yes_bid=Decimal("0.18"),
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
     )
-    book = KalshiOrderbook(
-        ticker=market.ticker,
-        yes_ask=Decimal("0.20"),
-        yes_bid=Decimal("0.18"),
-        no_ask=Decimal("0.82"),
-        no_bid=Decimal("0.80"),
-        snapshot_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
-    )
+    book = _book_from(market.ticker, "0.20", "0.18")
     kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
 
     app = _make_app(meteo=meteo, kalshi=kalshi)
@@ -306,23 +649,13 @@ async def test_evaluate_strategies_runs_edge_buy_path() -> None:
 
 
 async def test_evaluate_strategies_skips_market_without_forecast() -> None:
-    market = KalshiMarket(
-        ticker="KXHIGHDEN-26MAY08-T70-75",
-        event_ticker="KXHIGHDEN-26MAY08",
-        series="KXHIGHDEN",
-        status="open",
-        close_time=datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
-        yes_ask=Decimal("0.50"),
-        yes_bid=Decimal("0.48"),
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.50",
+        "0.48",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
     )
-    book = KalshiOrderbook(
-        ticker=market.ticker,
-        yes_ask=Decimal("0.50"),
-        yes_bid=Decimal("0.48"),
-        no_ask=Decimal("0.52"),
-        no_bid=Decimal("0.50"),
-        snapshot_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
-    )
+    book = _book_from(market.ticker, "0.50", "0.48")
     kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
     app = _make_app(kalshi=kalshi)
 
@@ -348,23 +681,13 @@ async def test_evaluate_strategies_skips_tail_markets() -> None:
     )
     meteo = _StubMeteo(fc)
 
-    tail = KalshiMarket(
-        ticker="KXHIGHDEN-26MAY08-T100",
-        event_ticker="KXHIGHDEN-26MAY08",
-        series="KXHIGHDEN",
-        status="open",
-        close_time=datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
-        yes_ask=Decimal("0.05"),
-        yes_bid=Decimal("0.03"),
+    tail = _market_from(
+        "KXHIGHDEN-26MAY08-T100",
+        "0.05",
+        "0.03",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
     )
-    book = KalshiOrderbook(
-        ticker=tail.ticker,
-        yes_ask=Decimal("0.05"),
-        yes_bid=Decimal("0.03"),
-        no_ask=Decimal("0.97"),
-        no_bid=Decimal("0.95"),
-        snapshot_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
-    )
+    book = _book_from(tail.ticker, "0.05", "0.03")
     kalshi = _StubKalshi(markets=[tail], orderbooks={tail.ticker: book})
 
     app = _make_app(meteo=meteo, kalshi=kalshi)
@@ -377,10 +700,202 @@ async def test_evaluate_strategies_skips_tail_markets() -> None:
     assert n_trades == 0
 
 
+async def test_evaluate_strategies_uses_per_ticker_cdf_not_app_series() -> None:
+    rng = np.random.default_rng(11)
+    den_fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): rng.normal(72.0, 4.0, size=31)},
+    )
+    nyc_fc = StationForecast(
+        station="KNYC",
+        latitude=40.7790,
+        longitude=-73.9692,
+        timezone="America/New_York",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): rng.normal(85.0, 3.0, size=31)},
+    )
+    meteo = _StubMeteo({"KDEN": den_fc, "KNYC": nyc_fc})
+
+    nyc_market = _market_from(
+        "KXHIGHNY-26MAY08-T70-75",
+        "0.50",
+        "0.48",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    nyc_book = _book_from(nyc_market.ticker, "0.50", "0.48")
+    kalshi = _StubKalshi(markets=[nyc_market], orderbooks={nyc_market.ticker: nyc_book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi, series_list=("KXHIGHDEN", "KXHIGHNY"))
+
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    n_trades = await evaluate_strategies(app, now)
+
+    assert n_trades >= 1
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert all(t.market_ticker == nyc_market.ticker for t in trades)
+    assert any(Decimal(t.fair_at_entry) < Decimal("0.001") for t in trades)
+
+
+async def test_evaluate_strategies_marks_blacklisted_series() -> None:
+    rng = np.random.default_rng(13)
+    lax_fc = StationForecast(
+        station="KLAX",
+        latitude=33.9382,
+        longitude=-118.3866,
+        timezone="America/Los_Angeles",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): rng.normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo({"KLAX": lax_fc})
+
+    market = _market_from(
+        "KXHIGHLAX-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.20", "0.18")
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi, series_list=("KXHIGHLAX",))
+
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    n_trades = await evaluate_strategies(app, now)
+
+    assert n_trades == 0
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert trades == []
+
+
+def test_build_intents_skips_blacklisted_lax_series() -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHLAX-26MAY08-T70-75", "0.20", "0.18", close_at)
+    book = _book_from(market.ticker, "0.20", "0.18")
+    intents = _build_intents(
+        ticker=market.ticker,
+        market=market,
+        book=book,
+        fair_yes=Decimal("0.05"),
+        spread=Decimal("3.0"),
+        mid=Decimal("0.19"),
+        is_same_day=False,
+        is_blacklisted=True,
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+    assert intents == []
+
+
+def test_build_intents_skips_blacklisted_mia_series() -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHMIA-26MAY08-T70-75", "0.20", "0.18", close_at)
+    book = _book_from(market.ticker, "0.20", "0.18")
+    intents = _build_intents(
+        ticker=market.ticker,
+        market=market,
+        book=book,
+        fair_yes=Decimal("0.05"),
+        spread=Decimal("3.0"),
+        mid=Decimal("0.19"),
+        is_same_day=False,
+        is_blacklisted=True,
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+    assert intents == []
+
+
+def test_build_intents_emits_for_normal_series() -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHDEN-26MAY08-T70-75", "0.20", "0.18", close_at)
+    book = _book_from(market.ticker, "0.20", "0.18")
+    intents = _build_intents(
+        ticker=market.ticker,
+        market=market,
+        book=book,
+        fair_yes=Decimal("0.80"),
+        spread=Decimal("3.0"),
+        mid=Decimal("0.19"),
+        is_same_day=False,
+        is_blacklisted=False,
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+    assert intents
+    assert any(i.strategy == "edge" for i in intents)
+
+
+async def test_evaluate_strategies_skips_unparseable_ticker(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    rng = np.random.default_rng(14)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): rng.normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+
+    good = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    bad = KalshiMarket(
+        ticker="KXHIGHDEN-not-a-real-ticker",
+        event_ticker="KXHIGHDEN-26MAY08",
+        series="KXHIGHDEN",
+        status="open",
+        close_time=datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+        yes_ask=Decimal("0.30"),
+        yes_bid=Decimal("0.28"),
+    )
+    good_book = _book_from(good.ticker, "0.20", "0.18")
+    bad_book = _book_from(bad.ticker, "0.30", "0.28")
+    kalshi = _StubKalshi(
+        markets=[good, bad], orderbooks={good.ticker: good_book, bad.ticker: bad_book}
+    )
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    app.latest_markets[good.ticker] = good
+    app.latest_orderbooks[good.ticker] = good_book
+    app.latest_markets[bad.ticker] = bad
+    app.latest_orderbooks[bad.ticker] = bad_book
+
+    caplog.set_level(logging.WARNING, logger="bot.main")
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    n_trades = await evaluate_strategies(app, now)
+
+    assert n_trades >= 1
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert all(t.market_ticker == good.ticker for t in trades)
+    matches = [
+        r
+        for r in caplog.records
+        if "eval_unparseable_ticker" in r.getMessage() and bad.ticker in r.getMessage()
+    ]
+    assert matches
+
+
 def test_cli_rejects_unsupported_series(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         "sys.argv",
-        ["bot.main", "--mode=paper", "--series=KXHIGHFAKE", "--duration=1m"],
+        ["bot.main", "--mode=paper", "--series=KXHIGHFAKE,KXHIGHDEN", "--duration=1m"],
     )
     with pytest.raises(SystemExit) as excinfo:
         main()
@@ -398,10 +913,63 @@ def test_cli_rejects_non_paper_mode(monkeypatch) -> None:
         main()
 
 
-def test_stations_map_has_kxhighden() -> None:
-    cfg = STATIONS["KXHIGHDEN"]
-    assert cfg.station == "KDEN"
-    assert cfg.timezone == "America/Denver"
+def test_parse_series_arg_all_returns_full_set() -> None:
+    out = _parse_series_arg("all")
+    assert set(out) == set(STATIONS.keys())
+    assert len(out) == 20
+
+
+def test_parse_series_arg_comma_list() -> None:
+    out = _parse_series_arg("KXHIGHDEN,KXHIGHNY")
+    assert out == ("KXHIGHDEN", "KXHIGHNY")
+
+
+def test_parse_series_arg_rejects_unknown(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _parse_series_arg("KXHIGHFAKE,KXHIGHDEN")
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "KXHIGHFAKE" in err
+
+
+def test_parse_series_arg_rejects_empty(capsys) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        _parse_series_arg("")
+    assert excinfo.value.code == 2
+
+
+_SAMPLE_TICKERS_FOR_PARSER_TEST: dict[str, str] = {
+    "KXHIGHDEN": "KXHIGHDEN-26MAY07-T68",
+    "KXHIGHAUS": "KXHIGHAUS-26MAY07-T77",
+    "KXHIGHCHI": "KXHIGHCHI-26MAY07-T65",
+    "KXHIGHNY": "KXHIGHNY-26MAY07-T71",
+    "KXHIGHPHIL": "KXHIGHPHIL-26MAY07-T70",
+    "KXHIGHTATL": "KXHIGHTATL-26MAY07-T81",
+    "KXHIGHTBOS": "KXHIGHTBOS-26MAY07-T69",
+    "KXHIGHTDAL": "KXHIGHTDAL-26MAY07-T79",
+    "KXHIGHTDC": "KXHIGHTDC-26MAY07-T68",
+    "KXHIGHTHOU": "KXHIGHTHOU-26MAY07-T83",
+    "KXHIGHTLV": "KXHIGHTLV-26MAY07-T96",
+    "KXHIGHTMIN": "KXHIGHTMIN-26MAY07-T66",
+    "KXHIGHTNOLA": "KXHIGHTNOLA-26MAY07-T86",
+    "KXHIGHTOKC": "KXHIGHTOKC-26MAY07-T78",
+    "KXHIGHTPHX": "KXHIGHTPHX-26MAY07-T99",
+    "KXHIGHTSATX": "KXHIGHTSATX-26MAY07-T80",
+    "KXHIGHTSEA": "KXHIGHTSEA-26MAY07-T73",
+    "KXHIGHTSFO": "KXHIGHTSFO-26MAY07-T69",
+    "KXHIGHLAX": "KXHIGHLAX-26MAY07-T75",
+    "KXHIGHMIA": "KXHIGHMIA-26MAY07-T94",
+}
+
+
+@pytest.mark.parametrize(
+    "series,ticker",
+    sorted(_SAMPLE_TICKERS_FOR_PARSER_TEST.items()),
+)
+def test_parse_real_demo_ticker_per_series(series: str, ticker: str) -> None:
+    parsed = parse_ticker(ticker)
+    assert parsed.series == series
+    assert series in STATIONS
 
 
 def _insert_paper_trade(
@@ -559,6 +1127,53 @@ async def test_reconcile_settled_trades_pending_when_acis_returns_none() -> None
     assert rows == []
 
 
+async def test_reconcile_settled_trades_routes_per_series_station() -> None:
+    acis = _MultiStationACIS(
+        {
+            ("KDEN", date(2026, 5, 5)): Decimal("71"),
+            ("KNYC", date(2026, 5, 5)): Decimal("82"),
+        }
+    )
+    app = _make_app(acis=acis, series_list=("KXHIGHDEN", "KXHIGHNY"))
+
+    intended = datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc)
+    den_id = _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-26MAY05-T70-72",
+        side="buy_yes",
+        contracts=5,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.02"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=intended,
+    )
+    nyc_id = _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHNY-26MAY05-T80-83",
+        side="buy_yes",
+        contracts=5,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.02"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=intended,
+    )
+
+    now = datetime(2026, 5, 7, 12, 0, tzinfo=timezone.utc)
+    n = await reconcile_settled_trades(app, now)
+
+    assert n == 2
+    with app.session_factory() as session:
+        rows = session.scalars(select(SimulatedPnl).order_by(SimulatedPnl.paper_trade_id)).all()
+    by_id = {r.paper_trade_id: r for r in rows}
+    assert by_id[den_id].outcome == "won"
+    assert by_id[nyc_id].outcome == "won"
+    called = sorted(acis.calls)
+    assert ("KDEN", date(2026, 5, 5)) in called
+    assert ("KNYC", date(2026, 5, 5)) in called
+
+
 class _FailingACIS:
     def __init__(self) -> None:
         self.calls = 0
@@ -617,23 +1232,8 @@ async def test_db_lock_serializes_concurrent_writes(monkeypatch: pytest.MonkeyPa
     meteo = _StubMeteo(_forecast_with_two_days())
 
     close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
-    market = KalshiMarket(
-        ticker="KXHIGHDEN-26MAY07-T70-75",
-        event_ticker="KXHIGHDEN-26MAY07",
-        series="KXHIGHDEN",
-        status="open",
-        close_time=close_at,
-        yes_ask=Decimal("0.45"),
-        yes_bid=Decimal("0.43"),
-    )
-    book = KalshiOrderbook(
-        ticker=market.ticker,
-        yes_ask=Decimal("0.45"),
-        yes_bid=Decimal("0.43"),
-        no_ask=Decimal("0.57"),
-        no_bid=Decimal("0.55"),
-        snapshot_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
-    )
+    market = _market_from("KXHIGHDEN-26MAY07-T70-75", "0.45", "0.43", close_at)
+    book = _book_from(market.ticker, "0.45", "0.43")
     kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
 
     app = _make_app(meteo=meteo, kalshi=kalshi)

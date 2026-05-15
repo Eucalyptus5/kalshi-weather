@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta
 from datetime import timezone as _timezone
 from decimal import Decimal
 
+import httpx
 import numpy as np
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
@@ -58,21 +59,160 @@ FORECAST_RETRY_INTERVAL_SECONDS: float = 60.0
 
 
 @dataclass(frozen=True, slots=True)
-class _StationConfig:
+class StationConfig:
+    series: str
     station: str
     latitude: float
     longitude: float
     timezone: str
 
 
-STATIONS: dict[str, _StationConfig] = {
-    "KXHIGHDEN": _StationConfig(
+STATIONS: dict[str, StationConfig] = {
+    "KXHIGHDEN": StationConfig(
+        series="KXHIGHDEN",
         station="KDEN",
         latitude=39.8466,
         longitude=-104.6562,
         timezone="America/Denver",
     ),
+    "KXHIGHAUS": StationConfig(
+        series="KXHIGHAUS",
+        station="KAUS",
+        latitude=30.1831,
+        longitude=-97.6806,
+        timezone="America/Chicago",
+    ),
+    "KXHIGHCHI": StationConfig(
+        series="KXHIGHCHI",
+        station="KMDW",
+        latitude=41.7841,
+        longitude=-87.7552,
+        timezone="America/Chicago",
+    ),
+    "KXHIGHNY": StationConfig(
+        series="KXHIGHNY",
+        station="KNYC",
+        latitude=40.7790,
+        longitude=-73.9692,
+        timezone="America/New_York",
+    ),
+    "KXHIGHPHIL": StationConfig(
+        series="KXHIGHPHIL",
+        station="KPHL",
+        latitude=39.8733,
+        longitude=-75.2268,
+        timezone="America/New_York",
+    ),
+    "KXHIGHTATL": StationConfig(
+        series="KXHIGHTATL",
+        station="KATL",
+        latitude=33.6297,
+        longitude=-84.4422,
+        timezone="America/New_York",
+    ),
+    "KXHIGHTBOS": StationConfig(
+        series="KXHIGHTBOS",
+        station="KBOS",
+        latitude=42.3606,
+        longitude=-71.0097,
+        timezone="America/New_York",
+    ),
+    "KXHIGHTDAL": StationConfig(
+        series="KXHIGHTDAL",
+        station="KDFW",
+        latitude=32.8974,
+        longitude=-97.0220,
+        timezone="America/Chicago",
+    ),
+    "KXHIGHTDC": StationConfig(
+        series="KXHIGHTDC",
+        station="KDCA",
+        latitude=38.8472,
+        longitude=-77.0345,
+        timezone="America/New_York",
+    ),
+    "KXHIGHTHOU": StationConfig(
+        series="KXHIGHTHOU",
+        station="KIAH",
+        latitude=29.9844,
+        longitude=-95.3607,
+        timezone="America/Chicago",
+    ),
+    "KXHIGHTLV": StationConfig(
+        series="KXHIGHTLV",
+        station="KLAS",
+        latitude=36.0719,
+        longitude=-115.1634,
+        timezone="America/Los_Angeles",
+    ),
+    "KXHIGHTMIN": StationConfig(
+        series="KXHIGHTMIN",
+        station="KMSP",
+        latitude=44.8852,
+        longitude=-93.2313,
+        timezone="America/Chicago",
+    ),
+    "KXHIGHTNOLA": StationConfig(
+        series="KXHIGHTNOLA",
+        station="KMSY",
+        latitude=29.9974,
+        longitude=-90.2777,
+        timezone="America/Chicago",
+    ),
+    "KXHIGHTOKC": StationConfig(
+        series="KXHIGHTOKC",
+        station="KOKC",
+        latitude=35.3843,
+        longitude=-97.6003,
+        timezone="America/Chicago",
+    ),
+    "KXHIGHTPHX": StationConfig(
+        series="KXHIGHTPHX",
+        station="KPHX",
+        latitude=33.4278,
+        longitude=-112.0037,
+        timezone="America/Phoenix",
+    ),
+    "KXHIGHTSATX": StationConfig(
+        series="KXHIGHTSATX",
+        station="KSAT",
+        latitude=29.5443,
+        longitude=-98.4839,
+        timezone="America/Chicago",
+    ),
+    "KXHIGHTSEA": StationConfig(
+        series="KXHIGHTSEA",
+        station="KSEA",
+        latitude=47.4447,
+        longitude=-122.3144,
+        timezone="America/Los_Angeles",
+    ),
+    "KXHIGHTSFO": StationConfig(
+        series="KXHIGHTSFO",
+        station="KSFO",
+        latitude=37.6196,
+        longitude=-122.3656,
+        timezone="America/Los_Angeles",
+    ),
+    "KXHIGHLAX": StationConfig(
+        series="KXHIGHLAX",
+        station="KLAX",
+        latitude=33.9382,
+        longitude=-118.3866,
+        timezone="America/Los_Angeles",
+    ),
+    "KXHIGHMIA": StationConfig(
+        series="KXHIGHMIA",
+        station="KMIA",
+        latitude=25.7881,
+        longitude=-80.3169,
+        timezone="America/New_York",
+    ),
 }
+
+assert len(STATIONS) == 20
+
+STRATEGY_BLACKLIST: frozenset[str] = frozenset({"KXHIGHLAX", "KXHIGHMIA"})
 
 
 @dataclass
@@ -83,7 +223,7 @@ class App:
     meteo: OpenMeteoClient
     kalshi: KalshiDemoClient
     acis: ACISClient
-    series: str
+    series_list: tuple[str, ...]
     db_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     forecast_cdfs: dict[tuple[str, date], EnsembleCDF] = field(default_factory=dict)
     ensemble_spreads: dict[tuple[str, date], Decimal] = field(default_factory=dict)
@@ -115,15 +255,18 @@ def _parse_duration(raw: str) -> timedelta:
 
 
 async def refresh_forecasts(app: App) -> int:
-    cfg = STATIONS[app.series]
-    forecast = await app.meteo.fetch_station(
-        station=cfg.station,
-        latitude=cfg.latitude,
-        longitude=cfg.longitude,
-        timezone=cfg.timezone,
-    )
-    async with app.db_lock:
-        return _persist_forecast(app, forecast)
+    total = 0
+    for series in app.series_list:
+        cfg = STATIONS[series]
+        forecast = await app.meteo.fetch_station(
+            station=cfg.station,
+            latitude=cfg.latitude,
+            longitude=cfg.longitude,
+            timezone=cfg.timezone,
+        )
+        async with app.db_lock:
+            total += _persist_forecast(app, forecast)
+    return total
 
 
 def _persist_forecast(app: App, forecast: StationForecast) -> int:
@@ -163,59 +306,81 @@ def _persist_forecast(app: App, forecast: StationForecast) -> int:
 
 
 async def refresh_markets(app: App) -> int:
-    markets = await app.kalshi.list_open_markets_for_series(app.series)
     now = datetime.now(tz=_timezone.utc)
-    pairs: list[tuple[KalshiMarket, KalshiOrderbook]] = []
-    for m in markets:
-        book = await app.kalshi.get_orderbook(m.ticker)
-        pairs.append((m, book))
-    n = 0
-    async with app.db_lock:
-        with app.session_factory() as session:
-            for m, book in pairs:
-                parsed = parse_ticker(m.ticker)
-                existing = session.scalars(
-                    select(Market).where(Market.ticker == m.ticker)
-                ).one_or_none()
-                if existing is None:
+    total = 0
+    for series in app.series_list:
+        try:
+            markets = await app.kalshi.list_open_markets_for_series(series)
+        except (httpx.HTTPError, json.JSONDecodeError, KeyError) as err:
+            logger.warning("kalshi_list_markets_failed series=%s err=%s", series, err)
+            continue
+
+        pairs: list[tuple[KalshiMarket, KalshiOrderbook]] = []
+        seen_tickers: set[str] = set()
+        for m in markets:
+            try:
+                book = await app.kalshi.get_orderbook(m.ticker)
+            except (httpx.HTTPError, json.JSONDecodeError, KeyError) as err:
+                logger.warning("kalshi_orderbook_fetch_failed ticker=%s err=%s", m.ticker, err)
+                continue
+            pairs.append((m, book))
+            seen_tickers.add(m.ticker)
+
+        async with app.db_lock:
+            with app.session_factory() as session:
+                for m, book in pairs:
+                    try:
+                        parsed = parse_ticker(m.ticker)
+                    except ValueError as err:
+                        logger.warning("market_unparseable_ticker ticker=%s err=%s", m.ticker, err)
+                        continue
+                    existing = session.scalars(
+                        select(Market).where(Market.ticker == m.ticker)
+                    ).one_or_none()
+                    if existing is None:
+                        session.add(
+                            Market(
+                                ticker=m.ticker,
+                                series=parsed.series,
+                                event_date=parsed.event_date,
+                                is_monthly=parsed.is_monthly,
+                                is_tail=parsed.is_tail,
+                                strike_low=parsed.strikes[0],
+                                strike_high=parsed.strikes[1] if parsed.is_bracket else None,
+                                close_time=m.close_time,
+                                status=m.status,
+                                last_seen_at=now,
+                            )
+                        )
+                    else:
+                        existing.status = m.status
+                        existing.close_time = m.close_time
+                        existing.last_seen_at = now
                     session.add(
-                        Market(
+                        OrderbookSnapshot(
                             ticker=m.ticker,
-                            series=parsed.series,
-                            event_date=parsed.event_date,
-                            is_monthly=parsed.is_monthly,
-                            is_tail=parsed.is_tail,
-                            strike_low=parsed.strikes[0],
-                            strike_high=parsed.strikes[1] if parsed.is_bracket else None,
-                            close_time=m.close_time,
-                            status=m.status,
-                            last_seen_at=now,
+                            snapshot_at=book.snapshot_at,
+                            yes_ask=book.yes_ask,
+                            yes_bid=book.yes_bid,
+                            no_ask=book.no_ask,
+                            no_bid=book.no_bid,
                         )
                     )
-                else:
-                    existing.status = m.status
-                    existing.close_time = m.close_time
-                    existing.last_seen_at = now
-                session.add(
-                    OrderbookSnapshot(
-                        ticker=m.ticker,
-                        snapshot_at=book.snapshot_at,
-                        yes_ask=book.yes_ask,
-                        yes_bid=book.yes_bid,
-                        no_ask=book.no_ask,
-                        no_bid=book.no_bid,
-                    )
-                )
-                app.latest_markets[m.ticker] = m
-                app.latest_orderbooks[m.ticker] = book
-                n += 1
-            session.commit()
-    logger.info("refresh_markets series=%s pairs=%d", app.series, n)
-    return n
+                    app.latest_markets[m.ticker] = m
+                    app.latest_orderbooks[m.ticker] = book
+                    total += 1
+                session.commit()
+
+        for ticker in list(app.latest_markets.keys()):
+            if ticker.startswith(f"{series}-") and ticker not in seen_tickers:
+                app.latest_markets.pop(ticker, None)
+                app.latest_orderbooks.pop(ticker, None)
+
+        logger.info("refresh_markets series=%s pairs=%d", series, len(pairs))
+    return total
 
 
 async def evaluate_strategies(app: App, now: datetime) -> int:
-    cfg = STATIONS[app.series]
     n_trades = 0
     async with app.db_lock:
         with app.session_factory() as session:
@@ -223,9 +388,18 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                 book = app.latest_orderbooks.get(ticker)
                 if book is None:
                     continue
-                parsed = parse_ticker(ticker)
+                try:
+                    parsed = parse_ticker(ticker)
+                except ValueError as err:
+                    logger.warning("eval_unparseable_ticker ticker=%s err=%s", ticker, err)
+                    continue
                 if parsed.is_tail:
                     logger.debug("skip_tail ticker=%s", ticker)
+                    continue
+
+                cfg = STATIONS.get(parsed.series)
+                if cfg is None:
+                    logger.warning("eval_unknown_series ticker=%s series=%s", ticker, parsed.series)
                     continue
 
                 cdf_key = (cfg.station, parsed.event_date)
@@ -243,6 +417,7 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                 is_same_day = start_utc <= now < end_utc
 
                 mid = (book.yes_ask + book.yes_bid) / Decimal("2")
+                is_blacklisted = parsed.series in STRATEGY_BLACKLIST
 
                 for intent in _build_intents(
                     ticker=ticker,
@@ -252,6 +427,7 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                     spread=spread,
                     mid=mid,
                     is_same_day=is_same_day,
+                    is_blacklisted=is_blacklisted,
                     now=now,
                 ):
                     gate_ctx = _gate_ctx_for(
@@ -294,6 +470,7 @@ def _build_intents(
     spread: Decimal,
     mid: Decimal,
     is_same_day: bool,
+    is_blacklisted: bool,
     now: datetime,
 ) -> list[TradeIntent]:
     intents: list[TradeIntent] = []
@@ -305,7 +482,7 @@ def _build_intents(
         ensemble_spread=spread,
         bankroll=PAPER_BANKROLL,
         is_same_day=is_same_day,
-        is_blacklisted=False,
+        is_blacklisted=is_blacklisted,
         nbm_divergence=None,
     )
     edge_sig = edge_strategy.evaluate(edge_ctx)
@@ -330,7 +507,7 @@ def _build_intents(
             )
         )
 
-    if market.close_time is not None:
+    if not is_blacklisted and market.close_time is not None:
         tails_ctx = tails_strategy.TailsContext(
             yes_ask=book.yes_ask,
             yes_bid=book.yes_bid,
@@ -450,7 +627,6 @@ async def _eval_loop(app: App, stop: asyncio.Event) -> None:
 
 async def reconcile_settled_trades(app: App, now: datetime) -> int:
     cutoff = (now - timedelta(days=_SETTLEMENT_GRACE_DAYS)).date()
-    cfg = STATIONS[app.series]
 
     reconciled = 0
     pending = 0
@@ -480,24 +656,35 @@ async def reconcile_settled_trades(app: App, now: datetime) -> int:
             continue
         if parsed.event_date >= cutoff:
             continue
+        if parsed.series not in STATIONS:
+            logger.warning(
+                "settlement_unknown_series ticker=%s series=%s",
+                row.market_ticker,
+                parsed.series,
+            )
+            skipped += 1
+            continue
         eligible.append((row, parsed))
 
-    observed_by_date: dict[date, Decimal | None] = {}
-    unique_dates = sorted({parsed.event_date for _row, parsed in eligible})
-    for event_date in unique_dates:
-        observed = await app.acis.fetch_daily_high(cfg.station, event_date)
-        observed_by_date[event_date] = observed
+    observed_by_station_date: dict[tuple[str, date], Decimal | None] = {}
+    unique_keys: set[tuple[str, date]] = {
+        (STATIONS[parsed.series].station, parsed.event_date) for _row, parsed in eligible
+    }
+    for station, event_date in sorted(unique_keys):
+        observed = await app.acis.fetch_daily_high(station, event_date)
+        observed_by_station_date[(station, event_date)] = observed
         if observed is None:
             logger.info(
                 "settlement_pending station=%s date=%s",
-                cfg.station,
+                station,
                 event_date.isoformat(),
             )
 
     async with app.db_lock:
         with app.session_factory() as session:
             for row, parsed in eligible:
-                observed = observed_by_date[parsed.event_date]
+                key = (STATIONS[parsed.series].station, parsed.event_date)
+                observed = observed_by_station_date[key]
                 if observed is None:
                     pending += 1
                     continue
@@ -598,17 +785,28 @@ async def run(app: App, duration: timedelta) -> None:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _parse_series_arg(raw: str) -> tuple[str, ...]:
+    if raw == "all":
+        return tuple(STATIONS.keys())
+    requested = tuple(s.strip() for s in raw.split(",") if s.strip())
+    unknown = [s for s in requested if s not in STATIONS]
+    if unknown:
+        sys.stderr.write(f"unsupported series: {unknown}; supported: {sorted(STATIONS)}\n")
+        sys.exit(2)
+    if not requested:
+        sys.stderr.write("--series is empty; pass 'all' or a comma-separated list\n")
+        sys.exit(2)
+    return requested
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bot.main")
     parser.add_argument("--mode", choices=["paper"], default="paper")
-    parser.add_argument("--series", default="KXHIGHDEN")
+    parser.add_argument("--series", default="all")
     parser.add_argument("--duration", default="24h")
     args = parser.parse_args()
 
-    if args.series not in STATIONS:
-        sys.stderr.write(f"unsupported series {args.series!r}; supported: {sorted(STATIONS)}\n")
-        sys.exit(2)
-
+    series_list = _parse_series_arg(args.series)
     duration = _parse_duration(args.duration)
 
     settings = get_settings()
@@ -631,7 +829,7 @@ def main() -> None:
         meteo=meteo,
         kalshi=kalshi,
         acis=acis,
-        series=args.series,
+        series_list=series_list,
     )
 
     async def _go() -> None:
