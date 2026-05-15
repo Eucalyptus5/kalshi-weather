@@ -225,6 +225,7 @@ class App:
     acis: ACISClient
     series_list: tuple[str, ...]
     db_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    reconcile_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     forecast_cdfs: dict[tuple[str, date], EnsembleCDF] = field(default_factory=dict)
     ensemble_spreads: dict[tuple[str, date], Decimal] = field(default_factory=dict)
     forecast_run_times: dict[tuple[str, date], datetime] = field(default_factory=dict)
@@ -738,13 +739,24 @@ async def _settlement_loop(app: App, stop: asyncio.Event) -> None:
     while not stop.is_set():
         try:
             now = datetime.now(tz=_timezone.utc)
-            await reconcile_settled_trades(app, now)
+            async with app.reconcile_lock:
+                await reconcile_settled_trades(app, now)
         except Exception:
             logger.exception("loop_iteration_failed name=settlement_loop")
         try:
             await asyncio.wait_for(stop.wait(), timeout=SETTLEMENT_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
+
+
+async def _on_demand_reconcile(app: App) -> None:
+    async with app.reconcile_lock:
+        now = datetime.now(tz=_timezone.utc)
+        try:
+            reconciled = await reconcile_settled_trades(app, now)
+            logger.info("reconcile_on_demand reconciled=%d", reconciled)
+        except Exception:
+            logger.exception("reconcile_on_demand_failed")
 
 
 async def _forecast_loop(app: App, stop: asyncio.Event) -> None:
@@ -780,6 +792,15 @@ async def run(app: App, duration: timedelta) -> None:
                 loop.add_signal_handler(sig, stop.set)
             except NotImplementedError:
                 pass
+
+    sig_usr1 = getattr(signal, "SIGUSR1", None)
+    if sig_usr1 is not None:
+        try:
+            loop.add_signal_handler(
+                sig_usr1, lambda: asyncio.create_task(_on_demand_reconcile(app))
+            )
+        except NotImplementedError:
+            pass
 
     tasks = [
         asyncio.create_task(_forecast_loop(app, stop), name="forecast_loop"),

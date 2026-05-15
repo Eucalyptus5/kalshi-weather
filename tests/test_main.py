@@ -24,6 +24,7 @@ from bot.main import (
     App,
     _build_intents,
     _forecast_loop,
+    _on_demand_reconcile,
     _parse_duration,
     _parse_series_arg,
     _settlement_loop,
@@ -1739,3 +1740,105 @@ async def test_evaluate_strategies_no_index_error_on_single_strike() -> None:
 
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     await evaluate_strategies(app, now)
+
+
+async def test_on_demand_reconcile_writes_simulated_pnl(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    acis = _StubACIS(Decimal("71"))
+    app = _make_app(acis=acis)
+
+    trade_id = _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-26MAY05-T70.5-72.5",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+    )
+
+    caplog.set_level(logging.INFO, logger="bot.main")
+    await _on_demand_reconcile(app)
+
+    with app.session_factory() as session:
+        rows = session.scalars(select(SimulatedPnl)).all()
+    assert len(rows) == 1
+    assert rows[0].paper_trade_id == trade_id
+    assert rows[0].outcome == "won"
+    assert rows[0].realized_pnl == Decimal("5.95")
+
+    matches = [r for r in caplog.records if "reconcile_on_demand reconciled=1" in r.getMessage()]
+    assert matches, "expected log: reconcile_on_demand reconciled=1"
+
+
+async def test_on_demand_reconcile_logs_zero_when_nothing_eligible(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    acis = _StubACIS(Decimal("71"))
+    app = _make_app(acis=acis)
+
+    caplog.set_level(logging.INFO, logger="bot.main")
+    await _on_demand_reconcile(app)
+
+    with app.session_factory() as session:
+        rows = session.scalars(select(SimulatedPnl)).all()
+    assert rows == []
+
+    matches = [r for r in caplog.records if "reconcile_on_demand reconciled=0" in r.getMessage()]
+    assert matches, "expected log: reconcile_on_demand reconciled=0"
+
+
+class _LockObservingACIS:
+    def __init__(self, app: App, value: Decimal) -> None:
+        self._app = app
+        self._value = value
+        self.active = 0
+        self.max_active = 0
+        self.lock_held_during_calls: list[bool] = []
+        self.calls: list[tuple[str, date]] = []
+
+    async def fetch_daily_high(self, station: str, settled_date: date) -> Decimal | None:
+        self.calls.append((station, settled_date))
+        self.lock_held_during_calls.append(self._app.reconcile_lock.locked())
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        try:
+            await asyncio.sleep(0.02)
+            return self._value
+        finally:
+            self.active -= 1
+
+    async def aclose(self) -> None:
+        return None
+
+
+async def test_on_demand_reconcile_lock_serializes_with_periodic() -> None:
+    app = _make_app()
+    acis = _LockObservingACIS(app, Decimal("71"))
+    app.acis = acis  # type: ignore[assignment]
+
+    for day in (date(2026, 5, 5), date(2026, 5, 6)):
+        _insert_paper_trade(
+            app,
+            market_ticker=f"KXHIGHDEN-{day.strftime('%y%b%d').upper()}-T70.5-72.5",
+            side="buy_yes",
+            contracts=10,
+            simulated_price=Decimal("0.40"),
+            fee_dollars=Decimal("0.05"),
+            fair_at_entry=Decimal("0.50"),
+            strategy="edge",
+            intended_at=datetime(day.year, day.month, day.day, 18, 0, tzinfo=timezone.utc),
+        )
+
+    await asyncio.gather(_on_demand_reconcile(app), _on_demand_reconcile(app))
+
+    assert acis.calls, "ACIS was never invoked"
+    assert all(acis.lock_held_during_calls), "reconcile_lock was not held during ACIS fetch"
+    assert acis.max_active == 1, "two reconciles ran concurrently inside the lock"
+
+    with app.session_factory() as session:
+        rows = session.scalars(select(SimulatedPnl)).all()
+    assert len(rows) == 2
