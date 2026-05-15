@@ -205,3 +205,50 @@ def test_signal_is_frozen_dataclass() -> None:
     sig = evaluate(_ctx())
     with pytest.raises(Exception):
         sig.contracts = 99  # type: ignore[misc]
+
+
+def test_yes_bid_zero_skips() -> None:
+    sig = evaluate(
+        _ctx(
+            yes_ask=Decimal("0.85"),
+            yes_bid=Decimal("0"),
+            no_bid=Decimal("0.10"),
+            fair_yes=Decimal("0.02"),
+        )
+    )
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == "no_yes_bid"
+    assert sig.contracts == 0
+    assert sig.notional_dollars == Decimal("0")
+
+
+def test_yes_bid_strict_positive_passes() -> None:
+    sig = evaluate(
+        _ctx(
+            yes_ask=Decimal("0.85"),
+            yes_bid=Decimal("0.01"),
+            no_bid=Decimal("0.10"),
+            fair_yes=Decimal("0.02"),
+        )
+    )
+    assert sig.action is TailsAction.SELL_YES
+
+
+def test_yes_bid_negative_also_skipped() -> None:
+    sig = evaluate(_ctx(yes_bid=Decimal("-0.01")))
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == "no_yes_bid"
+
+
+@pytest.mark.parametrize(
+    "overrides, expected_reason",
+    [
+        ({"yes_bid": Decimal("0"), "no_bid": Decimal("0")}, "no_no_bid"),
+        ({"yes_bid": Decimal("0"), "yes_ask": Decimal("0.05")}, "ask_too_low"),
+        ({"yes_bid": Decimal("0"), "fair_yes": Decimal("0.10")}, "no_yes_bid"),
+    ],
+)
+def test_yes_bid_gate_ordering(overrides: dict[str, Decimal], expected_reason: str) -> None:
+    sig = evaluate(_ctx(**overrides))
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == expected_reason
