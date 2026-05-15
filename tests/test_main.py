@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from sqlalchemy import select
 
 import bot.main as bot_main
+from bot.forecast.cdf import EnsembleCDF
 from bot.forecast.open_meteo import StationForecast
 from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook
 from bot.main import (
@@ -43,6 +44,8 @@ from bot.storage.sqlite import (
     make_engine,
     make_session_factory,
 )
+from bot.strategy import edge as edge_strategy
+from bot.strategy import tails as tails_strategy
 
 
 class _StubMeteo:
@@ -670,7 +673,52 @@ async def test_evaluate_strategies_skips_market_without_forecast() -> None:
     assert rows == []
 
 
-async def test_evaluate_strategies_skips_tail_markets() -> None:
+async def test_evaluate_strategies_runs_tails_on_single_strike_market(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(2).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+
+    tail = _market_from(
+        "KXHIGHDEN-26MAY08-T100",
+        "0.50",
+        "0.48",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(tail.ticker, "0.50", "0.48")
+    kalshi = _StubKalshi(markets=[tail], orderbooks={tail.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    seen: list[tails_strategy.TailsContext] = []
+    real_evaluate = tails_strategy.evaluate
+
+    def recorder(ctx: tails_strategy.TailsContext, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(ctx)
+        return real_evaluate(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.tails_strategy, "evaluate", recorder)
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    n_trades = await evaluate_strategies(app, now)
+
+    assert seen, "tails_strategy.evaluate was not reached for tail ticker"
+    assert n_trades >= 1
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert any(t.strategy == "tails" for t in trades)
+
+
+async def test_evaluate_strategies_tail_market_no_trade_when_gates_block() -> None:
     fc = StationForecast(
         station="KDEN",
         latitude=39.8466,
@@ -698,6 +746,9 @@ async def test_evaluate_strategies_skips_tail_markets() -> None:
     n_trades = await evaluate_strategies(app, now)
 
     assert n_trades == 0
+    with app.session_factory() as session:
+        rows = session.scalars(select(PaperTradeRow)).all()
+    assert rows == []
 
 
 async def test_evaluate_strategies_uses_per_ticker_cdf_not_app_series() -> None:
@@ -792,6 +843,7 @@ def test_build_intents_skips_blacklisted_lax_series() -> None:
         mid=Decimal("0.19"),
         is_same_day=False,
         is_blacklisted=True,
+        is_tail=False,
         now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
     )
     assert intents == []
@@ -810,6 +862,7 @@ def test_build_intents_skips_blacklisted_mia_series() -> None:
         mid=Decimal("0.19"),
         is_same_day=False,
         is_blacklisted=True,
+        is_tail=False,
         now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
     )
     assert intents == []
@@ -828,6 +881,7 @@ def test_build_intents_emits_for_normal_series() -> None:
         mid=Decimal("0.19"),
         is_same_day=False,
         is_blacklisted=False,
+        is_tail=False,
         now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
     )
     assert intents
@@ -1315,3 +1369,239 @@ async def test_forecast_loop_retries_quickly_on_failure(
         and "name=forecast_loop" in r.getMessage()
     ]
     assert matches, "expected an ERROR log with loop_iteration_failed name=forecast_loop"
+
+
+async def test_evaluate_strategies_bracket_uses_prob_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.20", "0.18")
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    seen: list[edge_strategy.EdgeContext] = []
+    real_evaluate = edge_strategy.evaluate
+
+    def recorder(ctx: edge_strategy.EdgeContext, **kwargs):  # type: ignore[no-untyped-def]
+        seen.append(ctx)
+        return real_evaluate(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", recorder)
+
+    parsed = parse_ticker(market.ticker)
+    assert parsed.kind == "bracket"
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    await evaluate_strategies(app, now)
+
+    assert seen, "edge_strategy.evaluate was not reached for bracket ticker"
+    cdf = app.forecast_cdfs[("KDEN", date(2026, 5, 8))]
+    expected = Decimal(str(cdf.prob_range(70.0, 75.0)))
+    assert seen[0].fair_yes == expected
+
+
+def test_fair_yes_per_market_form() -> None:
+    members = np.array(
+        [72.0 + delta for delta in (-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0)],
+        dtype=np.float64,
+    )
+    cdf = EnsembleCDF.from_members(members, smoothing=1.0)
+
+    bracket_fair = Decimal(str(cdf.prob_range(70.0, 75.0)))
+    above_fair = Decimal(str(1.0 - cdf.cdf(75.0)))
+    below_fair = Decimal(str(cdf.cdf(70.0)))
+
+    assert bracket_fair > Decimal("0")
+    assert above_fair > Decimal("0")
+    assert below_fair > Decimal("0")
+    total = bracket_fair + above_fair + below_fair
+    assert total <= Decimal("1") + Decimal("0.001")
+
+
+def test_build_intents_routes_tail_to_tails_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHDEN-26MAY08-T100", "0.50", "0.48", close_at)
+    book = _book_from(market.ticker, "0.50", "0.48")
+
+    edge_calls: list[edge_strategy.EdgeContext] = []
+    tails_calls: list[tails_strategy.TailsContext] = []
+
+    def edge_rec(ctx: edge_strategy.EdgeContext, **_):  # type: ignore[no-untyped-def]
+        edge_calls.append(ctx)
+        return edge_strategy.EdgeSignal(
+            action=edge_strategy.EdgeAction.SKIP,
+            contracts=0,
+            notional_dollars=Decimal("0"),
+            reason="stub",
+        )
+
+    def tails_rec(ctx: tails_strategy.TailsContext, **_):  # type: ignore[no-untyped-def]
+        tails_calls.append(ctx)
+        return tails_strategy.TailsSignal(
+            action=tails_strategy.TailsAction.SKIP,
+            contracts=0,
+            notional_dollars=Decimal("0"),
+            reason="stub",
+        )
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", edge_rec)
+    monkeypatch.setattr(bot_main.tails_strategy, "evaluate", tails_rec)
+
+    _build_intents(
+        ticker=market.ticker,
+        market=market,
+        book=book,
+        fair_yes=Decimal("0.04"),
+        spread=Decimal("3.0"),
+        mid=Decimal("0.49"),
+        is_same_day=False,
+        is_blacklisted=False,
+        is_tail=True,
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert edge_calls == []
+    assert len(tails_calls) == 1
+
+
+def test_build_intents_routes_bracket_to_edge_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHDEN-26MAY08-T70-75", "0.20", "0.18", close_at)
+    book = _book_from(market.ticker, "0.20", "0.18")
+
+    edge_calls: list[edge_strategy.EdgeContext] = []
+    tails_calls: list[tails_strategy.TailsContext] = []
+
+    def edge_rec(ctx: edge_strategy.EdgeContext, **_):  # type: ignore[no-untyped-def]
+        edge_calls.append(ctx)
+        return edge_strategy.EdgeSignal(
+            action=edge_strategy.EdgeAction.SKIP,
+            contracts=0,
+            notional_dollars=Decimal("0"),
+            reason="stub",
+        )
+
+    def tails_rec(ctx: tails_strategy.TailsContext, **_):  # type: ignore[no-untyped-def]
+        tails_calls.append(ctx)
+        return tails_strategy.TailsSignal(
+            action=tails_strategy.TailsAction.SKIP,
+            contracts=0,
+            notional_dollars=Decimal("0"),
+            reason="stub",
+        )
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", edge_rec)
+    monkeypatch.setattr(bot_main.tails_strategy, "evaluate", tails_rec)
+
+    _build_intents(
+        ticker=market.ticker,
+        market=market,
+        book=book,
+        fair_yes=Decimal("0.50"),
+        spread=Decimal("3.0"),
+        mid=Decimal("0.19"),
+        is_same_day=False,
+        is_blacklisted=False,
+        is_tail=False,
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(edge_calls) == 1
+    assert tails_calls == []
+
+
+def test_build_intents_blacklisted_skips_both(monkeypatch: pytest.MonkeyPatch) -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHLAX-26MAY08-T100", "0.50", "0.48", close_at)
+    book = _book_from(market.ticker, "0.50", "0.48")
+
+    edge_calls: list[edge_strategy.EdgeContext] = []
+    tails_calls: list[tails_strategy.TailsContext] = []
+
+    def edge_rec(ctx: edge_strategy.EdgeContext, **_):  # type: ignore[no-untyped-def]
+        edge_calls.append(ctx)
+        return edge_strategy.EdgeSignal(
+            action=edge_strategy.EdgeAction.SKIP,
+            contracts=0,
+            notional_dollars=Decimal("0"),
+            reason="stub",
+        )
+
+    def tails_rec(ctx: tails_strategy.TailsContext, **_):  # type: ignore[no-untyped-def]
+        tails_calls.append(ctx)
+        return tails_strategy.TailsSignal(
+            action=tails_strategy.TailsAction.SKIP,
+            contracts=0,
+            notional_dollars=Decimal("0"),
+            reason="stub",
+        )
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", edge_rec)
+    monkeypatch.setattr(bot_main.tails_strategy, "evaluate", tails_rec)
+
+    for is_tail in (True, False):
+        edge_calls.clear()
+        tails_calls.clear()
+        _build_intents(
+            ticker=market.ticker,
+            market=market,
+            book=book,
+            fair_yes=Decimal("0.04"),
+            spread=Decimal("3.0"),
+            mid=Decimal("0.49"),
+            is_same_day=False,
+            is_blacklisted=True,
+            is_tail=is_tail,
+            now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+        )
+        if is_tail:
+            assert tails_calls == []
+        else:
+            assert len(edge_calls) == 1
+
+
+async def test_evaluate_strategies_no_index_error_on_single_strike() -> None:
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(3).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    tail = _market_from(
+        "KXHIGHDEN-26MAY08-B70",
+        "0.50",
+        "0.48",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(tail.ticker, "0.50", "0.48")
+    kalshi = _StubKalshi(markets=[tail], orderbooks={tail.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    parsed = parse_ticker(tail.ticker)
+    assert len(parsed.strikes) == 1
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    await evaluate_strategies(app, now)

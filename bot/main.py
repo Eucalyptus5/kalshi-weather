@@ -393,9 +393,6 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                 except ValueError as err:
                     logger.warning("eval_unparseable_ticker ticker=%s err=%s", ticker, err)
                     continue
-                if parsed.is_tail:
-                    logger.debug("skip_tail ticker=%s", ticker)
-                    continue
 
                 cfg = STATIONS.get(parsed.series)
                 if cfg is None:
@@ -409,9 +406,14 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                 spread = app.ensemble_spreads[cdf_key]
                 run_time = app.forecast_run_times[cdf_key]
 
-                lo = float(parsed.strikes[0])
-                hi = float(parsed.strikes[1])
-                fair_yes = Decimal(str(cdf.prob_range(lo, hi)))
+                if parsed.kind == "bracket":
+                    lo = float(parsed.strikes[0])
+                    hi = float(parsed.strikes[1])
+                    fair_yes = Decimal(str(cdf.prob_range(lo, hi)))
+                elif parsed.kind == "above":
+                    fair_yes = Decimal(str(1.0 - cdf.cdf(float(parsed.strikes[0]))))
+                else:
+                    fair_yes = Decimal(str(cdf.cdf(float(parsed.strikes[0]))))
 
                 start_utc, end_utc = observation_window(cfg.timezone, parsed.event_date)
                 is_same_day = start_utc <= now < end_utc
@@ -428,6 +430,7 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                     mid=mid,
                     is_same_day=is_same_day,
                     is_blacklisted=is_blacklisted,
+                    is_tail=parsed.is_tail,
                     now=now,
                 ):
                     gate_ctx = _gate_ctx_for(
@@ -471,43 +474,45 @@ def _build_intents(
     mid: Decimal,
     is_same_day: bool,
     is_blacklisted: bool,
+    is_tail: bool,
     now: datetime,
 ) -> list[TradeIntent]:
     intents: list[TradeIntent] = []
 
-    edge_ctx = edge_strategy.EdgeContext(
-        yes_ask=book.yes_ask,
-        yes_bid=book.yes_bid,
-        fair_yes=fair_yes,
-        ensemble_spread=spread,
-        bankroll=PAPER_BANKROLL,
-        is_same_day=is_same_day,
-        is_blacklisted=is_blacklisted,
-        nbm_divergence=None,
-    )
-    edge_sig = edge_strategy.evaluate(edge_ctx)
-    if edge_sig.action is edge_strategy.EdgeAction.BUY_YES:
-        intents.append(
-            TradeIntent(
-                market_ticker=ticker,
-                side=TradeSide.BUY_YES,
-                contracts=edge_sig.contracts,
-                fair_yes=fair_yes,
-                strategy="edge",
-            )
+    if not is_tail:
+        edge_ctx = edge_strategy.EdgeContext(
+            yes_ask=book.yes_ask,
+            yes_bid=book.yes_bid,
+            fair_yes=fair_yes,
+            ensemble_spread=spread,
+            bankroll=PAPER_BANKROLL,
+            is_same_day=is_same_day,
+            is_blacklisted=is_blacklisted,
+            nbm_divergence=None,
         )
-    elif edge_sig.action is edge_strategy.EdgeAction.SELL_YES:
-        intents.append(
-            TradeIntent(
-                market_ticker=ticker,
-                side=TradeSide.SELL_YES,
-                contracts=edge_sig.contracts,
-                fair_yes=fair_yes,
-                strategy="edge",
+        edge_sig = edge_strategy.evaluate(edge_ctx)
+        if edge_sig.action is edge_strategy.EdgeAction.BUY_YES:
+            intents.append(
+                TradeIntent(
+                    market_ticker=ticker,
+                    side=TradeSide.BUY_YES,
+                    contracts=edge_sig.contracts,
+                    fair_yes=fair_yes,
+                    strategy="edge",
+                )
             )
-        )
+        elif edge_sig.action is edge_strategy.EdgeAction.SELL_YES:
+            intents.append(
+                TradeIntent(
+                    market_ticker=ticker,
+                    side=TradeSide.SELL_YES,
+                    contracts=edge_sig.contracts,
+                    fair_yes=fair_yes,
+                    strategy="edge",
+                )
+            )
 
-    if not is_blacklisted and market.close_time is not None:
+    if is_tail and not is_blacklisted and market.close_time is not None:
         tails_ctx = tails_strategy.TailsContext(
             yes_ask=book.yes_ask,
             yes_bid=book.yes_bid,
