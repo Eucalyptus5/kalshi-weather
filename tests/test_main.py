@@ -1129,6 +1129,75 @@ async def test_reconcile_settled_trades_skips_eligibility() -> None:
     assert acis.calls == []
 
 
+async def test_reconcile_grace_yesterday_is_eligible() -> None:
+    acis = _StubACIS(Decimal("71"))
+    app = _make_app(acis=acis)
+
+    _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-26MAY13-T70-72",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=datetime(2026, 5, 13, 18, 0, tzinfo=timezone.utc),
+    )
+
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    n = await reconcile_settled_trades(app, now)
+
+    assert n == 1
+    assert acis.calls == [("KDEN", date(2026, 5, 13))]
+
+
+async def test_reconcile_grace_today_still_skipped() -> None:
+    acis = _StubACIS(Decimal("71"))
+    app = _make_app(acis=acis)
+
+    _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-26MAY14-T70-72",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=datetime(2026, 5, 14, 18, 0, tzinfo=timezone.utc),
+    )
+
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    n = await reconcile_settled_trades(app, now)
+
+    assert n == 0
+    assert acis.calls == []
+
+
+async def test_reconcile_grace_two_days_ago_still_eligible() -> None:
+    acis = _StubACIS(Decimal("71"))
+    app = _make_app(acis=acis)
+
+    _insert_paper_trade(
+        app,
+        market_ticker="KXHIGHDEN-26MAY12-T70-72",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        intended_at=datetime(2026, 5, 12, 18, 0, tzinfo=timezone.utc),
+    )
+
+    now = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
+    n = await reconcile_settled_trades(app, now)
+
+    assert n == 1
+    assert acis.calls == [("KDEN", date(2026, 5, 12))]
+
+
 async def test_reconcile_settled_trades_idempotent() -> None:
     acis = _StubACIS(Decimal("71"))
     app = _make_app(acis=acis)

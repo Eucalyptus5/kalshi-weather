@@ -659,7 +659,7 @@ async def reconcile_settled_trades(app: App, now: datetime) -> int:
             )
             skipped += 1
             continue
-        if parsed.event_date >= cutoff:
+        if parsed.event_date > cutoff:
             continue
         if parsed.series not in STATIONS:
             logger.warning(
