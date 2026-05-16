@@ -6,8 +6,12 @@ from decimal import Decimal
 
 import pytest
 
+from bot.execution.fees import taker_fee
 from bot.strategy.tails import (
     DEFAULT_POSITION_CAP,
+    FAIR_THRESHOLD,
+    FEE_CUSHION,
+    YES_BID_FLOOR,
     TailsAction,
     TailsContext,
     evaluate,
@@ -222,16 +226,100 @@ def test_yes_bid_zero_skips() -> None:
     assert sig.notional_dollars == Decimal("0")
 
 
-def test_yes_bid_strict_positive_passes() -> None:
+def test_yes_bid_below_floor_skips() -> None:
     sig = evaluate(
         _ctx(
             yes_ask=Decimal("0.85"),
-            yes_bid=Decimal("0.01"),
+            yes_bid=Decimal("0.06"),
+            no_bid=Decimal("0.10"),
+            fair_yes=Decimal("0.02"),
+        )
+    )
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == "no_yes_bid"
+    assert sig.contracts == 0
+
+
+def test_yes_bid_at_floor_passes() -> None:
+    sig = evaluate(
+        _ctx(
+            yes_ask=Decimal("0.85"),
+            yes_bid=Decimal("0.075"),
             no_bid=Decimal("0.10"),
             fair_yes=Decimal("0.02"),
         )
     )
     assert sig.action is TailsAction.SELL_YES
+
+
+def test_yes_bid_floor_covers_fee_cushion() -> None:
+    assert YES_BID_FLOOR >= FAIR_THRESHOLD + FEE_CUSHION
+    assert FEE_CUSHION > Decimal("0")
+
+
+def test_yes_bid_floor_admit_is_net_ev_positive() -> None:
+    ctx = _ctx(
+        yes_ask=Decimal("0.85"),
+        yes_bid=YES_BID_FLOOR,
+        no_bid=Decimal("0.10"),
+        fair_yes=FAIR_THRESHOLD - Decimal("0.00001"),
+    )
+    sig = evaluate(ctx)
+    assert sig.action is TailsAction.SELL_YES
+    gross = ctx.yes_bid - ctx.fair_yes
+    fee = taker_fee(1, ctx.yes_bid)
+    assert gross - fee > Decimal("0")
+
+
+def test_net_ev_anchor_fires_when_taker_rate_breaks_invariant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("bot.execution.fees.TAKER_RATE", Decimal("0.073"))
+    ctx = _ctx(
+        yes_ask=Decimal("0.85"),
+        yes_bid=YES_BID_FLOOR,
+        no_bid=Decimal("0.10"),
+        fair_yes=FAIR_THRESHOLD - Decimal("0.00001"),
+    )
+    gross = ctx.yes_bid - ctx.fair_yes
+    fee = taker_fee(1, ctx.yes_bid)
+    assert gross - fee <= Decimal("0")
+
+
+@pytest.mark.parametrize(
+    "yes_bid",
+    [
+        Decimal("0.05"),
+        Decimal("0.06"),
+        Decimal("0.069"),
+        Decimal("0.07"),
+        Decimal("0.074"),
+    ],
+)
+def test_yes_bid_in_contaminated_band_is_skipped(yes_bid: Decimal) -> None:
+    sig = evaluate(
+        _ctx(
+            yes_ask=Decimal("0.85"),
+            yes_bid=yes_bid,
+            no_bid=Decimal("0.10"),
+            fair_yes=Decimal("0.02"),
+        )
+    )
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == "no_yes_bid"
+
+
+@pytest.mark.parametrize(
+    "overrides, expected_reason",
+    [
+        ({"yes_bid": Decimal("0.06"), "no_bid": Decimal("0")}, "no_no_bid"),
+        ({"yes_bid": Decimal("0.06"), "yes_ask": Decimal("0.05")}, "ask_too_low"),
+    ],
+)
+def test_yes_bid_floor_parametrize(overrides: dict[str, Decimal], expected_reason: str) -> None:
+    sig = evaluate(_ctx(**overrides))
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == expected_reason
 
 
 def test_yes_bid_negative_also_skipped() -> None:

@@ -284,3 +284,28 @@ def test_reconcile_trade_dispatches_above_tail() -> None:
     out = reconcile_trade(trade, parsed, Decimal("95"))
     assert out.yes_settled is False
     assert out.won is False
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "deferred to parser_b_form_bracket.md - reconcile dispatches via "
+        "parsed.is_bracket so B-form misroutes settle on the wrong semantic"
+    ),
+)
+def test_b_form_bracket_semantic_pending_defect_c() -> None:
+    from datetime import datetime, timezone
+
+    parsed = parse_ticker("KXHIGHDEN-26MAY19-B49.5")
+    trade = PaperTrade(
+        intended_at=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        market_ticker="KXHIGHDEN-26MAY19-B49.5",
+        side=TradeSide.SELL_YES,
+        contracts=10,
+        simulated_price=Decimal("0.85"),
+        fee_dollars=Decimal("0.04"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="t",
+    )
+    out = reconcile_trade(trade, parsed, Decimal("48"))
+    assert out.yes_settled is False

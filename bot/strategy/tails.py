@@ -33,6 +33,8 @@ class TailsSignal:
 
 ASK_THRESHOLD: Decimal = Decimal("0.10")
 FAIR_THRESHOLD: Decimal = Decimal("0.07")
+FEE_CUSHION: Decimal = Decimal("0.005")
+YES_BID_FLOOR: Decimal = FAIR_THRESHOLD + FEE_CUSHION
 MIN_MINUTES_TO_CLOSE: int = 60
 DEFAULT_KELLY_FRACTION: Decimal = Decimal("0.15")
 DEFAULT_POSITION_CAP: Decimal = Decimal("50")
@@ -57,7 +59,7 @@ def evaluate(
         return _skip("ask_too_low")
     if ctx.no_bid <= Decimal("0"):
         return _skip("no_no_bid")
-    if ctx.yes_bid <= Decimal("0"):
+    if ctx.yes_bid < YES_BID_FLOOR:
         return _skip("no_yes_bid")
     if ctx.fair_yes >= FAIR_THRESHOLD:
         return _skip("fair_too_high")
