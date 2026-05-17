@@ -623,3 +623,71 @@ async def test_event_ticker_negative_control_helper_mutation_breaks_equivalence(
             mismatches += 1
 
     assert mismatches >= 1
+
+
+async def test_get_orderbook_parses_depth_from_levels(rsa_pem: Path) -> None:
+    payload_str = {
+        "orderbook_fp": {
+            "yes_dollars": [["0.42", "13"]],
+            "no_dollars": [["0.55", "7"]],
+        }
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload_str)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        book = await client.get_orderbook("KXHIGHDEN-26MAY06-T70-75")
+
+    assert book.yes_bid == Decimal("0.42")
+    assert book.yes_bid_depth == 13
+    assert book.no_bid_depth == 7
+    assert book.yes_ask_depth == 7
+    assert book.no_ask_depth == 13
+
+    payload_int = {
+        "orderbook_fp": {
+            "yes_dollars": [["0.42", 13]],
+            "no_dollars": [["0.55", 7]],
+        }
+    }
+
+    def handler_int(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload_int)
+
+    transport_int = httpx.MockTransport(handler_int)
+    async with httpx.AsyncClient(
+        transport=transport_int, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        book = await client.get_orderbook("KXHIGHDEN-26MAY06-T70-75")
+
+    assert book.yes_bid_depth == 13
+    assert book.no_bid_depth == 7
+
+
+async def test_get_orderbook_zero_depth_for_empty_book(rsa_pem: Path) -> None:
+    payload = {"orderbook_fp": {"yes_dollars": None, "no_dollars": None}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        book = await client.get_orderbook("KXHIGHDEN-26MAY06-T70-75")
+
+    assert book.yes_bid == Decimal("0")
+    assert book.yes_bid_depth == 0
+    assert book.no_bid_depth == 0
+    assert book.yes_ask_depth == 0
+    assert book.no_ask_depth == 0

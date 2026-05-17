@@ -32,7 +32,7 @@ def _ctx(**overrides: object) -> GateContext:
         "series_position_cap": Decimal("100"),
         "account_balance": Decimal("500"),
         "required_cushion": Decimal("100"),
-        "market_status": "open",
+        "market_status": "active",
         "minutes_to_close": 60,
         "circuit_breakers_armed": True,
     }
@@ -261,6 +261,45 @@ def test_account_cushion_violation_fails() -> None:
 
 def test_market_closed_fails() -> None:
     check = evaluate(_ctx(market_status="closed"), GateMode.LIVE)
+    assert check.overall_passed is False
+    assert {r.name for r in check.failures} == {"market_open"}
+
+
+def test_market_open_accepts_active() -> None:
+    check = evaluate(_ctx(market_status="active"), GateMode.LIVE)
+    assert check.overall_passed is True
+    assert "market_open" not in {r.name for r in check.failures}
+
+
+def test_market_open_rejects_closed(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="bot.risk.gates")
+    check = evaluate(_ctx(market_status="closed"), GateMode.LIVE)
+    assert check.overall_passed is False
+    assert {r.name for r in check.failures} == {"market_open"}
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert not any("market_open_unknown_status" in m for m in messages)
+
+
+def test_market_open_rejects_settled(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="bot.risk.gates")
+    check = evaluate(_ctx(market_status="settled"), GateMode.LIVE)
+    assert check.overall_passed is False
+    assert {r.name for r in check.failures} == {"market_open"}
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert not any("market_open_unknown_status" in m for m in messages)
+
+
+def test_market_open_unknown_status_fails_and_warns(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="bot.risk.gates")
+    check = evaluate(_ctx(market_status="frobnicated"), GateMode.LIVE)
+    assert check.overall_passed is False
+    assert {r.name for r in check.failures} == {"market_open"}
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("market_open_unknown_status" in m and "frobnicated" in m for m in messages)
+
+
+def test_market_open_rejects_open_string() -> None:
+    check = evaluate(_ctx(market_status="open"), GateMode.LIVE)
     assert check.overall_passed is False
     assert {r.name for r in check.failures} == {"market_open"}
 

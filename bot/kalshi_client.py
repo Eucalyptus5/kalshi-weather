@@ -35,6 +35,10 @@ class KalshiOrderbook:
     yes_bid: Decimal
     no_ask: Decimal
     no_bid: Decimal
+    yes_ask_depth: int
+    yes_bid_depth: int
+    no_ask_depth: int
+    no_bid_depth: int
     snapshot_at: datetime
 
 
@@ -135,10 +139,12 @@ class KalshiDemoClient:
         if ob is None:
             raise KeyError(f"orderbook response missing orderbook_fp / orderbook key: {ticker}")
 
-        yes_bid = _best_price(ob.get("yes_dollars"))
-        no_bid = _best_price(ob.get("no_dollars"))
+        yes_bid, yes_bid_depth = _best_level(ob.get("yes_dollars"))
+        no_bid, no_bid_depth = _best_level(ob.get("no_dollars"))
         yes_ask = Decimal("1") - no_bid
         no_ask = Decimal("1") - yes_bid
+        yes_ask_depth = no_bid_depth
+        no_ask_depth = yes_bid_depth
 
         return KalshiOrderbook(
             ticker=ticker,
@@ -146,6 +152,10 @@ class KalshiDemoClient:
             yes_bid=yes_bid,
             no_ask=no_ask,
             no_bid=no_bid,
+            yes_ask_depth=yes_ask_depth,
+            yes_bid_depth=yes_bid_depth,
+            no_ask_depth=no_ask_depth,
+            no_bid_depth=no_bid_depth,
             snapshot_at=datetime.now(tz=_timezone.utc),
         )
 
@@ -159,7 +169,8 @@ def _parse_close_time(raw: object) -> datetime | None:
     return datetime.fromisoformat(text)
 
 
-def _best_price(levels: list[list[str]] | None) -> Decimal:
+def _best_level(levels: list[list[str]] | None) -> tuple[Decimal, int]:
     if not levels:
-        return Decimal("0")
-    return max(Decimal(str(level[0])) for level in levels)
+        return Decimal("0"), 0
+    best = max(levels, key=lambda lvl: Decimal(str(lvl[0])))
+    return Decimal(str(best[0])), int(best[1])

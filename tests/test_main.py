@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ast
 import asyncio
+import dataclasses
+import inspect as py_inspect
 import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -12,10 +15,10 @@ import numpy as np
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
-from sqlalchemy import select
+from sqlalchemy import inspect as sa_inspect, select
 
 import bot.main as bot_main
-from bot.execution.paper import TradeIntent, TradeSide
+from bot.execution.paper import PaperTrade, TradeIntent, TradeSide
 from bot.forecast.cdf import EnsembleCDF
 from bot.forecast.open_meteo import StationForecast
 from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook
@@ -23,7 +26,10 @@ from bot.main import (
     STATIONS,
     STRATEGY_BLACKLIST,
     App,
+    _bootstrap_schema,
     _build_intents,
+    _checkpoint_wal,
+    _compute_lead_time_hours,
     _forecast_loop,
     _gate_ctx_for,
     _on_demand_reconcile,
@@ -35,6 +41,7 @@ from bot.main import (
     reconcile_settled_trades,
     refresh_forecasts,
     refresh_markets,
+    run,
 )
 from bot.markets.parser import parse_ticker
 from bot.storage.sqlite import (
@@ -163,25 +170,49 @@ def _forecast_with_two_days() -> StationForecast:
     )
 
 
-def _book_from(ticker: str, yes_ask: str, yes_bid: str) -> KalshiOrderbook:
+def _book_from(
+    ticker: str,
+    yes_ask: str,
+    yes_bid: str,
+    *,
+    now: datetime | None = None,
+    snapshot_at: datetime | None = None,
+    yes_ask_depth: int = 1000,
+    yes_bid_depth: int = 1000,
+    no_ask_depth: int = 1000,
+    no_bid_depth: int = 1000,
+) -> KalshiOrderbook:
+    if snapshot_at is None:
+        anchor = now if now is not None else datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+        snapshot_at = anchor - timedelta(seconds=1)
     return KalshiOrderbook(
         ticker=ticker,
         yes_ask=Decimal(yes_ask),
         yes_bid=Decimal(yes_bid),
         no_ask=Decimal("1") - Decimal(yes_bid),
         no_bid=Decimal("1") - Decimal(yes_ask),
-        snapshot_at=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        yes_ask_depth=yes_ask_depth,
+        yes_bid_depth=yes_bid_depth,
+        no_ask_depth=no_ask_depth,
+        no_bid_depth=no_bid_depth,
+        snapshot_at=snapshot_at,
     )
 
 
-def _market_from(ticker: str, yes_ask: str, yes_bid: str, close_at: datetime) -> KalshiMarket:
+def _market_from(
+    ticker: str,
+    yes_ask: str,
+    yes_bid: str,
+    close_at: datetime,
+    status: str = "active",
+) -> KalshiMarket:
     series = ticker.split("-", 1)[0]
     event_ticker = "-".join(ticker.split("-")[:2])
     return KalshiMarket(
         ticker=ticker,
         event_ticker=event_ticker,
         series=series,
-        status="open",
+        status=status,
         close_time=close_at,
         yes_ask=Decimal(yes_ask),
         yes_bid=Decimal(yes_bid),
@@ -1780,8 +1811,9 @@ async def test_evaluate_strategies_b_form_uses_prob_range_not_cdf() -> None:
             return 0.99
 
     close_at = datetime(2026, 5, 19, 4, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
     market = _market_from("KXHIGHTNOLA-26MAY19-B86.5", "0.40", "0.38", close_at)
-    book = _book_from(market.ticker, "0.40", "0.38")
+    book = _book_from(market.ticker, "0.40", "0.38", now=now)
     kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
 
     app = _make_app(kalshi=kalshi, series_list=("KXHIGHTNOLA",))
@@ -1790,10 +1822,10 @@ async def test_evaluate_strategies_b_form_uses_prob_range_not_cdf() -> None:
     event_date = date(2026, 5, 19)
     app.forecast_cdfs[("KMSY", event_date)] = cdf  # type: ignore[assignment]
     app.ensemble_spreads[("KMSY", event_date)] = Decimal("3.0")
-    app.forecast_run_times[("KMSY", event_date)] = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    app.forecast_run_times[("KMSY", event_date)] = now
 
     await refresh_markets(app)
-    await evaluate_strategies(app, datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc))
+    await evaluate_strategies(app, now)
 
     assert cdf.prob_range_calls == [(86.0, 87.0)]
     assert cdf.cdf_calls == []
@@ -2257,3 +2289,897 @@ def test_gate_ctx_cost_per_contract_pins_to_orderbook_under_price_drift() -> Non
         series_existing_dollars=Decimal("0"),
     )
     assert ctx_sell.order_size_dollars == Decimal("7.0")
+
+
+async def test_evaluate_strategies_partial_fill_on_thin_book(monkeypatch) -> None:
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "1.00",
+        "0.99",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "1.00", "0.99", yes_ask_depth=1, yes_bid_depth=1)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    def stub_intent(
+        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+    ):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.SELL_YES,
+                contracts=7194,
+                fair_yes=Decimal("0.50"),
+                strategy="edge",
+            )
+        ]
+
+    monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert len(trades) == 1
+    assert trades[0].contracts == 1
+    assert trades[0].attempted_contracts == 7194
+
+
+async def test_b_form_evaluate_strategies_records_a_paper_trade_row() -> None:
+    class _RecordingCdf:
+        def prob_range(self, lo: float, hi: float) -> float:
+            return 0.30
+
+        def cdf(self, x: float) -> float:
+            return 0.99
+
+    close_at = datetime(2026, 5, 19, 4, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHTNOLA-26MAY19-B86.5", "0.40", "0.38", close_at)
+    book = _book_from(market.ticker, "0.40", "0.38", now=now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(kalshi=kalshi, series_list=("KXHIGHTNOLA",))
+
+    cdf = _RecordingCdf()
+    event_date = date(2026, 5, 19)
+    app.forecast_cdfs[("KMSY", event_date)] = cdf  # type: ignore[assignment]
+    app.ensemble_spreads[("KMSY", event_date)] = Decimal("3.0")
+    app.forecast_run_times[("KMSY", event_date)] = now
+
+    await refresh_markets(app)
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        rows = session.scalars(
+            select(PaperTradeRow).where(PaperTradeRow.market_ticker == market.ticker)
+        ).all()
+    assert len(rows) == 1
+
+
+async def test_evaluate_strategies_partial_fill_overlay_uses_trade_contracts_across_all_three_dicts(
+    monkeypatch,
+) -> None:
+    from tests.fixtures.partial_fill_paper_trade_row import make_partial_fill_intent_and_trade
+
+    intent, _trade, _book = make_partial_fill_intent_and_trade()
+    ticker = intent.market_ticker
+
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 19, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 20): np.random.default_rng(2).normal(50.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        ticker,
+        "1.00",
+        "0.99",
+        datetime(2026, 5, 20, 23, 0, tzinfo=timezone.utc),
+    )
+    now = datetime(2026, 5, 19, 16, 1, tzinfo=timezone.utc)
+    book = _book_from(market.ticker, "1.00", "0.99", now=now, yes_ask_depth=1, yes_bid_depth=1)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    def stub_intent(
+        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+    ):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.SELL_YES,
+                contracts=7194,
+                fair_yes=Decimal("0.50"),
+                strategy="edge",
+            )
+        ]
+
+    monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+
+    captured_overlays: dict[str, dict] = {}
+
+    real_gate_ctx = bot_main._gate_ctx_for
+
+    def recorder(**kwargs):
+        frame = py_inspect.currentframe().f_back
+        captured_overlays["market"] = frame.f_locals["overlay_market"]
+        captured_overlays["event"] = frame.f_locals["overlay_event"]
+        captured_overlays["series"] = frame.f_locals["overlay_series"]
+        return real_gate_ctx(**kwargs)
+
+    monkeypatch.setattr(bot_main, "_gate_ctx_for", recorder)
+
+    await evaluate_strategies(app, now)
+
+    parsed = parse_ticker(ticker)
+    event_key = market.event_ticker
+    series_key = parsed.series
+
+    assert captured_overlays["market"].get(ticker) == Decimal("0.01"), (
+        f"overlay_market for {ticker} drifted: got {captured_overlays['market'].get(ticker)}"
+    )
+    assert captured_overlays["event"].get(event_key) == Decimal("0.01"), (
+        f"overlay_event for {event_key} drifted: got {captured_overlays['event'].get(event_key)}"
+    )
+    assert captured_overlays["series"].get(series_key) == Decimal("0.01"), (
+        f"overlay_series for {series_key} drifted: got {captured_overlays['series'].get(series_key)}"
+    )
+
+
+async def test_evaluate_strategies_stale_orderbook_skips(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    book = _book_from(market.ticker, "0.20", "0.18", snapshot_at=now - timedelta(seconds=300))
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    def stub_intent(
+        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+    ):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.BUY_YES,
+                contracts=10,
+                fair_yes=Decimal("0.50"),
+                strategy="edge",
+            )
+        ]
+
+    monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+    caplog.set_level(logging.INFO, logger="bot.execution.paper")
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert trades == []
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("paper_trade_stale_orderbook" in m for m in messages)
+
+
+async def test_evaluate_strategies_stale_snapshot_drives_zero_trades(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    book = _book_from(market.ticker, "0.20", "0.18", snapshot_at=now - timedelta(seconds=300))
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    def stub_intent(
+        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+    ):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.BUY_YES,
+                contracts=10,
+                fair_yes=Decimal("0.50"),
+                strategy="edge",
+            )
+        ]
+
+    monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+    caplog.set_level(logging.INFO, logger="bot.main")
+
+    n_trades = await evaluate_strategies(app, now)
+
+    assert n_trades == 0
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("stale_skips=" in m and "intents=" in m for m in messages)
+
+
+async def test_evaluate_strategies_stale_skip_ratio_warns(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    markets = [
+        _market_from(
+            f"KXHIGHDEN-26MAY08-T{60 + i}-{65 + i}",
+            "0.20",
+            "0.18",
+            datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+        )
+        for i in range(10)
+    ]
+    books = {
+        m.ticker: _book_from(m.ticker, "0.20", "0.18", snapshot_at=now - timedelta(seconds=300))
+        for m in markets
+    }
+    kalshi = _StubKalshi(markets=markets, orderbooks=books)
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    for m in markets:
+        app.latest_markets[m.ticker] = m
+        app.latest_orderbooks[m.ticker] = books[m.ticker]
+
+    def stub_intent(
+        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+    ):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.BUY_YES,
+                contracts=10,
+                fair_yes=Decimal("0.50"),
+                strategy="edge",
+            )
+        ]
+
+    monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+    caplog.set_level(logging.WARNING, logger="bot.execution.paper")
+
+    await evaluate_strategies(app, now)
+
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("stale_skip_ratio_high" in m for m in messages)
+
+
+async def test_evaluate_strategies_per_series_stale_skip_warns_on_one_stuck_series(
+    monkeypatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc_den = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    fc_nyc = StationForecast(
+        station="KNYC",
+        latitude=40.7790,
+        longitude=-73.9692,
+        timezone="America/New_York",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(2).normal(85.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo({"KDEN": fc_den, "KNYC": fc_nyc})
+
+    fresh_markets = [
+        _market_from(
+            f"KXHIGHDEN-26MAY08-T{60 + i}-{65 + i}",
+            "0.20",
+            "0.18",
+            datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+        )
+        for i in range(20)
+    ]
+    stale_markets = [
+        _market_from(
+            f"KXHIGHNY-26MAY08-T{60 + i}-{65 + i}",
+            "0.20",
+            "0.18",
+            datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+        )
+        for i in range(5)
+    ]
+    fresh_books = {m.ticker: _book_from(m.ticker, "0.20", "0.18", now=now) for m in fresh_markets}
+    stale_books = {
+        m.ticker: _book_from(m.ticker, "0.20", "0.18", snapshot_at=now - timedelta(seconds=300))
+        for m in stale_markets
+    }
+    all_markets = fresh_markets + stale_markets
+    all_books = {**fresh_books, **stale_books}
+    kalshi = _StubKalshi(markets=all_markets, orderbooks=all_books)
+
+    app = _make_app(meteo=meteo, kalshi=kalshi, series_list=("KXHIGHDEN", "KXHIGHNY"))
+    await refresh_forecasts(app)
+    for m in all_markets:
+        app.latest_markets[m.ticker] = m
+        app.latest_orderbooks[m.ticker] = all_books[m.ticker]
+
+    def stub_intent(
+        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+    ):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.BUY_YES,
+                contracts=10,
+                fair_yes=Decimal("0.50"),
+                strategy="edge",
+            )
+        ]
+
+    monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+    caplog.set_level(logging.WARNING, logger="bot.execution.paper")
+
+    await evaluate_strategies(app, now)
+
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("stale_skip_ratio_high_series" in m and "KXHIGHNY" in m for m in messages)
+
+
+async def test_evaluate_strategies_persists_sigma_t() -> None:
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.20", "0.18")
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    expected_sigma = app.ensemble_spreads[("KDEN", date(2026, 5, 8))]
+    n_trades = await evaluate_strategies(app, now)
+
+    assert n_trades >= 1
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert trades
+    assert trades[0].ensemble_spread_sigma_t is not None
+    assert abs(trades[0].ensemble_spread_sigma_t - expected_sigma) < Decimal("0.00001")
+
+
+def test_paper_trade_row_persists_attempted_contracts_from_intent() -> None:
+    engine = make_engine(":memory:")
+    Base.metadata.create_all(engine)
+    sf = make_session_factory(engine)
+
+    trade = PaperTrade(
+        intended_at=datetime(2026, 5, 5, 18, 30, tzinfo=timezone.utc),
+        market_ticker="KXHIGHDEN-26MAY06-T70-75",
+        side=TradeSide.SELL_YES,
+        contracts=1,
+        simulated_price=Decimal("0.99"),
+        fee_dollars=Decimal("0.01"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        attempted_contracts=7194,
+    )
+    row = bot_main._paper_trade_row(trade)
+    with sf() as session:
+        session.add(row)
+        session.commit()
+    with sf() as session:
+        got = session.scalars(select(PaperTradeRow)).one()
+    assert got.attempted_contracts == 7194
+    assert got.contracts == 1
+    engine.dispose()
+
+
+async def test_evaluate_strategies_no_market_open_failure_on_active() -> None:
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.20", "0.18")
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        market_open_failures = session.scalars(
+            select(GateFailure).where(GateFailure.gate_name == "market_open")
+        ).all()
+    assert market_open_failures == []
+
+
+async def test_evaluate_strategies_handles_market_with_null_close_time() -> None:
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(2).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+
+    market = KalshiMarket(
+        ticker="KXHIGHDEN-26MAY08-T70-75",
+        event_ticker="KXHIGHDEN-26MAY08",
+        series="KXHIGHDEN",
+        status="active",
+        close_time=None,
+        yes_ask=Decimal("0.20"),
+        yes_bid=Decimal("0.18"),
+    )
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    book = _book_from(market.ticker, "0.20", "0.18", now=now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    for t in trades:
+        assert t.lead_time_hours is None
+
+
+def test_compute_lead_time_hours_pre_close_returns_positive_decimal() -> None:
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 6, 13, 0, tzinfo=timezone.utc),
+    )
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    out = _compute_lead_time_hours(market, now)
+    assert out == Decimal("1.0")
+
+
+def test_compute_lead_time_hours_null_close_returns_none() -> None:
+    market = KalshiMarket(
+        ticker="KXHIGHDEN-26MAY08-T70-75",
+        event_ticker="KXHIGHDEN-26MAY08",
+        series="KXHIGHDEN",
+        status="active",
+        close_time=None,
+        yes_ask=Decimal("0.20"),
+        yes_bid=Decimal("0.18"),
+    )
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    assert _compute_lead_time_hours(market, now) is None
+
+
+def test_compute_lead_time_hours_post_close_returns_none() -> None:
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 6, 11, 59, 59, tzinfo=timezone.utc),
+    )
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    assert _compute_lead_time_hours(market, now) is None
+
+
+def test_compute_lead_time_hours_exact_boundary_returns_zero() -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHDEN-26MAY08-T70-75", "0.20", "0.18", now)
+    out = _compute_lead_time_hours(market, now)
+    assert out == Decimal("0.0")
+
+
+async def test_evaluate_strategies_persists_nbm_divergence_as_none() -> None:
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.20", "0.18")
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert trades
+    for t in trades:
+        assert t.nbm_divergence is None
+
+
+async def test_refresh_markets_persists_depth_on_orderbook_snapshot() -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHDEN-26MAY07-T70-75", "0.45", "0.43", close_at)
+    book = _book_from(
+        market.ticker,
+        "0.45",
+        "0.43",
+        yes_ask_depth=17,
+        yes_bid_depth=23,
+        no_ask_depth=29,
+        no_bid_depth=31,
+    )
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(kalshi=kalshi)
+
+    await refresh_markets(app)
+
+    with app.session_factory() as session:
+        ob = session.scalars(select(OrderbookSnapshot)).one()
+    assert ob.yes_ask_depth == 17
+    assert ob.yes_bid_depth == 23
+    assert ob.no_ask_depth == 29
+    assert ob.no_bid_depth == 31
+
+
+def test_bootstrap_schema_stamps_and_upgrades_fresh_install(tmp_path) -> None:
+    db_file = tmp_path / "fresh.db"
+    engine = make_engine(db_file)
+
+    _bootstrap_schema(engine)
+
+    inspector = sa_inspect(engine)
+    tables = set(inspector.get_table_names())
+    assert "alembic_version" in tables
+    assert "forecasts" in tables
+    paper_cols = {c["name"] for c in inspector.get_columns("paper_trades")}
+    assert "attempted_contracts" in paper_cols
+    gate_cols = {c["name"] for c in inspector.get_columns("gate_failures")}
+    assert "notes" in gate_cols
+    ob_cols = {c["name"] for c in inspector.get_columns("orderbook_snapshots")}
+    assert "yes_ask_depth" in ob_cols
+    engine.dispose()
+
+
+def test_checkpoint_wal_truncates_wal_file(tmp_path) -> None:
+    db_file = tmp_path / "wal.db"
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+    sf = make_session_factory(engine)
+    with sf() as session:
+        session.add(
+            GateFailure(
+                evaluated_at=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+                gate_name="market_open",
+                reason="market_status=closed",
+                mode="paper",
+                market_ticker="KXHIGHDEN-26MAY06-T70-75",
+            )
+        )
+        session.commit()
+
+    busy, _log_pages, _checkpointed = _checkpoint_wal(engine)
+    assert busy == 0
+    engine.dispose()
+
+
+def test_checkpoint_wal_retries_after_busy_via_monkeypatched_pragma(tmp_path, monkeypatch) -> None:
+    db_file = tmp_path / "wal.db"
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+    sf = make_session_factory(engine)
+    with sf() as session:
+        session.add(
+            GateFailure(
+                evaluated_at=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
+                gate_name="market_open",
+                reason="market_status=closed",
+                mode="paper",
+                market_ticker="KXHIGHDEN-26MAY06-T70-75",
+            )
+        )
+        session.commit()
+
+    from sqlalchemy.engine import Connection
+
+    call_count = {"n": 0}
+    real = Connection.exec_driver_sql
+
+    class _FakeResult:
+        def __init__(self, row):
+            self._row = row
+
+        def one(self):
+            return self._row
+
+    def patched(self, statement, *args, **kwargs):
+        if "wal_checkpoint" in statement.lower():
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return _FakeResult((1, 5, 0))
+            return _FakeResult((0, 0, 5))
+        return real(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(Connection, "exec_driver_sql", patched)
+
+    dispose_calls = {"n": 0}
+    real_dispose = engine.dispose
+
+    def dispose_spy(*args, **kwargs):
+        dispose_calls["n"] += 1
+        return real_dispose(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "dispose", dispose_spy)
+
+    busy, _log_pages, _checkpointed = _checkpoint_wal(engine)
+    assert busy == 0
+    assert dispose_calls["n"] == 1
+    assert call_count["n"] == 2
+    real_dispose()
+
+
+def test_checkpoint_wal_idle_returns_busy_zero_first_call(tmp_path, monkeypatch) -> None:
+    db_file = tmp_path / "wal.db"
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+
+    dispose_calls = {"n": 0}
+    real_dispose = engine.dispose
+
+    def dispose_spy(*args, **kwargs):
+        dispose_calls["n"] += 1
+        return real_dispose(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "dispose", dispose_spy)
+
+    busy, _log_pages, _checkpointed = _checkpoint_wal(engine)
+    assert busy == 0
+    assert dispose_calls["n"] == 0
+    real_dispose()
+
+
+async def test_run_checkpoints_wal_on_shutdown(monkeypatch) -> None:
+    from bot.config import Settings as _Settings
+
+    engine = make_engine(":memory:")
+    Base.metadata.create_all(engine)
+    sf = make_session_factory(engine)
+
+    class _NoopMeteo:
+        async def aclose(self) -> None:
+            return None
+
+    class _NoopKalshi:
+        async def aopen(self) -> None:
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+        async def list_open_markets_for_series(self, series_prefix: str):
+            return []
+
+        async def get_orderbook(self, ticker: str):
+            raise RuntimeError("no orderbook in noop kalshi")
+
+    class _NoopACIS:
+        async def fetch_daily_high(self, station, settled_date):
+            return None
+
+        async def aclose(self) -> None:
+            return None
+
+    app = App(
+        settings=_Settings(paper_mode=True),
+        engine=engine,
+        session_factory=sf,
+        meteo=_NoopMeteo(),  # type: ignore[arg-type]
+        kalshi=_NoopKalshi(),  # type: ignore[arg-type]
+        acis=_NoopACIS(),  # type: ignore[arg-type]
+        series_list=("KXHIGHDEN",),
+    )
+
+    async def fast_loop(app, stop):
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=0.05)
+        except asyncio.TimeoutError:
+            pass
+
+    monkeypatch.setattr(bot_main, "_forecast_loop", fast_loop)
+    monkeypatch.setattr(bot_main, "_market_loop", fast_loop)
+    monkeypatch.setattr(bot_main, "_eval_loop", fast_loop)
+    monkeypatch.setattr(bot_main, "_settlement_loop", fast_loop)
+
+    calls: list[object] = []
+    real_checkpoint = bot_main._checkpoint_wal
+
+    def spy(eng):
+        calls.append(eng)
+        return real_checkpoint(eng)
+
+    monkeypatch.setattr(bot_main, "_checkpoint_wal", spy)
+
+    await run(app, timedelta(milliseconds=200))
+
+    assert calls
+    assert all(c is engine for c in calls)
+
+
+def test_main_no_longer_calls_create_all() -> None:
+    src = py_inspect.getsource(bot_main.main)
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        names: list[str] = []
+        while isinstance(func, ast.Attribute):
+            names.append(func.attr)
+            func = func.value
+        if isinstance(func, ast.Name):
+            names.append(func.id)
+        names.reverse()
+        if names[-2:] == ["metadata", "create_all"]:
+            raise AssertionError("bot.main.main still calls Base.metadata.create_all")
+
+
+def _has_app_nbm_divergences_writer(source: str) -> bool:
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets.extend(node.targets)
+        elif isinstance(node, ast.AugAssign):
+            targets.append(node.target)
+        else:
+            continue
+        for tgt in targets:
+            if not isinstance(tgt, ast.Subscript):
+                continue
+            value = tgt.value
+            if (
+                isinstance(value, ast.Attribute)
+                and value.attr == "nbm_divergences"
+                and isinstance(value.value, ast.Name)
+                and value.value.id == "app"
+            ):
+                return True
+    return False
+
+
+def test_app_carries_no_dead_nbm_divergences_field() -> None:
+    field_names = {f.name for f in dataclasses.fields(App)}
+    if "nbm_divergences" not in field_names:
+        return
+    src = py_inspect.getsource(bot_main)
+    assert _has_app_nbm_divergences_writer(src), (
+        "App.nbm_divergences exists but has no subscript-assign writer"
+    )
+
+
+def test_nbm_divergences_writer_detector_accepts_subscript_assign() -> None:
+    assert _has_app_nbm_divergences_writer("app.nbm_divergences[k] = v")
+
+
+def test_nbm_divergences_writer_detector_accepts_aug_assign() -> None:
+    assert _has_app_nbm_divergences_writer("app.nbm_divergences[k] += 1")
+
+
+def test_nbm_divergences_writer_detector_rejects_reader_only() -> None:
+    assert not _has_app_nbm_divergences_writer("x = app.nbm_divergences[k]")
+
+
+def test_nbm_divergences_writer_detector_rejects_dict_method_call() -> None:
+    assert not _has_app_nbm_divergences_writer("app.nbm_divergences.get(k)")
+
+
+def test_nbm_divergences_writer_detector_rejects_unrelated_subscript_assign() -> None:
+    assert not _has_app_nbm_divergences_writer("app.something_else[k] = v")
+
+
+def test_build_intents_passes_literal_none_for_nbm_divergence() -> None:
+    src = py_inspect.getsource(_build_intents)
+    tree = ast.parse(src)
+    keyword_constants: list[bool] = []
+    found_any = False
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.keyword):
+            continue
+        if node.arg != "nbm_divergence":
+            continue
+        found_any = True
+        assert isinstance(node.value, ast.Constant), (
+            f"nbm_divergence kwarg is not a literal Constant: {ast.dump(node.value)}"
+        )
+        assert node.value.value is None
+        keyword_constants.append(True)
+    assert found_any, "no nbm_divergence keyword arg found in _build_intents"

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import time
 from datetime import date
 from decimal import Decimal
@@ -309,3 +311,14 @@ def test_b_form_bracket_semantic_pending_defect_c() -> None:
     )
     out = reconcile_trade(trade, parsed, Decimal("48"))
     assert out.yes_settled is False
+
+
+def test_reconcile_trade_reads_only_documented_papertrade_attributes() -> None:
+    src = inspect.getsource(reconcile_trade)
+    tree = ast.parse(src)
+    accessed: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id == "trade":
+                accessed.add(node.attr)
+    assert accessed == {"side", "simulated_price", "contracts", "fee_dollars"}

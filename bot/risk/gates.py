@@ -61,6 +61,9 @@ class GateParams:
 DEFAULT_PARAMS: GateParams = GateParams()
 
 
+TRADEABLE_STATUSES: frozenset[str] = frozenset({"active"})
+
+
 GATE_NAMES: tuple[str, ...] = (
     "fair_value_sane",
     "model_fresh",
@@ -175,10 +178,12 @@ def evaluate(
             )
         )
 
-    if ctx.market_status == "open":
+    if ctx.market_status in TRADEABLE_STATUSES:
         results.append(_ok("market_open"))
     else:
         results.append(_fail("market_open", f"market_status={ctx.market_status}"))
+        if ctx.market_status not in {"closed", "settled", "inactive", "pending_settle"}:
+            log.warning("market_open_unknown_status status=%s", ctx.market_status)
 
     if ctx.minutes_to_close >= params.min_minutes_to_close:
         results.append(_ok("time_to_close"))

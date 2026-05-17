@@ -4,12 +4,14 @@ import json
 from datetime import date, datetime, timedelta
 from datetime import timezone as _timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import inspect, select
-from sqlalchemy.exc import IntegrityError
+from alembic.script import ScriptDirectory
+from sqlalchemy import inspect, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from bot.storage.sqlite import (
     Base,
@@ -19,6 +21,7 @@ from bot.storage.sqlite import (
     OrderbookSnapshot,
     PaperTradeRow,
     SimulatedPnl,
+    ensure_baseline_stamped,
     make_engine,
     make_session_factory,
 )
@@ -374,3 +377,536 @@ def test_alembic_upgrade_head_creates_all_tables(tmp_path):
         "gate_failures",
         "alembic_version",
     } <= names
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _alembic_cfg(tmp_path, db_file: Path) -> Config:
+    ini_path = tmp_path / "alembic.ini"
+    ini_path.write_text(
+        f"[alembic]\n"
+        f"script_location = {REPO_ROOT / 'alembic'}\n"
+        f"sqlalchemy.url = sqlite:///{db_file}\n"
+    )
+    return Config(str(ini_path))
+
+
+def test_paper_trade_persists_sigma_t(session):
+    when = datetime(2026, 5, 5, 18, 30, tzinfo=_timezone.utc)
+    row = PaperTradeRow(
+        intended_at=when,
+        market_ticker="KXHIGHDEN-26MAY06-T70-75",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        ensemble_spread_sigma_t=Decimal("2.500000"),
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(PaperTradeRow)).one()
+    assert got.ensemble_spread_sigma_t == Decimal("2.500000")
+
+
+def test_paper_trade_persists_attempted_contracts(session):
+    when = datetime(2026, 5, 5, 18, 30, tzinfo=_timezone.utc)
+    row = PaperTradeRow(
+        intended_at=when,
+        market_ticker="KXHIGHDEN-26MAY06-T70-75",
+        side="sell_yes",
+        contracts=1,
+        simulated_price=Decimal("0.99"),
+        fee_dollars=Decimal("0.01"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        attempted_contracts=7194,
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(PaperTradeRow)).one()
+    assert got.contracts == 1
+    assert got.attempted_contracts == 7194
+
+
+def test_paper_trade_lead_time_hours_persists(session):
+    when = datetime(2026, 5, 5, 18, 30, tzinfo=_timezone.utc)
+    row = PaperTradeRow(
+        intended_at=when,
+        market_ticker="KXHIGHDEN-26MAY06-T70-75",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        lead_time_hours=Decimal("36.5000"),
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(PaperTradeRow)).one()
+    assert got.lead_time_hours == Decimal("36.5000")
+
+
+def test_paper_trade_nbm_divergence_nullable(session):
+    when = datetime(2026, 5, 5, 18, 30, tzinfo=_timezone.utc)
+    row = PaperTradeRow(
+        intended_at=when,
+        market_ticker="KXHIGHDEN-26MAY06-T70-75",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        nbm_divergence=None,
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(PaperTradeRow)).one()
+    assert got.nbm_divergence is None
+
+
+def test_paper_trade_lead_time_hours_nullable(session):
+    when = datetime(2026, 5, 5, 18, 30, tzinfo=_timezone.utc)
+    row = PaperTradeRow(
+        intended_at=when,
+        market_ticker="KXHIGHDEN-26MAY06-T70-75",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        lead_time_hours=None,
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(PaperTradeRow)).one()
+    assert got.lead_time_hours is None
+
+
+def test_orderbook_snapshot_persists_depth(session):
+    snap_at = datetime(2026, 5, 5, 18, 0, tzinfo=_timezone.utc)
+    row = OrderbookSnapshot(
+        ticker="KXHIGHDEN-26MAY06-T70-75",
+        snapshot_at=snap_at,
+        yes_ask=Decimal("0.40"),
+        yes_bid=Decimal("0.38"),
+        no_ask=Decimal("0.62"),
+        no_bid=Decimal("0.60"),
+        yes_ask_depth=12,
+        yes_bid_depth=3,
+        no_ask_depth=7,
+        no_bid_depth=11,
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(OrderbookSnapshot)).one()
+    assert got.yes_ask_depth == 12
+    assert got.yes_bid_depth == 3
+    assert got.no_ask_depth == 7
+    assert got.no_bid_depth == 11
+
+
+def test_gate_failure_notes_nullable(session):
+    when = datetime(2026, 5, 5, 18, 30, tzinfo=_timezone.utc)
+    no_note = GateFailure(
+        evaluated_at=when,
+        gate_name="market_open",
+        reason="market_status=closed",
+        mode="paper",
+        market_ticker="KXHIGHDEN-26MAY06-T70-75",
+        notes=None,
+    )
+    with_note = GateFailure(
+        evaluated_at=when,
+        gate_name="market_open",
+        reason="market_status=active",
+        mode="paper",
+        market_ticker="KXHIGHDEN-26MAY06-T70-75",
+        notes="pre_fix_status_string_bug",
+    )
+    session.add_all([no_note, with_note])
+    session.commit()
+
+    rows = session.scalars(select(GateFailure).order_by(GateFailure.id)).all()
+    assert rows[0].notes is None
+    assert rows[1].notes == "pre_fix_status_string_bug"
+
+
+def test_alembic_env_honors_injected_connection(tmp_path):
+    decoy_db = tmp_path / "decoy.db"
+    target_db = tmp_path / "target.db"
+    cfg = _alembic_cfg(tmp_path, decoy_db)
+
+    target_engine = make_engine(target_db)
+    with target_engine.connect() as connection:
+        cfg.attributes["connection"] = connection
+        command.upgrade(cfg, "head")
+
+    target_inspector = inspect(target_engine)
+    tnames = set(target_inspector.get_table_names())
+    assert "alembic_version" in tnames
+    assert "forecasts" in tnames
+    paper_cols = {c["name"] for c in target_inspector.get_columns("paper_trades")}
+    assert "attempted_contracts" in paper_cols
+    gate_cols = {c["name"] for c in target_inspector.get_columns("gate_failures")}
+    assert "notes" in gate_cols
+    ob_cols = {c["name"] for c in target_inspector.get_columns("orderbook_snapshots")}
+    assert "yes_ask_depth" in ob_cols
+    target_engine.dispose()
+
+    assert not decoy_db.exists() or decoy_db.stat().st_size == 0
+
+
+def test_ensure_baseline_stamped_stamps_unstamped_create_all_db(tmp_path):
+    db_file = tmp_path / "state.db"
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+
+    ensure_baseline_stamped(engine, "0001")
+
+    with engine.connect() as connection:
+        row = connection.execute(text("SELECT version_num FROM alembic_version")).first()
+    assert row is not None
+    assert row[0] == "0001"
+    engine.dispose()
+
+
+def test_ensure_baseline_stamped_is_noop_on_already_stamped_db(tmp_path):
+    db_file = tmp_path / "state.db"
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"))
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('0001')"))
+
+    ensure_baseline_stamped(engine, "0099")
+
+    with engine.connect() as connection:
+        rows = connection.execute(text("SELECT version_num FROM alembic_version")).all()
+    assert len(rows) == 1
+    assert rows[0][0] == "0001"
+    engine.dispose()
+
+
+def test_ensure_baseline_stamped_refuses_empty_db(tmp_path):
+    db_file = tmp_path / "state.db"
+    engine = make_engine(db_file)
+
+    ensure_baseline_stamped(engine, "0001")
+
+    inspector = inspect(engine)
+    assert "alembic_version" not in inspector.get_table_names()
+    engine.dispose()
+
+
+def test_bare_alembic_upgrade_against_create_all_db_raises(tmp_path):
+    db_file = tmp_path / "state.db"
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+    engine.dispose()
+
+    cfg = _alembic_cfg(tmp_path, db_file)
+    with pytest.raises(OperationalError) as excinfo:
+        command.upgrade(cfg, "head")
+    assert "already exists" in str(excinfo.value)
+
+
+def test_head_shape_db_stamped_0001_fails_on_upgrade(tmp_path):
+    db_file = tmp_path / "state.db"
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+    ensure_baseline_stamped(engine, "0001")
+    engine.dispose()
+
+    cfg = _alembic_cfg(tmp_path, db_file)
+    with pytest.raises(OperationalError) as excinfo:
+        command.upgrade(cfg, "head")
+    assert "duplicate column name" in str(excinfo.value)
+
+
+def test_migrate_script_stamps_head_on_head_shape_db(tmp_path):
+    from scripts.migrate import _detect_baseline
+
+    db_file = tmp_path / "state.db"
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+
+    cfg = _alembic_cfg(tmp_path, db_file)
+    script_dir = ScriptDirectory.from_config(cfg)
+    baseline = _detect_baseline(engine, script_dir)
+    assert baseline == "0002"
+    ensure_baseline_stamped(engine, baseline)
+    with engine.connect() as connection:
+        cfg.attributes["connection"] = connection
+        command.upgrade(cfg, "head")
+
+    with engine.connect() as connection:
+        version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    assert version == "0002"
+    engine.dispose()
+
+
+def test_migrate_script_stamps_0001_on_baseline_shape_db(tmp_path):
+    from scripts.migrate import _detect_baseline
+
+    db_file = tmp_path / "state.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    command.upgrade(cfg, "0001")
+
+    engine = make_engine(db_file)
+    script_dir = ScriptDirectory.from_config(cfg)
+    baseline = _detect_baseline(engine, script_dir)
+    assert baseline == "0001"
+    with engine.connect() as connection:
+        cfg.attributes["connection"] = connection
+        command.upgrade(cfg, "head")
+
+    with engine.connect() as connection:
+        version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    assert version == "0002"
+    engine.dispose()
+
+
+def test_detect_baseline_raises_on_partial_drift_notes_only(tmp_path):
+    from scripts.migrate import _detect_baseline
+
+    db_file = tmp_path / "state.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    command.upgrade(cfg, "0001")
+
+    engine = make_engine(db_file)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE gate_failures ADD COLUMN notes VARCHAR(64)"))
+    script_dir = ScriptDirectory.from_config(cfg)
+    with pytest.raises(RuntimeError) as excinfo:
+        _detect_baseline(engine, script_dir)
+    msg = str(excinfo.value)
+    assert "partial 0002 schema" in msg
+    assert "notes" in msg
+    engine.dispose()
+
+
+def test_detect_baseline_raises_on_partial_drift_two_of_three(tmp_path):
+    from scripts.migrate import _detect_baseline
+
+    db_file = tmp_path / "state.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    command.upgrade(cfg, "0001")
+
+    engine = make_engine(db_file)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE gate_failures ADD COLUMN notes VARCHAR(64)"))
+        conn.execute(text("ALTER TABLE paper_trades ADD COLUMN attempted_contracts INTEGER"))
+    script_dir = ScriptDirectory.from_config(cfg)
+    with pytest.raises(RuntimeError) as excinfo:
+        _detect_baseline(engine, script_dir)
+    assert "partial 0002 schema" in str(excinfo.value)
+    engine.dispose()
+
+
+def test_detect_baseline_returns_literal_0002_even_when_head_is_0003(tmp_path):
+    from scripts.migrate import _detect_baseline
+
+    alembic_dir = tmp_path / "alembic"
+    versions = alembic_dir / "versions"
+    versions.mkdir(parents=True)
+    (alembic_dir / "env.py").write_text((REPO_ROOT / "alembic" / "env.py").read_text())
+    (alembic_dir / "script.py.mako").write_text(
+        (REPO_ROOT / "alembic" / "script.py.mako").read_text()
+    )
+    (versions / "0001_initial.py").write_text(
+        (REPO_ROOT / "alembic" / "versions" / "0001_initial.py").read_text()
+    )
+    (versions / "0002_orderbook_depth_and_trade_features.py").write_text(
+        (
+            REPO_ROOT / "alembic" / "versions" / "0002_orderbook_depth_and_trade_features.py"
+        ).read_text()
+    )
+    (versions / "0003_decoy.py").write_text(
+        '"""decoy 0003 for forward-compat test\n\n'
+        "Revision ID: 0003\n"
+        "Revises: 0002\n"
+        "Create Date: 2026-05-27 13:00:00.000000\n\n"
+        '"""\n\n'
+        "from typing import Sequence, Union\n\n"
+        "from alembic import op  # noqa: F401\n\n\n"
+        'revision: str = "0003"\n'
+        'down_revision: Union[str, Sequence[str], None] = "0002"\n'
+        "branch_labels: Union[str, Sequence[str], None] = None\n"
+        "depends_on: Union[str, Sequence[str], None] = None\n\n\n"
+        "def upgrade() -> None:\n"
+        "    pass\n\n\n"
+        "def downgrade() -> None:\n"
+        "    pass\n"
+    )
+
+    db_file = tmp_path / "state.db"
+    ini_path = tmp_path / "alembic.ini"
+    ini_path.write_text(
+        f"[alembic]\nscript_location = {alembic_dir}\nsqlalchemy.url = sqlite:///{db_file}\n"
+    )
+    cfg = Config(str(ini_path))
+
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+    script_dir = ScriptDirectory.from_config(cfg)
+    assert script_dir.get_current_head() == "0003"
+    assert _detect_baseline(engine, script_dir) == "0002"
+    engine.dispose()
+
+
+def test_migration_0002_backfills_depth_with_zero_via_server_default(tmp_path):
+    db_file = tmp_path / "state.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    command.upgrade(cfg, "0001")
+
+    engine = make_engine(db_file)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO orderbook_snapshots "
+                "(ticker, snapshot_at, yes_ask, yes_bid, no_ask, no_bid, created_at) "
+                "VALUES (:ticker, :snapshot_at, :yes_ask, :yes_bid, :no_ask, :no_bid, :created)"
+            ),
+            {
+                "ticker": "KXHIGHDEN-26MAY06-T70-75",
+                "snapshot_at": "2026-05-05 18:00:00+00:00",
+                "yes_ask": 0.40,
+                "yes_bid": 0.38,
+                "no_ask": 0.62,
+                "no_bid": 0.60,
+                "created": "2026-05-05 18:00:00+00:00",
+            },
+        )
+    engine.dispose()
+
+    command.upgrade(cfg, "0002")
+
+    engine = make_engine(db_file)
+    with engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT yes_ask_depth, yes_bid_depth, no_ask_depth, no_bid_depth "
+                "FROM orderbook_snapshots"
+            )
+        ).one()
+    assert row == (0, 0, 0, 0)
+    engine.dispose()
+
+
+def test_migration_0002_backfills_attempted_contracts_from_contracts(tmp_path):
+    db_file = tmp_path / "state.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    command.upgrade(cfg, "0001")
+
+    engine = make_engine(db_file)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO paper_trades "
+                "(intended_at, market_ticker, side, contracts, simulated_price, "
+                "fee_dollars, fair_at_entry, strategy, created_at) "
+                "VALUES (:intended_at, :ticker, :side, :contracts, :price, :fee, "
+                ":fair, :strategy, :created)"
+            ),
+            {
+                "intended_at": "2026-05-05 18:30:00+00:00",
+                "ticker": "KXHIGHDEN-26MAY06-T70-75",
+                "side": "buy_yes",
+                "contracts": 42,
+                "price": 0.40,
+                "fee": 0.05,
+                "fair": 0.50,
+                "strategy": "edge",
+                "created": "2026-05-05 18:30:00+00:00",
+            },
+        )
+    engine.dispose()
+
+    command.upgrade(cfg, "0002")
+
+    engine = make_engine(db_file)
+    with engine.connect() as connection:
+        row = connection.execute(
+            text("SELECT contracts, attempted_contracts FROM paper_trades")
+        ).one()
+    assert row == (42, 42)
+    engine.dispose()
+
+
+def test_full_migrate_path_runs_brief_02_backfill_end_to_end(tmp_path):
+    from scripts.migrate import _detect_baseline
+
+    db_file = tmp_path / "state.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    command.upgrade(cfg, "0001")
+
+    engine = make_engine(db_file)
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO paper_trades "
+                "(intended_at, market_ticker, side, contracts, simulated_price, "
+                "fee_dollars, fair_at_entry, strategy, created_at) "
+                "VALUES (:intended_at, :ticker, :side, :contracts, :price, :fee, "
+                ":fair, :strategy, :created)"
+            ),
+            {
+                "intended_at": "2026-05-05 18:30:00+00:00",
+                "ticker": "KXHIGHDEN-26MAY06-T70-75",
+                "side": "buy_yes",
+                "contracts": 42,
+                "price": 0.40,
+                "fee": 0.05,
+                "fair": 0.50,
+                "strategy": "edge",
+                "created": "2026-05-05 18:30:00+00:00",
+            },
+        )
+    script_dir = ScriptDirectory.from_config(cfg)
+    baseline = _detect_baseline(engine, script_dir)
+    ensure_baseline_stamped(engine, baseline)
+    with engine.connect() as connection:
+        cfg.attributes["connection"] = connection
+        command.upgrade(cfg, "head")
+
+    with engine.connect() as connection:
+        attempted = connection.execute(
+            text("SELECT attempted_contracts FROM paper_trades")
+        ).scalar()
+    assert attempted == 42
+    engine.dispose()
+
+
+def test_pinned_broken_single_column_detector_silently_stamps_head_on_partial_drift(tmp_path):
+    from alembic.script import ScriptDirectory as _ScriptDirectory
+
+    def _broken_single_column_detector(engine, script_dir) -> str:
+        inspector = inspect(engine)
+        cols = {c["name"] for c in inspector.get_columns("gate_failures")}
+        if "notes" in cols:
+            return script_dir.get_current_head()
+        return "0001"
+
+    db_file = tmp_path / "state.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    command.upgrade(cfg, "0001")
+
+    engine = make_engine(db_file)
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE gate_failures ADD COLUMN notes VARCHAR(64)"))
+    script_dir = _ScriptDirectory.from_config(cfg)
+    head = script_dir.get_current_head()
+    assert _broken_single_column_detector(engine, script_dir) == head
+    engine.dispose()

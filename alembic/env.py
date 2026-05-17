@@ -14,7 +14,7 @@ from bot.storage.sqlite import Base
 config = context.config
 
 if config.config_file_name is not None and config.file_config.has_section("loggers"):
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 
@@ -34,6 +34,18 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
+    injected = config.attributes.get("connection")
+    if injected is not None:
+        context.configure(
+            connection=injected,
+            target_metadata=target_metadata,
+            render_as_batch=True,
+            compare_type=True,
+        )
+        with context.begin_transaction():
+            context.run_migrations()
+        return
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",

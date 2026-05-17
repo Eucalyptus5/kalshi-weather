@@ -7,19 +7,30 @@ import logging
 import re
 import signal
 import sys
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from datetime import timezone as _timezone
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 import numpy as np
+from alembic import command
+from alembic.config import Config
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from bot.config import Settings, get_settings
-from bot.execution.paper import Orderbook, PaperTrade, TradeIntent, TradeSide, simulate_taker_fill
+from bot.execution.paper import (
+    Orderbook,
+    PaperTrade,
+    TradeIntent,
+    TradeSide,
+    log_stale_skip_ratio,
+    simulate_taker_fill,
+)
 from bot.forecast.cdf import EnsembleCDF
 from bot.forecast.open_meteo import OpenMeteoClient, StationForecast
 from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook
@@ -28,13 +39,13 @@ from bot.markets.parser import ParsedTicker, parse_ticker
 from bot.risk.gates import CAP_GATE_NAMES, GateContext, GateMode, evaluate as evaluate_gates
 from bot.storage.positions import open_exposures
 from bot.storage.sqlite import (
-    Base,
     Forecast,
     GateFailure,
     Market,
     OrderbookSnapshot,
     PaperTradeRow,
     SimulatedPnl,
+    ensure_baseline_stamped,
     make_engine,
     make_session_factory,
 )
@@ -238,6 +249,7 @@ class App:
         await self.meteo.aclose()
         await self.kalshi.aclose()
         await self.acis.aclose()
+        _checkpoint_wal(self.engine)
         self.engine.dispose()
 
 
@@ -367,6 +379,10 @@ async def refresh_markets(app: App) -> int:
                             yes_bid=book.yes_bid,
                             no_ask=book.no_ask,
                             no_bid=book.no_bid,
+                            yes_ask_depth=book.yes_ask_depth,
+                            yes_bid_depth=book.yes_bid_depth,
+                            no_ask_depth=book.no_ask_depth,
+                            no_bid_depth=book.no_bid_depth,
                         )
                     )
                     app.latest_markets[m.ticker] = m
@@ -385,6 +401,8 @@ async def refresh_markets(app: App) -> int:
 
 async def evaluate_strategies(app: App, now: datetime) -> int:
     n_trades = 0
+    stale_skips_by_series: dict[str, int] = defaultdict(int)
+    intents_seen_by_series: dict[str, int] = defaultdict(int)
     async with app.db_lock:
         with app.session_factory() as session:
             by_market, by_event, by_series = open_exposures(session, now=now)
@@ -444,6 +462,7 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                     is_tail=parsed.is_tail,
                     now=now,
                 ):
+                    intents_seen_by_series[series_key] += 1
                     if intent.side is TradeSide.BUY_YES:
                         cost_per_contract = book.yes_ask
                     else:
@@ -478,9 +497,22 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                     if not check.overall_passed:
                         continue
 
-                    trade = simulate_taker_fill(intent, Orderbook(book.yes_ask, book.yes_bid), now)
+                    trade = simulate_taker_fill(
+                        intent,
+                        Orderbook(
+                            yes_ask=book.yes_ask,
+                            yes_bid=book.yes_bid,
+                            yes_ask_depth=book.yes_ask_depth,
+                            yes_bid_depth=book.yes_bid_depth,
+                            snapshot_at=book.snapshot_at,
+                        ),
+                        now,
+                    )
+                    if trade is None:
+                        stale_skips_by_series[series_key] += 1
+                        continue
                     session.add(_paper_trade_row(trade))
-                    delta = cost_per_contract * Decimal(intent.contracts)
+                    delta = cost_per_contract * Decimal(trade.contracts)
                     overlay_market[ticker] = overlay_market.get(ticker, Decimal("0")) + delta
                     overlay_event[event_key] = overlay_event.get(event_key, Decimal("0")) + delta
                     overlay_series[series_key] = (
@@ -488,8 +520,24 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                     )
                     n_trades += 1
             session.commit()
-    logger.info("evaluate_strategies trades=%d markets=%d", n_trades, len(app.latest_markets))
+    log_stale_skip_ratio(stale_skips_by_series, intents_seen_by_series)
+    logger.info(
+        "evaluate_strategies trades=%d markets=%d stale_skips=%d intents=%d",
+        n_trades,
+        len(app.latest_markets),
+        sum(stale_skips_by_series.values()),
+        sum(intents_seen_by_series.values()),
+    )
     return n_trades
+
+
+def _compute_lead_time_hours(market: KalshiMarket, now: datetime) -> Decimal | None:
+    if market.close_time is None:
+        return None
+    seconds = (market.close_time - now).total_seconds()
+    if seconds < 0:
+        return None
+    return Decimal(str(seconds / 3600))
 
 
 def _build_intents(
@@ -506,6 +554,7 @@ def _build_intents(
     now: datetime,
 ) -> list[TradeIntent]:
     intents: list[TradeIntent] = []
+    lead_time_hours = _compute_lead_time_hours(market, now)
 
     if not is_tail:
         edge_ctx = edge_strategy.EdgeContext(
@@ -527,6 +576,9 @@ def _build_intents(
                     contracts=edge_sig.contracts,
                     fair_yes=fair_yes,
                     strategy="edge",
+                    ensemble_spread_sigma_t=spread,
+                    lead_time_hours=lead_time_hours,
+                    nbm_divergence=None,
                 )
             )
         elif edge_sig.action is edge_strategy.EdgeAction.SELL_YES:
@@ -537,6 +589,9 @@ def _build_intents(
                     contracts=edge_sig.contracts,
                     fair_yes=fair_yes,
                     strategy="edge",
+                    ensemble_spread_sigma_t=spread,
+                    lead_time_hours=lead_time_hours,
+                    nbm_divergence=None,
                 )
             )
 
@@ -560,6 +615,9 @@ def _build_intents(
                     contracts=tails_sig.contracts,
                     fair_yes=fair_yes,
                     strategy="tails",
+                    ensemble_spread_sigma_t=spread,
+                    lead_time_hours=lead_time_hours,
+                    nbm_divergence=None,
                 )
             )
 
@@ -621,6 +679,10 @@ def _paper_trade_row(trade: PaperTrade) -> PaperTradeRow:
         fee_dollars=trade.fee_dollars,
         fair_at_entry=trade.fair_at_entry,
         strategy=trade.strategy,
+        attempted_contracts=trade.attempted_contracts,
+        ensemble_spread_sigma_t=trade.ensemble_spread_sigma_t,
+        lead_time_hours=trade.lead_time_hours,
+        nbm_divergence=trade.nbm_divergence,
     )
 
 
@@ -849,6 +911,30 @@ async def run(app: App, duration: timedelta) -> None:
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        _checkpoint_wal(app.engine)
+
+
+def _checkpoint_wal(engine: Engine) -> tuple[int, int, int]:
+    with engine.connect() as connection:
+        row = connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE);").one()
+    busy, log_pages, checkpointed_pages = int(row[0]), int(row[1]), int(row[2])
+    if busy == 0:
+        return busy, log_pages, checkpointed_pages
+    # await asyncio.gather cancels _eval_loop mid-session_factory(); the SQLite
+    # connection returns to the pool with an implicit read snapshot, so the first
+    # wal_checkpoint(TRUNCATE) sees busy=1. Dispose drops the pool and lets the
+    # retry succeed against a fresh connection.
+    engine.dispose()
+    with engine.connect() as connection:
+        row = connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE);").one()
+    busy, log_pages, checkpointed_pages = int(row[0]), int(row[1]), int(row[2])
+    if busy == 1:
+        logger.warning(
+            "wal_checkpoint_still_busy log_pages=%d checkpointed_pages=%d",
+            log_pages,
+            checkpointed_pages,
+        )
+    return busy, log_pages, checkpointed_pages
 
 
 def _parse_series_arg(raw: str) -> tuple[str, ...]:
@@ -863,6 +949,14 @@ def _parse_series_arg(raw: str) -> tuple[str, ...]:
         sys.stderr.write("--series is empty; pass 'all' or a comma-separated list\n")
         sys.exit(2)
     return requested
+
+
+def _bootstrap_schema(engine: Engine) -> None:
+    cfg = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
+    ensure_baseline_stamped(engine, "0001")
+    with engine.connect() as connection:
+        cfg.attributes["connection"] = connection
+        command.upgrade(cfg, "head")
 
 
 def main() -> None:
@@ -882,7 +976,7 @@ def main() -> None:
     )
 
     engine = make_engine("data/state.db")
-    Base.metadata.create_all(engine)
+    _bootstrap_schema(engine)
     session_factory = make_session_factory(engine)
     meteo = OpenMeteoClient()
     kalshi = KalshiDemoClient(settings)
