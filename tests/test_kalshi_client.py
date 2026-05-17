@@ -12,6 +12,15 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 
 from bot.config import Settings
 from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook
+from bot.markets.parser import event_id
+
+
+_EVENT_TICKER_GOLDEN: tuple[tuple[str, str], ...] = (
+    ("KXHIGHTNOLA-26MAY22-B86.5", "KXHIGHTNOLA-26MAY22"),
+    ("KXHIGHDEN-26MAY08-T96.5", "KXHIGHDEN-26MAY08"),
+    ("KXHIGHDEN-26MAY06-T43", "KXHIGHDEN-26MAY06"),
+    ("KXHIGHDEN-26APR28-T70.5-72.5", "KXHIGHDEN-26APR28"),
+)
 
 
 @pytest.fixture(scope="module")
@@ -537,3 +546,80 @@ async def test_aclose_is_idempotent(rsa_pem: Path) -> None:
         await client.aopen()
         await client.aclose()
         await client.aclose()
+
+
+@pytest.mark.parametrize("ticker,expected_event_ticker", _EVENT_TICKER_GOLDEN)
+async def test_event_ticker_matches_event_id_helper(
+    rsa_pem: Path, ticker: str, expected_event_ticker: str
+) -> None:
+    payload = {
+        "markets": [
+            {
+                "ticker": ticker,
+                "event_ticker": expected_event_ticker,
+                "status": "open",
+                "close_time": "2026-05-06T23:00:00Z",
+                "yes_ask_dollars": "0.45",
+                "yes_bid_dollars": "0.43",
+            }
+        ],
+        "cursor": "",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    series = ticker.split("-", 1)[0]
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        markets = await client.list_open_markets_for_series(series)
+
+    assert len(markets) == 1
+    market = markets[0]
+    assert market.event_ticker == expected_event_ticker
+    assert market.event_ticker == event_id(market.ticker)
+
+
+async def test_event_ticker_negative_control_helper_mutation_breaks_equivalence(
+    rsa_pem: Path,
+) -> None:
+    def broken_event_id(t: str) -> str:
+        return t.split("-", 1)[0]
+
+    mismatches = 0
+    for ticker, expected_event_ticker in _EVENT_TICKER_GOLDEN:
+        payload = {
+            "markets": [
+                {
+                    "ticker": ticker,
+                    "event_ticker": expected_event_ticker,
+                    "status": "open",
+                    "close_time": "2026-05-06T23:00:00Z",
+                    "yes_ask_dollars": "0.45",
+                    "yes_bid_dollars": "0.43",
+                }
+            ],
+            "cursor": "",
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=payload)
+
+        series = ticker.split("-", 1)[0]
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+        ) as http:
+            client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+            await client.aopen()
+            markets = await client.list_open_markets_for_series(series)
+
+        market = markets[0]
+        if market.event_ticker != broken_event_id(market.ticker):
+            mismatches += 1
+
+    assert mismatches >= 1

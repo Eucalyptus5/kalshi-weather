@@ -6,6 +6,7 @@ from decimal import Decimal
 import pytest
 
 from bot.risk.gates import (
+    CAP_GATE_NAMES,
     GATE_NAMES,
     GateContext,
     GateMode,
@@ -23,7 +24,10 @@ def _ctx(**overrides: object) -> GateContext:
         "ensemble_spread": Decimal("2.0"),
         "edge": Decimal("0.06"),
         "order_size_dollars": Decimal("20"),
+        "market_existing_dollars": Decimal("0"),
         "market_position_cap": Decimal("50"),
+        "event_existing_dollars": Decimal("0"),
+        "event_position_cap": Decimal("300"),
         "series_existing_dollars": Decimal("10"),
         "series_position_cap": Decimal("100"),
         "account_balance": Decimal("500"),
@@ -44,16 +48,18 @@ def test_all_pass_paper() -> None:
     check = evaluate(_ctx(), GateMode.PAPER)
     assert check.overall_passed is True
     assert len(check.failures) == 0
-    assert len(check.all_results) == 10
+    assert len(check.all_results) == len(GATE_NAMES)
     assert all(r.passed for r in check.all_results)
     assert all(r.reason is None for r in check.all_results)
+    assert tuple(_names(check)) == GATE_NAMES
 
 
 def test_all_pass_live() -> None:
     check = evaluate(_ctx(), GateMode.LIVE)
     assert check.overall_passed is True
     assert len(check.failures) == 0
-    assert len(check.all_results) == 10
+    assert len(check.all_results) == len(GATE_NAMES)
+    assert tuple(_names(check)) == GATE_NAMES
 
 
 def test_fair_value_none_paper_continues() -> None:
@@ -135,12 +141,97 @@ def test_order_size_above_market_cap_fails() -> None:
     check = evaluate(
         _ctx(
             order_size_dollars=Decimal("60"),
+            market_existing_dollars=Decimal("0"),
             market_position_cap=Decimal("50"),
         ),
         GateMode.LIVE,
     )
     assert check.overall_passed is False
     assert {r.name for r in check.failures} == {"within_market_cap"}
+
+
+def test_within_market_cap_blocks_when_existing_plus_new_exceeds_cap() -> None:
+    check = evaluate(
+        _ctx(
+            market_existing_dollars=Decimal("240"),
+            order_size_dollars=Decimal("20"),
+            market_position_cap=Decimal("250"),
+        ),
+        GateMode.LIVE,
+    )
+    assert check.overall_passed is False
+    assert {r.name for r in check.failures} == {"within_market_cap"}
+
+
+def test_within_market_cap_passes_when_below_cap() -> None:
+    check = evaluate(
+        _ctx(
+            market_existing_dollars=Decimal("100"),
+            order_size_dollars=Decimal("50"),
+            market_position_cap=Decimal("250"),
+        ),
+        GateMode.LIVE,
+    )
+    assert check.overall_passed is True
+    assert len(check.failures) == 0
+
+
+def test_within_event_cap_blocks_when_existing_plus_new_exceeds_cap() -> None:
+    check = evaluate(
+        _ctx(
+            event_existing_dollars=Decimal("290"),
+            order_size_dollars=Decimal("20"),
+            event_position_cap=Decimal("300"),
+        ),
+        GateMode.LIVE,
+    )
+    assert check.overall_passed is False
+    assert {r.name for r in check.failures} == {"within_event_cap"}
+
+
+def test_within_event_cap_passes_when_below_cap() -> None:
+    check = evaluate(
+        _ctx(
+            event_existing_dollars=Decimal("290"),
+            order_size_dollars=Decimal("20"),
+            event_position_cap=Decimal("310"),
+        ),
+        GateMode.LIVE,
+    )
+    assert check.overall_passed is True
+    assert len(check.failures) == 0
+
+
+def test_cap_gate_names_invariant() -> None:
+    assert CAP_GATE_NAMES == frozenset(
+        {"within_market_cap", "within_event_cap", "within_series_cap"}
+    )
+
+
+def test_within_series_cap_now_correctly_aggregates() -> None:
+    check = evaluate(
+        _ctx(
+            series_existing_dollars=Decimal("380"),
+            order_size_dollars=Decimal("50"),
+            series_position_cap=Decimal("400"),
+        ),
+        GateMode.LIVE,
+    )
+    assert check.overall_passed is False
+    assert {r.name for r in check.failures} == {"within_series_cap"}
+
+
+def test_paper_mode_cap_failure_still_surfaces_in_failures() -> None:
+    check = evaluate(
+        _ctx(
+            market_existing_dollars=Decimal("240"),
+            order_size_dollars=Decimal("20"),
+            market_position_cap=Decimal("250"),
+        ),
+        GateMode.PAPER,
+    )
+    assert check.overall_passed is True
+    assert "within_market_cap" in [f.name for f in check.failures]
 
 
 def test_series_cap_breached_fails() -> None:
@@ -224,7 +315,7 @@ def test_multiple_failures_live_blocks() -> None:
 
 def test_no_early_exit_all_results_in_spec_order() -> None:
     check = evaluate(_ctx(fair_yes=None), GateMode.PAPER)
-    assert len(check.all_results) == 10
+    assert len(check.all_results) == len(GATE_NAMES)
     assert tuple(_names(check)) == GATE_NAMES
 
 

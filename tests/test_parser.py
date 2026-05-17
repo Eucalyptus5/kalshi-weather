@@ -6,7 +6,13 @@ from decimal import Decimal
 
 import pytest
 
-from bot.markets.parser import ParsedTicker, event_yes_sum_ok, parse_ticker
+from bot.markets.parser import (
+    ParsedTicker,
+    event_id,
+    event_yes_sum_ok,
+    parse_ticker,
+    series_id,
+)
 
 
 @pytest.mark.parametrize(
@@ -215,3 +221,43 @@ def test_event_yes_sum_ok_custom_tolerance(caplog: pytest.LogCaptureFixture) -> 
     result = event_yes_sum_ok(prices, tolerance=Decimal("0.10"))
     assert result is True
     assert not any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "ticker",
+    [
+        "KXHIGHDEN-26APR28-T70.5-72.5",
+        "KXHIGHDEN-26APR28-T70.5",
+        "KXLOWNY-26MAR15-T35.5-37.5",
+        "KXHIGHDEN-26MAY19-B86.5",
+        "KXHIGHTNOLA-26MAY19-B86.5",
+        "KXRAINSFOM-26JUN-T1.0",
+    ],
+)
+def test_event_id_matches_two_part_prefix(ticker: str) -> None:
+    assert event_id(ticker) == "-".join(ticker.split("-")[:2])
+
+
+@pytest.mark.parametrize(
+    "ticker",
+    [
+        "KXHIGHDEN-26APR28-T70.5-72.5",
+        "KXHIGHDEN-26APR28-T70.5",
+        "KXLOWNY-26MAR15-T35.5-37.5",
+        "KXHIGHDEN-26MAY19-B86.5",
+        "KXHIGHTNOLA-26MAY19-B86.5",
+        "KXRAINSFOM-26JUN-T1.0",
+    ],
+)
+def test_series_id_returns_kx_prefix(ticker: str) -> None:
+    assert series_id(ticker) == ticker.split("-")[0]
+
+
+def test_event_id_raises_on_malformed() -> None:
+    with pytest.raises(ValueError):
+        event_id("NOT-A-REAL-TICKER")
+
+
+def test_series_id_raises_on_malformed() -> None:
+    with pytest.raises(ValueError):
+        series_id("NOT-A-REAL-TICKER")

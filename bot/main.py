@@ -25,7 +25,8 @@ from bot.forecast.open_meteo import OpenMeteoClient, StationForecast
 from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook
 from bot.markets.observation_window import observation_window
 from bot.markets.parser import ParsedTicker, parse_ticker
-from bot.risk.gates import GateContext, GateMode, evaluate as evaluate_gates
+from bot.risk.gates import CAP_GATE_NAMES, GateContext, GateMode, evaluate as evaluate_gates
+from bot.storage.positions import open_exposures
 from bot.storage.sqlite import (
     Base,
     Forecast,
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 PAPER_BANKROLL: Decimal = Decimal("500")
 REQUIRED_CUSHION: Decimal = Decimal("100")
 MARKET_POSITION_CAP: Decimal = Decimal("250")
+EVENT_POSITION_CAP: Decimal = Decimal("300")
 SERIES_POSITION_CAP: Decimal = Decimal("400")
 
 MARKET_REFRESH_INTERVAL = 60.0
@@ -385,6 +387,11 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
     n_trades = 0
     async with app.db_lock:
         with app.session_factory() as session:
+            by_market, by_event, by_series = open_exposures(session, now=now)
+            # type(x)(x) preserves any dict subclass passed in (canary in tests/test_main.py); dict(x)/copy/{**x} would coerce to plain dict.
+            overlay_market = type(by_market)(by_market)
+            overlay_event = type(by_event)(by_event)
+            overlay_series = type(by_series)(by_series)
             for ticker, market in app.latest_markets.items():
                 book = app.latest_orderbooks.get(ticker)
                 if book is None:
@@ -422,6 +429,9 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                 mid = (book.yes_ask + book.yes_bid) / Decimal("2")
                 is_blacklisted = parsed.series in STRATEGY_BLACKLIST
 
+                event_key = market.event_ticker
+                series_key = parsed.series
+
                 for intent in _build_intents(
                     ticker=ticker,
                     market=market,
@@ -434,6 +444,11 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                     is_tail=parsed.is_tail,
                     now=now,
                 ):
+                    if intent.side is TradeSide.BUY_YES:
+                        cost_per_contract = book.yes_ask
+                    else:
+                        cost_per_contract = Decimal("1") - book.yes_bid
+
                     gate_ctx = _gate_ctx_for(
                         intent=intent,
                         market=market,
@@ -442,6 +457,10 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                         mid=mid,
                         run_time=run_time,
                         now=now,
+                        cost_per_contract=cost_per_contract,
+                        market_existing_dollars=overlay_market.get(ticker, Decimal("0")),
+                        event_existing_dollars=overlay_event.get(event_key, Decimal("0")),
+                        series_existing_dollars=overlay_series.get(series_key, Decimal("0")),
                     )
                     check = evaluate_gates(gate_ctx, GateMode.PAPER)
                     for failure in check.failures:
@@ -454,11 +473,19 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                                 market_ticker=ticker,
                             )
                         )
+                    if any(f.name in CAP_GATE_NAMES for f in check.failures):
+                        continue
                     if not check.overall_passed:
                         continue
 
                     trade = simulate_taker_fill(intent, Orderbook(book.yes_ask, book.yes_bid), now)
                     session.add(_paper_trade_row(trade))
+                    delta = cost_per_contract * Decimal(intent.contracts)
+                    overlay_market[ticker] = overlay_market.get(ticker, Decimal("0")) + delta
+                    overlay_event[event_key] = overlay_event.get(event_key, Decimal("0")) + delta
+                    overlay_series[series_key] = (
+                        overlay_series.get(series_key, Decimal("0")) + delta
+                    )
                     n_trades += 1
             session.commit()
     logger.info("evaluate_strategies trades=%d markets=%d", n_trades, len(app.latest_markets))
@@ -548,14 +575,15 @@ def _gate_ctx_for(
     mid: Decimal,
     run_time: datetime,
     now: datetime,
+    cost_per_contract: Decimal,
+    market_existing_dollars: Decimal,
+    event_existing_dollars: Decimal,
+    series_existing_dollars: Decimal,
 ) -> GateContext:
     if intent.side is TradeSide.BUY_YES:
         edge_dollars = fair_yes - mid
     else:
         edge_dollars = mid - fair_yes
-    cost_per_contract = (
-        market.yes_ask if intent.side is TradeSide.BUY_YES else (Decimal("1") - market.yes_bid)
-    )
     order_dollars = cost_per_contract * Decimal(intent.contracts)
     minutes_to_close = 99999
     if market.close_time is not None:
@@ -569,8 +597,11 @@ def _gate_ctx_for(
         ensemble_spread=spread,
         edge=edge_dollars,
         order_size_dollars=order_dollars,
+        market_existing_dollars=market_existing_dollars,
         market_position_cap=MARKET_POSITION_CAP,
-        series_existing_dollars=Decimal("0"),
+        event_existing_dollars=event_existing_dollars,
+        event_position_cap=EVENT_POSITION_CAP,
+        series_existing_dollars=series_existing_dollars,
         series_position_cap=SERIES_POSITION_CAP,
         account_balance=PAPER_BANKROLL,
         required_cushion=REQUIRED_CUSHION,

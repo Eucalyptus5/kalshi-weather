@@ -10,6 +10,7 @@ import httpx
 from kalshi_python_async import KalshiAuth
 
 from bot.config import Settings
+from bot.markets.parser import series_id
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ class KalshiDemoClient:
                 skipped_null += 1
                 continue
             ticker = m["ticker"]
-            series = ticker.split("-", 1)[0]
+            series = series_id(ticker)
             if series != series_ticker:
                 logger.warning(
                     "kalshi_list_markets_series_mismatch ticker=%s expected=%s",

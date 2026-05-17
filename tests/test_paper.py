@@ -119,3 +119,28 @@ def test_paper_trade_is_frozen() -> None:
     assert isinstance(trade, PaperTrade)
     with pytest.raises(Exception):
         trade.contracts = 99  # type: ignore[misc]
+
+
+# bot.main.evaluate_strategies feeds one orderbook-anchored cost_per_contract scalar to the cap gate and the overlay update.
+# bot.storage.positions.open_exposures reconstructs cross-cycle max-loss from paper_trades.simulated_price.
+# If a future slippage haircut alters simulate_taker_fill, the equality pins below break; updating them silently
+# decouples the in-cycle cap overlay from the cross-cycle exposure reconstruction.
+@pytest.mark.parametrize(
+    "side,yes_ask,yes_bid",
+    [
+        (TradeSide.BUY_YES, Decimal("0.40"), Decimal("0.38")),
+        (TradeSide.BUY_YES, Decimal("0.05"), Decimal("0.03")),
+        (TradeSide.BUY_YES, Decimal("0.987654"), Decimal("0.987650")),
+        (TradeSide.SELL_YES, Decimal("0.40"), Decimal("0.38")),
+        (TradeSide.SELL_YES, Decimal("0.05"), Decimal("0.03")),
+        (TradeSide.SELL_YES, Decimal("0.987654"), Decimal("0.987650")),
+    ],
+)
+def test_simulate_taker_fill_orderbook_verbatim_for_cap_overlay_coupling(
+    side: TradeSide, yes_ask: Decimal, yes_bid: Decimal
+) -> None:
+    book = _book(yes_ask=yes_ask, yes_bid=yes_bid)
+    trade = simulate_taker_fill(_intent(side=side), book, _now())
+    expected = yes_ask if side is TradeSide.BUY_YES else yes_bid
+    assert trade.simulated_price == expected
+    assert trade.simulated_price.compare_total(expected) == Decimal("0")

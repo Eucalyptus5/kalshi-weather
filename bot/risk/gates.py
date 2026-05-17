@@ -21,7 +21,10 @@ class GateContext:
     ensemble_spread: Decimal
     edge: Decimal
     order_size_dollars: Decimal
+    market_existing_dollars: Decimal
     market_position_cap: Decimal
+    event_existing_dollars: Decimal
+    event_position_cap: Decimal
     series_existing_dollars: Decimal
     series_position_cap: Decimal
     account_balance: Decimal
@@ -64,11 +67,17 @@ GATE_NAMES: tuple[str, ...] = (
     "ensemble_spread_ok",
     "edge_threshold",
     "within_market_cap",
+    "within_event_cap",
     "within_series_cap",
     "account_cushion",
     "market_open",
     "time_to_close",
     "circuit_breakers_armed",
+)
+
+
+CAP_GATE_NAMES: frozenset[str] = frozenset(
+    {"within_market_cap", "within_event_cap", "within_series_cap"}
 )
 
 
@@ -123,13 +132,25 @@ def evaluate(
     else:
         results.append(_fail("edge_threshold", f"edge={ctx.edge} < {params.min_edge}"))
 
-    if ctx.order_size_dollars <= ctx.market_position_cap:
+    market_total = ctx.market_existing_dollars + ctx.order_size_dollars
+    if market_total <= ctx.market_position_cap:
         results.append(_ok("within_market_cap"))
     else:
         results.append(
             _fail(
                 "within_market_cap",
-                f"order_size={ctx.order_size_dollars} > cap={ctx.market_position_cap}",
+                f"market_total={market_total} > cap={ctx.market_position_cap}",
+            )
+        )
+
+    event_total = ctx.event_existing_dollars + ctx.order_size_dollars
+    if event_total <= ctx.event_position_cap:
+        results.append(_ok("within_event_cap"))
+    else:
+        results.append(
+            _fail(
+                "within_event_cap",
+                f"event_total={event_total} > cap={ctx.event_position_cap}",
             )
         )
 

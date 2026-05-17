@@ -53,6 +53,16 @@ class ParsedTicker(BaseModel):
         return len(self.strikes) == 2
 
 
+def event_id(ticker: str) -> str:
+    parse_ticker(ticker)
+    return "-".join(ticker.split("-")[:2])
+
+
+def series_id(ticker: str) -> str:
+    parse_ticker(ticker)
+    return ticker.split("-")[0]
+
+
 def parse_ticker(ticker: str) -> ParsedTicker:
     """Parse a Kalshi KX-prefixed weather ticker. Raises ValueError on anything malformed."""
     if not ticker:
