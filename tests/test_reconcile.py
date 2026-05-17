@@ -10,7 +10,7 @@ import httpx
 import pytest
 
 from bot.execution.paper import PaperTrade, TradeSide
-from bot.markets.parser import parse_ticker
+from bot.markets.parser import ParsedTicker, parse_ticker
 from bot.validation import reconcile as reconcile_mod
 from bot.validation.reconcile import (
     ACISClient,
@@ -213,7 +213,14 @@ def test_settle_bracket_rejects_tail() -> None:
 
 
 def test_settle_tail_below() -> None:
-    parsed = parse_ticker("KXHIGHDEN-26MAY06-B42.5")
+    parsed = ParsedTicker(
+        series="KXHIGHDEN",
+        event_date=date(2026, 5, 6),
+        is_monthly=False,
+        strikes=(Decimal("42.5"),),
+        kind="below",
+        raw="synthetic-below",
+    )
     assert settle_tail(parsed, Decimal("42")) is True
     assert settle_tail(parsed, Decimal("43")) is False
     assert settle_tail(parsed, Decimal("42.5")) is False
@@ -286,13 +293,6 @@ def test_reconcile_trade_dispatches_above_tail() -> None:
     assert out.won is False
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "deferred to parser_b_form_bracket.md - reconcile dispatches via "
-        "parsed.is_bracket so B-form misroutes settle on the wrong semantic"
-    ),
-)
 def test_b_form_bracket_semantic_pending_defect_c() -> None:
     from datetime import datetime, timezone
 

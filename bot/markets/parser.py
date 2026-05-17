@@ -75,9 +75,14 @@ def parse_ticker(ticker: str) -> ParsedTicker:
     if below_match:
         if len(parts) == 4:
             raise ValueError(f"B-form must be single-strike: got {ticker!r}")
-        threshold = Decimal(below_match.group(1))
-        strikes: tuple[Decimal, ...] = (threshold,)
-        kind: TickerKind = "below"
+        raw_strike = below_match.group(1)
+        if "." not in raw_strike or raw_strike.rsplit(".", 1)[1] != "5":
+            raise ValueError(
+                f"B-form strike must be half-integer (<n>.5): got {raw_strike!r} in {ticker!r}"
+            )
+        low = Decimal(raw_strike.split(".", 1)[0])
+        strikes: tuple[Decimal, ...] = (low, low + 1)
+        kind: TickerKind = "bracket"
     elif above_match:
         low = Decimal(above_match.group(1))
         if len(parts) == 3:

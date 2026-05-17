@@ -1712,6 +1712,90 @@ def test_build_intents_blacklisted_skips_both(monkeypatch: pytest.MonkeyPatch) -
             assert len(edge_calls) == 1
 
 
+def test_build_intents_routes_b_form_bracket_to_edge(monkeypatch: pytest.MonkeyPatch) -> None:
+    parsed = parse_ticker("KXHIGHTNOLA-26MAY19-B86.5")
+    assert parsed.is_bracket is True
+    assert parsed.is_tail is False
+
+    close_at = datetime(2026, 5, 19, 4, 0, tzinfo=timezone.utc)
+    market = _market_from(parsed.raw, "0.40", "0.38", close_at)
+    book = _book_from(market.ticker, "0.40", "0.38")
+
+    edge_calls: list[edge_strategy.EdgeContext] = []
+    tails_calls: list[tails_strategy.TailsContext] = []
+
+    def edge_rec(ctx: edge_strategy.EdgeContext, **_):  # type: ignore[no-untyped-def]
+        edge_calls.append(ctx)
+        return edge_strategy.EdgeSignal(
+            action=edge_strategy.EdgeAction.SKIP,
+            contracts=0,
+            notional_dollars=Decimal("0"),
+            reason="stub",
+        )
+
+    def tails_rec(ctx: tails_strategy.TailsContext, **_):  # type: ignore[no-untyped-def]
+        tails_calls.append(ctx)
+        return tails_strategy.TailsSignal(
+            action=tails_strategy.TailsAction.SKIP,
+            contracts=0,
+            notional_dollars=Decimal("0"),
+            reason="stub",
+        )
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", edge_rec)
+    monkeypatch.setattr(bot_main.tails_strategy, "evaluate", tails_rec)
+
+    _build_intents(
+        ticker=market.ticker,
+        market=market,
+        book=book,
+        fair_yes=Decimal("0.30"),
+        spread=Decimal("3.0"),
+        mid=Decimal("0.39"),
+        is_same_day=False,
+        is_blacklisted=False,
+        is_tail=parsed.is_tail,
+        now=datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert len(edge_calls) == 1
+    assert tails_calls == []
+
+
+async def test_evaluate_strategies_b_form_uses_prob_range_not_cdf() -> None:
+    class _RecordingCdf:
+        def __init__(self) -> None:
+            self.prob_range_calls: list[tuple[float, float]] = []
+            self.cdf_calls: list[float] = []
+
+        def prob_range(self, lo: float, hi: float) -> float:
+            self.prob_range_calls.append((lo, hi))
+            return 0.30
+
+        def cdf(self, x: float) -> float:
+            self.cdf_calls.append(x)
+            return 0.99
+
+    close_at = datetime(2026, 5, 19, 4, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHTNOLA-26MAY19-B86.5", "0.40", "0.38", close_at)
+    book = _book_from(market.ticker, "0.40", "0.38")
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(kalshi=kalshi, series_list=("KXHIGHTNOLA",))
+
+    cdf = _RecordingCdf()
+    event_date = date(2026, 5, 19)
+    app.forecast_cdfs[("KMSY", event_date)] = cdf  # type: ignore[assignment]
+    app.ensemble_spreads[("KMSY", event_date)] = Decimal("3.0")
+    app.forecast_run_times[("KMSY", event_date)] = datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc)
+
+    await refresh_markets(app)
+    await evaluate_strategies(app, datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc))
+
+    assert cdf.prob_range_calls == [(86.0, 87.0)]
+    assert cdf.cdf_calls == []
+
+
 async def test_evaluate_strategies_no_index_error_on_single_strike() -> None:
     fc = StationForecast(
         station="KDEN",
@@ -1723,7 +1807,7 @@ async def test_evaluate_strategies_no_index_error_on_single_strike() -> None:
     )
     meteo = _StubMeteo(fc)
     tail = _market_from(
-        "KXHIGHDEN-26MAY08-B70",
+        "KXHIGHDEN-26MAY08-T70",
         "0.50",
         "0.48",
         datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
