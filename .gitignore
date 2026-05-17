@@ -3,6 +3,7 @@
 PLAN.md
 Research.md
 improvements/
+analysis/
 
 # secrets
 .env
@@ -36,3 +37,4 @@ dist/
 .vscode/
 .idea/
 *.swp
+
