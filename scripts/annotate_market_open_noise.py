@@ -10,7 +10,7 @@ from bot.storage.sqlite import GateFailure
 
 # Anchored at least 10 minutes after the planned SIGTERM so a re-run never re-stamps
 # post-fix rows even if the operator runs the script while the bot is back up.
-FIX_TIMESTAMP: datetime = datetime(2026, 5, 28, 0, 0, tzinfo=timezone.utc)
+FIX_TIMESTAMP: datetime = datetime(2026, 5, 28, 8, 5, tzinfo=timezone.utc)
 NOTE_LABEL: str = "pre_fix_status_string_bug"
 
 
