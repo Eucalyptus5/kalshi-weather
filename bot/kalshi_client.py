@@ -173,4 +173,4 @@ def _best_level(levels: list[list[str]] | None) -> tuple[Decimal, int]:
     if not levels:
         return Decimal("0"), 0
     best = max(levels, key=lambda lvl: Decimal(str(lvl[0])))
-    return Decimal(str(best[0])), int(best[1])
+    return Decimal(str(best[0])), int(Decimal(str(best[1])))

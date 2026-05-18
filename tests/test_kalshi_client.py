@@ -672,6 +672,31 @@ async def test_get_orderbook_parses_depth_from_levels(rsa_pem: Path) -> None:
     assert book.no_bid_depth == 7
 
 
+async def test_get_orderbook_parses_depth_from_float_string_levels(rsa_pem: Path) -> None:
+    payload = {
+        "orderbook_fp": {
+            "yes_dollars": [["0.42", "13.00"]],
+            "no_dollars": [["0.55", "1.00"]],
+        }
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        book = await client.get_orderbook("KXHIGHDEN-26MAY06-T70-75")
+
+    assert book.yes_bid_depth == 13
+    assert book.no_bid_depth == 1
+    assert book.yes_ask_depth == 1
+    assert book.no_ask_depth == 13
+
+
 async def test_get_orderbook_zero_depth_for_empty_book(rsa_pem: Path) -> None:
     payload = {"orderbook_fp": {"yes_dollars": None, "no_dollars": None}}
 
