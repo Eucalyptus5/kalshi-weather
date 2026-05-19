@@ -12,12 +12,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from datetime import timezone as _timezone
 from decimal import Decimal
-from pathlib import Path
 
 import httpx
 import numpy as np
-from alembic import command
-from alembic.config import Config
 from sqlalchemy import select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -39,13 +36,13 @@ from bot.markets.parser import ParsedTicker, parse_ticker
 from bot.risk.gates import CAP_GATE_NAMES, GateContext, GateMode, evaluate as evaluate_gates
 from bot.storage.positions import open_exposures
 from bot.storage.sqlite import (
+    Base,
     Forecast,
     GateFailure,
     Market,
     OrderbookSnapshot,
     PaperTradeRow,
     SimulatedPnl,
-    ensure_baseline_stamped,
     make_engine,
     make_session_factory,
 )
@@ -951,14 +948,6 @@ def _parse_series_arg(raw: str) -> tuple[str, ...]:
     return requested
 
 
-def _bootstrap_schema(engine: Engine) -> None:
-    cfg = Config(str(Path(__file__).resolve().parent.parent / "alembic.ini"))
-    ensure_baseline_stamped(engine, "0001")
-    with engine.connect() as connection:
-        cfg.attributes["connection"] = connection
-        command.upgrade(cfg, "head")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bot.main")
     parser.add_argument("--mode", choices=["paper"], default="paper")
@@ -976,7 +965,7 @@ def main() -> None:
     )
 
     engine = make_engine("data/state.db")
-    _bootstrap_schema(engine)
+    Base.metadata.create_all(engine)
     session_factory = make_session_factory(engine)
     meteo = OpenMeteoClient()
     kalshi = KalshiDemoClient(settings)

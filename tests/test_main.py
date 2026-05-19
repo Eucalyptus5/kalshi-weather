@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
-from sqlalchemy import inspect as sa_inspect, select
+from sqlalchemy import select
 
 import bot.main as bot_main
 from bot.execution.paper import PaperTrade, TradeIntent, TradeSide
@@ -26,7 +26,6 @@ from bot.main import (
     STATIONS,
     STRATEGY_BLACKLIST,
     App,
-    _bootstrap_schema,
     _build_intents,
     _checkpoint_wal,
     _compute_lead_time_hours,
@@ -2911,25 +2910,6 @@ async def test_refresh_markets_persists_depth_on_orderbook_snapshot() -> None:
     assert ob.no_bid_depth == 31
 
 
-def test_bootstrap_schema_stamps_and_upgrades_fresh_install(tmp_path) -> None:
-    db_file = tmp_path / "fresh.db"
-    engine = make_engine(db_file)
-
-    _bootstrap_schema(engine)
-
-    inspector = sa_inspect(engine)
-    tables = set(inspector.get_table_names())
-    assert "alembic_version" in tables
-    assert "forecasts" in tables
-    paper_cols = {c["name"] for c in inspector.get_columns("paper_trades")}
-    assert "attempted_contracts" in paper_cols
-    gate_cols = {c["name"] for c in inspector.get_columns("gate_failures")}
-    assert "notes" in gate_cols
-    ob_cols = {c["name"] for c in inspector.get_columns("orderbook_snapshots")}
-    assert "yes_ask_depth" in ob_cols
-    engine.dispose()
-
-
 def test_checkpoint_wal_truncates_wal_file(tmp_path) -> None:
     db_file = tmp_path / "wal.db"
     engine = make_engine(db_file)
@@ -3092,24 +3072,6 @@ async def test_run_checkpoints_wal_on_shutdown(monkeypatch) -> None:
 
     assert calls
     assert all(c is engine for c in calls)
-
-
-def test_main_no_longer_calls_create_all() -> None:
-    src = py_inspect.getsource(bot_main.main)
-    tree = ast.parse(src)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        names: list[str] = []
-        while isinstance(func, ast.Attribute):
-            names.append(func.attr)
-            func = func.value
-        if isinstance(func, ast.Name):
-            names.append(func.id)
-        names.reverse()
-        if names[-2:] == ["metadata", "create_all"]:
-            raise AssertionError("bot.main.main still calls Base.metadata.create_all")
 
 
 def _has_app_nbm_divergences_writer(source: str) -> bool:
