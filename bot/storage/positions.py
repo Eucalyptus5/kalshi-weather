@@ -30,7 +30,7 @@ def open_exposures(
     *,
     now: datetime | None = None,
     grace_days: int = SETTLEMENT_GRACE_DAYS,
-) -> tuple[dict[str, Decimal], dict[str, Decimal], dict[str, Decimal]]:
+) -> tuple[dict[str, Decimal], dict[str, Decimal], dict[str, Decimal], Decimal]:
     if now is None:
         now = datetime.now(tz=_timezone.utc)
     cutoff = (now - timedelta(days=grace_days)).date()
@@ -77,4 +77,5 @@ def open_exposures(
         by_event[event_key] = by_event.get(event_key, Decimal("0")) + max_loss
         by_series[series_key] = by_series.get(series_key, Decimal("0")) + max_loss
 
-    return by_market, by_event, by_series
+    aggregate = sum(by_market.values(), Decimal("0"))
+    return by_market, by_event, by_series, aggregate

@@ -5,6 +5,7 @@ import asyncio
 import dataclasses
 import inspect as py_inspect
 import logging
+import re as _re
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -216,6 +217,48 @@ def _market_from(
         yes_ask=Decimal(yes_ask),
         yes_bid=Decimal(yes_bid),
     )
+
+
+def _lift_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(bot_main, "MARKET_POSITION_CAP", Decimal("10000"))
+    monkeypatch.setattr(bot_main, "EVENT_POSITION_CAP", Decimal("10000"))
+    monkeypatch.setattr(bot_main, "SERIES_POSITION_CAP", Decimal("10000"))
+    monkeypatch.setattr(bot_main, "AGGREGATE_EXPOSURE_CAP", Decimal("100000"))
+
+
+def _lift_per_key_caps_keep_aggregate(
+    monkeypatch: pytest.MonkeyPatch, *, aggregate_cap: Decimal
+) -> None:
+    monkeypatch.setattr(bot_main, "MARKET_POSITION_CAP", Decimal("100"))
+    monkeypatch.setattr(bot_main, "EVENT_POSITION_CAP", Decimal("100"))
+    monkeypatch.setattr(bot_main, "SERIES_POSITION_CAP", Decimal("100"))
+    monkeypatch.setattr(bot_main, "AGGREGATE_EXPOSURE_CAP", aggregate_cap)
+
+
+_AGGREGATE_TEST_PRICES: tuple[tuple[Decimal, Decimal, Decimal], ...] = (
+    (Decimal("0.30"), Decimal("0.27"), Decimal("0.37")),
+    (Decimal("0.10"), Decimal("0.09"), Decimal("0.19")),
+    (Decimal("0.73"), Decimal("0.70"), Decimal("0.63")),
+)
+
+
+def test_aggregate_test_prices_produce_7_50_at_kelly_0_15() -> None:
+    assert edge_strategy.KELLY_MULTIPLIER == Decimal("0.15")
+    for yes_ask, yes_bid, fair in _AGGREGATE_TEST_PRICES:
+        ctx = edge_strategy.EdgeContext(
+            yes_ask=yes_ask,
+            yes_bid=yes_bid,
+            fair_yes=fair,
+            ensemble_spread=Decimal("3.0"),
+            bankroll=Decimal("500"),
+            is_same_day=False,
+            is_blacklisted=False,
+            nbm_divergence=None,
+        )
+        sig = edge_strategy.evaluate(ctx, kelly_multiplier=Decimal("0.15"))
+        assert sig.notional_dollars == Decimal("7.50"), (
+            f"prices=({yes_ask}, {yes_bid}, {fair}) drove notional={sig.notional_dollars}"
+        )
 
 
 def test_parse_duration_hours() -> None:
@@ -651,7 +694,9 @@ async def test_refresh_markets_skips_unparseable_ticker(
     assert matches
 
 
-async def test_evaluate_strategies_runs_edge_buy_path() -> None:
+async def test_evaluate_strategies_runs_edge_buy_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fc = StationForecast(
         station="KDEN",
         latitude=39.8466,
@@ -676,6 +721,7 @@ async def test_evaluate_strategies_runs_edge_buy_path() -> None:
     await refresh_forecasts(app)
     await refresh_markets(app)
 
+    _lift_caps(monkeypatch)
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     n_trades = await evaluate_strategies(app, now)
 
@@ -742,6 +788,7 @@ async def test_evaluate_strategies_runs_tails_on_single_strike_market(
 
     monkeypatch.setattr(bot_main.tails_strategy, "evaluate", recorder)
 
+    _lift_caps(monkeypatch)
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     n_trades = await evaluate_strategies(app, now)
 
@@ -785,7 +832,9 @@ async def test_evaluate_strategies_tail_market_no_trade_when_gates_block() -> No
     assert rows == []
 
 
-async def test_evaluate_strategies_uses_per_ticker_cdf_not_app_series() -> None:
+async def test_evaluate_strategies_uses_per_ticker_cdf_not_app_series(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     rng = np.random.default_rng(11)
     den_fc = StationForecast(
         station="KDEN",
@@ -819,6 +868,7 @@ async def test_evaluate_strategies_uses_per_ticker_cdf_not_app_series() -> None:
     await refresh_forecasts(app)
     await refresh_markets(app)
 
+    _lift_caps(monkeypatch)
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     n_trades = await evaluate_strategies(app, now)
 
@@ -924,6 +974,7 @@ def test_build_intents_emits_for_normal_series() -> None:
 
 async def test_evaluate_strategies_skips_unparseable_ticker(
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     rng = np.random.default_rng(14)
     fc = StationForecast(
@@ -965,6 +1016,7 @@ async def test_evaluate_strategies_skips_unparseable_ticker(
     app.latest_orderbooks[bad.ticker] = bad_book
 
     caplog.set_level(logging.WARNING, logger="bot.main")
+    _lift_caps(monkeypatch)
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     n_trades = await evaluate_strategies(app, now)
 
@@ -1988,6 +2040,9 @@ async def test_evaluate_strategies_caps_market_after_threshold(
     await refresh_markets(app)
 
     monkeypatch.setattr(bot_main, "MARKET_POSITION_CAP", Decimal("40"))
+    monkeypatch.setattr(bot_main, "EVENT_POSITION_CAP", Decimal("10000"))
+    monkeypatch.setattr(bot_main, "SERIES_POSITION_CAP", Decimal("10000"))
+    monkeypatch.setattr(bot_main, "AGGREGATE_EXPOSURE_CAP", Decimal("100000"))
 
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     for _ in range(20):
@@ -2037,7 +2092,10 @@ async def test_evaluate_strategies_caps_event_across_brackets(
     await refresh_forecasts(app)
     await refresh_markets(app)
 
+    monkeypatch.setattr(bot_main, "MARKET_POSITION_CAP", Decimal("10000"))
     monkeypatch.setattr(bot_main, "EVENT_POSITION_CAP", Decimal("10"))
+    monkeypatch.setattr(bot_main, "SERIES_POSITION_CAP", Decimal("10000"))
+    monkeypatch.setattr(bot_main, "AGGREGATE_EXPOSURE_CAP", Decimal("100000"))
 
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     for _ in range(50):
@@ -2211,7 +2269,7 @@ async def test_evaluate_strategies_overlay_strip_regression_canary(
     monkeypatch.setattr(bot_main, "_gate_ctx_for", gate_ctx_recorder)
 
     def fake_open_exposures(session, *, now=None, grace_days=None):
-        return ReadOnlyOverlay(), ReadOnlyOverlay(), ReadOnlyOverlay()
+        return ReadOnlyOverlay(), ReadOnlyOverlay(), ReadOnlyOverlay(), Decimal("0")
 
     monkeypatch.setattr(bot_main, "open_exposures", fake_open_exposures)
 
@@ -2258,6 +2316,7 @@ def test_gate_ctx_cost_per_contract_pins_to_orderbook_under_price_drift() -> Non
         market_existing_dollars=Decimal("0"),
         event_existing_dollars=Decimal("0"),
         series_existing_dollars=Decimal("0"),
+        aggregate_existing_dollars=Decimal("0"),
     )
     assert ctx.order_size_dollars == Decimal("4.00")
 
@@ -2286,6 +2345,7 @@ def test_gate_ctx_cost_per_contract_pins_to_orderbook_under_price_drift() -> Non
         market_existing_dollars=Decimal("0"),
         event_existing_dollars=Decimal("0"),
         series_existing_dollars=Decimal("0"),
+        aggregate_existing_dollars=Decimal("0"),
     )
     assert ctx_sell.order_size_dollars == Decimal("7.0")
 
@@ -2327,6 +2387,7 @@ async def test_evaluate_strategies_partial_fill_on_thin_book(monkeypatch) -> Non
         ]
 
     monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+    _lift_caps(monkeypatch)
 
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     await evaluate_strategies(app, now)
@@ -2338,7 +2399,9 @@ async def test_evaluate_strategies_partial_fill_on_thin_book(monkeypatch) -> Non
     assert trades[0].attempted_contracts == 7194
 
 
-async def test_b_form_evaluate_strategies_records_a_paper_trade_row() -> None:
+async def test_b_form_evaluate_strategies_records_a_paper_trade_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class _RecordingCdf:
         def prob_range(self, lo: float, hi: float) -> float:
             return 0.30
@@ -2361,6 +2424,7 @@ async def test_b_form_evaluate_strategies_records_a_paper_trade_row() -> None:
     app.forecast_run_times[("KMSY", event_date)] = now
 
     await refresh_markets(app)
+    _lift_caps(monkeypatch)
     await evaluate_strategies(app, now)
 
     with app.session_factory() as session:
@@ -2427,6 +2491,7 @@ async def test_evaluate_strategies_partial_fill_overlay_uses_trade_contracts_acr
         return real_gate_ctx(**kwargs)
 
     monkeypatch.setattr(bot_main, "_gate_ctx_for", recorder)
+    _lift_caps(monkeypatch)
 
     await evaluate_strategies(app, now)
 
@@ -2677,7 +2742,7 @@ async def test_evaluate_strategies_per_series_stale_skip_warns_on_one_stuck_seri
     assert any("stale_skip_ratio_high_series" in m and "KXHIGHNY" in m for m in messages)
 
 
-async def test_evaluate_strategies_persists_sigma_t() -> None:
+async def test_evaluate_strategies_persists_sigma_t(monkeypatch: pytest.MonkeyPatch) -> None:
     fc = StationForecast(
         station="KDEN",
         latitude=39.8466,
@@ -2700,6 +2765,7 @@ async def test_evaluate_strategies_persists_sigma_t() -> None:
     await refresh_forecasts(app)
     await refresh_markets(app)
 
+    _lift_caps(monkeypatch)
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     expected_sigma = app.ensemble_spreads[("KDEN", date(2026, 5, 8))]
     n_trades = await evaluate_strategies(app, now)
@@ -2852,7 +2918,9 @@ def test_compute_lead_time_hours_exact_boundary_returns_zero() -> None:
     assert out == Decimal("0.0")
 
 
-async def test_evaluate_strategies_persists_nbm_divergence_as_none() -> None:
+async def test_evaluate_strategies_persists_nbm_divergence_as_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fc = StationForecast(
         station="KDEN",
         latitude=39.8466,
@@ -2875,6 +2943,7 @@ async def test_evaluate_strategies_persists_nbm_divergence_as_none() -> None:
     await refresh_forecasts(app)
     await refresh_markets(app)
 
+    _lift_caps(monkeypatch)
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     await evaluate_strategies(app, now)
 
@@ -3145,3 +3214,474 @@ def test_build_intents_passes_literal_none_for_nbm_divergence() -> None:
         assert node.value.value is None
         keyword_constants.append(True)
     assert found_any, "no nbm_divergence keyword arg found in _build_intents"
+
+
+class _FixedFairCdf:
+    def __init__(self, fair: Decimal) -> None:
+        self._fair = float(fair)
+
+    def prob_range(self, lo: float, hi: float) -> float:
+        return self._fair
+
+    def cdf(self, x: float) -> float:
+        return self._fair
+
+
+_AGGREGATE_SERIES: tuple[str, ...] = (
+    "KXHIGHDEN",
+    "KXHIGHAUS",
+    "KXHIGHCHI",
+    "KXHIGHNY",
+    "KXHIGHPHIL",
+    "KXHIGHTATL",
+    "KXHIGHTBOS",
+    "KXHIGHTDAL",
+    "KXHIGHTDC",
+)
+
+
+_AGGREGATE_EVENT_DATES: tuple[date, ...] = (
+    date(2026, 5, 8),
+    date(2026, 5, 9),
+    date(2026, 5, 10),
+)
+
+
+_AGGREGATE_RUN_TIME: datetime = datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc)
+_AGGREGATE_NOW: datetime = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+
+
+def _ticker_for(series: str, event_date: date, lo: int, hi: int) -> str:
+    date_str = event_date.strftime("%y%b%d").upper()
+    return f"{series}-{date_str}-T{lo}-{hi}"
+
+
+def _seed_aggregate_fixture(app: App) -> list[tuple[KalshiMarket, KalshiOrderbook, Decimal]]:
+    fixtures: list[tuple[KalshiMarket, KalshiOrderbook, Decimal]] = []
+    close_at = datetime(2026, 5, 20, 23, 0, tzinfo=timezone.utc)
+    idx = 0
+    for series in _AGGREGATE_SERIES:
+        for event_date in _AGGREGATE_EVENT_DATES:
+            yes_ask, yes_bid, fair = _AGGREGATE_TEST_PRICES[idx % len(_AGGREGATE_TEST_PRICES)]
+            ticker = _ticker_for(series, event_date, 70 + idx, 75 + idx)
+            market = _market_from(
+                ticker, str(yes_ask), str(yes_bid), close_at=close_at, status="active"
+            )
+            book = _book_from(ticker, str(yes_ask), str(yes_bid), now=_AGGREGATE_NOW)
+            station = STATIONS[series].station
+            app.forecast_cdfs[(station, event_date)] = _FixedFairCdf(fair)  # type: ignore[assignment]
+            app.ensemble_spreads[(station, event_date)] = Decimal("3.0")
+            app.forecast_run_times[(station, event_date)] = _AGGREGATE_RUN_TIME
+            app.latest_markets[ticker] = market
+            app.latest_orderbooks[ticker] = book
+            fixtures.append((market, book, fair))
+            idx += 1
+    return fixtures
+
+
+def _pin_kelly_multiplier(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_evaluate = edge_strategy.evaluate
+
+    def evaluate_with_pinned_kelly(ctx, **kwargs):  # type: ignore[no-untyped-def]
+        kwargs.setdefault("kelly_multiplier", Decimal("0.15"))
+        return real_evaluate(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", evaluate_with_pinned_kelly)
+
+
+async def test_evaluate_strategies_blocks_on_aggregate_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _lift_per_key_caps_keep_aggregate(monkeypatch, aggregate_cap=Decimal("200"))
+    _pin_kelly_multiplier(monkeypatch)
+
+    app = _make_app(series_list=_AGGREGATE_SERIES)
+    fixtures = _seed_aggregate_fixture(app)
+    assert len(fixtures) == 27
+    events = {m.event_ticker for m, _, _ in fixtures}
+    series = {m.series for m, _, _ in fixtures}
+    assert len(events) >= 13
+    assert len(series) >= 9
+
+    await evaluate_strategies(app, _AGGREGATE_NOW)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+        agg_failures = session.scalars(
+            select(GateFailure).where(GateFailure.gate_name == "within_aggregate_cap")
+        ).all()
+        per_key_failures = session.scalars(
+            select(GateFailure).where(
+                GateFailure.gate_name.in_(["within_event_cap", "within_series_cap"])
+            )
+        ).all()
+
+    assert len(trades) == 26, (
+        f"expected 26 trades (cumulative $195, trade 27 would push to $202.50 > $200); "
+        f"got {len(trades)}"
+    )
+    assert len(agg_failures) == 1
+    assert per_key_failures == []
+
+
+async def test_evaluate_strategies_aggregate_overlay_updates_within_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _lift_per_key_caps_keep_aggregate(monkeypatch, aggregate_cap=Decimal("40"))
+    _pin_kelly_multiplier(monkeypatch)
+
+    app = _make_app(series_list=_AGGREGATE_SERIES)
+    _seed_aggregate_fixture(app)
+
+    await evaluate_strategies(app, _AGGREGATE_NOW)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+        agg_failures = session.scalars(
+            select(GateFailure).where(GateFailure.gate_name == "within_aggregate_cap")
+        ).all()
+
+    assert len(trades) == 5, (
+        f"expected 5 trades (cumulative $37.50 < $40 < $45.00 on 6th); got {len(trades)}"
+    )
+    assert agg_failures
+
+
+async def test_evaluate_strategies_aggregate_kwarg_threads_across_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _lift_per_key_caps_keep_aggregate(monkeypatch, aggregate_cap=Decimal("40"))
+    _pin_kelly_multiplier(monkeypatch)
+
+    app = _make_app(series_list=_AGGREGATE_SERIES)
+    _seed_aggregate_fixture(app)
+
+    observed_aggregates: list[Decimal] = []
+    real_gate_ctx = bot_main._gate_ctx_for
+
+    def recorder(**kwargs):  # type: ignore[no-untyped-def]
+        observed_aggregates.append(kwargs["aggregate_existing_dollars"])
+        return real_gate_ctx(**kwargs)
+
+    monkeypatch.setattr(bot_main, "_gate_ctx_for", recorder)
+
+    await evaluate_strategies(app, _AGGREGATE_NOW)
+
+    assert len(observed_aggregates) >= 6
+    expected_prefix = [
+        Decimal("0"),
+        Decimal("7.50"),
+        Decimal("15.00"),
+        Decimal("22.50"),
+        Decimal("30.00"),
+        Decimal("37.50"),
+    ]
+    assert observed_aggregates[:6] == expected_prefix
+
+
+async def test_bankroll_accessor_drives_all_downstream_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = Decimal("777.77")
+    monkeypatch.setattr(bot_main, "bankroll", lambda: sentinel)
+    _lift_caps(monkeypatch)
+
+    edge_seen: list[Decimal] = []
+    tails_seen: list[Decimal] = []
+    real_edge_evaluate = edge_strategy.evaluate
+    real_tails_evaluate = tails_strategy.evaluate
+
+    def edge_recorder(ctx, **kwargs):  # type: ignore[no-untyped-def]
+        edge_seen.append(ctx.bankroll)
+        return real_edge_evaluate(ctx, **kwargs)
+
+    def tails_recorder(ctx, **kwargs):  # type: ignore[no-untyped-def]
+        tails_seen.append(ctx.bankroll)
+        return real_tails_evaluate(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", edge_recorder)
+    monkeypatch.setattr(bot_main.tails_strategy, "evaluate", tails_recorder)
+
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    bracket = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    bracket_book = _book_from(bracket.ticker, "0.20", "0.18")
+    tail = _market_from(
+        "KXHIGHDEN-26MAY08-T100",
+        "0.50",
+        "0.48",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    tail_book = _book_from(tail.ticker, "0.50", "0.48")
+    meteo = _StubMeteo(fc)
+    kalshi = _StubKalshi(
+        markets=[bracket, tail],
+        orderbooks={bracket.ticker: bracket_book, tail.ticker: tail_book},
+    )
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    await evaluate_strategies(app, now)
+
+    intent = TradeIntent(
+        market_ticker=bracket.ticker,
+        side=TradeSide.BUY_YES,
+        contracts=10,
+        fair_yes=Decimal("0.50"),
+        strategy="edge",
+    )
+    direct_ctx = _gate_ctx_for(
+        intent=intent,
+        market=bracket,
+        fair_yes=Decimal("0.50"),
+        spread=Decimal("3.0"),
+        mid=Decimal("0.19"),
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        now=now,
+        cost_per_contract=Decimal("0.20"),
+        market_existing_dollars=Decimal("0"),
+        event_existing_dollars=Decimal("0"),
+        series_existing_dollars=Decimal("0"),
+        aggregate_existing_dollars=Decimal("0"),
+    )
+
+    assert edge_seen, "edge_strategy.evaluate was not reached"
+    assert tails_seen, "tails_strategy.evaluate was not reached"
+    assert all(v == sentinel for v in edge_seen)
+    assert all(v == sentinel for v in tails_seen)
+    assert direct_ctx.account_balance == sentinel
+
+
+def test_caps_observed_at_runtime_follow_bankroll_accessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    market_cap = getattr(bot_main, "MARKET_POSITION_CAP")
+    event_cap = getattr(bot_main, "EVENT_POSITION_CAP")
+    series_cap = getattr(bot_main, "SERIES_POSITION_CAP")
+    aggregate_cap = getattr(bot_main, "AGGREGATE_EXPOSURE_CAP")
+    if bot_main.LIVE_BANKROLL_ENABLED:
+        monkeypatch.setattr(bot_main, "bankroll", lambda: Decimal("1000"))
+        bk = bot_main.bankroll()
+        assert market_cap == bk * bot_main.MARKET_POSITION_FRAC
+        assert event_cap == bk * bot_main.EVENT_POSITION_FRAC
+        assert series_cap == bk * bot_main.SERIES_POSITION_FRAC
+        assert aggregate_cap == bk * bot_main.AGGREGATE_EXPOSURE_FRAC
+    else:
+        seed = bot_main.PAPER_BANKROLL
+        assert market_cap == seed * bot_main.MARKET_POSITION_FRAC
+        assert event_cap == seed * bot_main.EVENT_POSITION_FRAC
+        assert series_cap == seed * bot_main.SERIES_POSITION_FRAC
+        assert aggregate_cap == seed * bot_main.AGGREGATE_EXPOSURE_FRAC
+
+
+_CAP_NAME_PATTERN = _re.compile(r"^[A-Z_]+_(POSITION|EXPOSURE)_CAP$")
+
+
+def _find_paper_bankroll_offenders(source: str) -> list[tuple[int, str, str]]:
+    tree = ast.parse(source)
+
+    bankroll_lines: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "bankroll":
+            for descendant in ast.walk(node):
+                if hasattr(descendant, "lineno"):
+                    bankroll_lines.add(descendant.lineno)
+
+    paper_bankroll_decl_lines: set[int] = set()
+    cap_derivation_lines: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            tgt_id = node.target.id
+            if tgt_id == "PAPER_BANKROLL":
+                paper_bankroll_decl_lines.add(node.lineno)
+                continue
+            if _CAP_NAME_PATTERN.match(tgt_id) and node.value is not None:
+                has_paper_bankroll = False
+                has_frac = False
+                for descendant in ast.walk(node.value):
+                    if isinstance(descendant, ast.Name):
+                        if descendant.id == "PAPER_BANKROLL":
+                            has_paper_bankroll = True
+                        elif descendant.id.endswith("_FRAC"):
+                            has_frac = True
+                if has_paper_bankroll and has_frac:
+                    for descendant in ast.walk(node):
+                        if hasattr(descendant, "lineno"):
+                            cap_derivation_lines.add(descendant.lineno)
+
+    offenders: list[tuple[int, str, str]] = []
+    allowed_lines = bankroll_lines | paper_bankroll_decl_lines | cap_derivation_lines
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "PAPER_BANKROLL":
+            if node.lineno not in allowed_lines:
+                offenders.append((node.lineno, "Name", node.id))
+        elif isinstance(node, ast.Attribute) and node.attr == "PAPER_BANKROLL":
+            offenders.append((node.lineno, "Attribute", node.attr))
+        elif isinstance(node, ast.Constant) and node.value == "PAPER_BANKROLL":
+            offenders.append((node.lineno, "Constant", str(node.value)))
+    return offenders
+
+
+def test_only_bankroll_accessor_reads_paper_bankroll_directly() -> None:
+    src = py_inspect.getsource(bot_main)
+    offenders = _find_paper_bankroll_offenders(src)
+    assert offenders == [], f"PAPER_BANKROLL accessed outside allowed sites: {offenders}"
+
+
+def test_paper_bankroll_offender_predicate_flags_attribute_access() -> None:
+    synthetic = "import bot.main as m\ndef f():\n    return m.PAPER_BANKROLL\n"
+    offenders = _find_paper_bankroll_offenders(synthetic)
+    assert offenders, "predicate failed to flag attribute access to PAPER_BANKROLL"
+    assert any(kind == "Attribute" for _line, kind, _name in offenders)
+
+
+def test_paper_bankroll_offender_predicate_accepts_real_main() -> None:
+    src = py_inspect.getsource(bot_main)
+    offenders = _find_paper_bankroll_offenders(src)
+    assert offenders == [], f"real bot/main.py flagged: {offenders}"
+
+
+def _find_cap_import_offenders(source: str, filename: str) -> list[tuple[str, int, str, str]]:
+    tree = ast.parse(source)
+    bot_main_aliases: set[str] = set()
+    offenders: list[tuple[str, int, str, str]] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "bot.main":
+                    bot_main_aliases.add(alias.asname or "bot")
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "bot.main":
+                for alias in node.names:
+                    if alias.name == "*":
+                        offenders.append((filename, node.lineno, "from-star", "*"))
+                    elif _CAP_NAME_PATTERN.match(alias.name):
+                        kind = "from-alias" if alias.asname else "from-bare"
+                        offenders.append((filename, node.lineno, kind, alias.name))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and _CAP_NAME_PATTERN.match(node.attr):
+            base = node.value
+            head: str | None = None
+            if isinstance(base, ast.Name):
+                head = base.id
+            elif isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name):
+                if base.value.id == "bot" and base.attr == "main":
+                    head = "bot"
+            if head is not None and head in bot_main_aliases:
+                offenders.append((filename, node.lineno, "attribute", node.attr))
+    return offenders
+
+
+def test_no_test_imports_cap_constants_by_name() -> None:
+    tests_dir = Path(__file__).parent
+    offenders_all: list[tuple[str, int, str, str]] = []
+    for test_file in sorted(tests_dir.glob("test_*.py")):
+        src = test_file.read_text()
+        offenders_all.extend(_find_cap_import_offenders(src, test_file.name))
+    assert offenders_all == [], (
+        "tests imported cap constants by name (silent-no-op shape: monkeypatch.setattr "
+        "on bot.main does not update test-module-local bindings); offenders=" + repr(offenders_all)
+    )
+
+
+def test_cap_import_offender_predicate_flags_bare_from_import() -> None:
+    src = "from bot.main import MARKET_POSITION_CAP\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders
+    assert any(kind == "from-bare" for _f, _l, kind, _n in offenders)
+
+
+def test_cap_import_offender_predicate_flags_aliased_from_import() -> None:
+    src = "from bot.main import MARKET_POSITION_CAP as cap\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders
+    assert any(kind == "from-alias" for _f, _l, kind, _n in offenders)
+
+
+def test_cap_import_offender_predicate_flags_parenthesized_multi_name() -> None:
+    src = "from bot.main import (App, MARKET_POSITION_CAP, evaluate_strategies)\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders
+    assert any(name == "MARKET_POSITION_CAP" for _f, _l, _k, name in offenders)
+
+
+def test_cap_import_offender_predicate_flags_star_import() -> None:
+    src = "from bot.main import *\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders
+    assert any(kind == "from-star" for _f, _l, kind, _n in offenders)
+
+
+def test_cap_import_offender_predicate_flags_attribute_via_bare_import() -> None:
+    src = "import bot.main\nx = bot.main.MARKET_POSITION_CAP\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders
+    assert any(kind == "attribute" for _f, _l, kind, _n in offenders)
+
+
+def test_cap_import_offender_predicate_flags_attribute_via_aliased_import() -> None:
+    src = "import bot.main as m\nx = m.MARKET_POSITION_CAP\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders
+    assert any(kind == "attribute" for _f, _l, kind, _n in offenders)
+
+
+def test_cap_import_offender_predicate_accepts_aliased_import_with_no_attribute() -> None:
+    src = "import bot.main as bot_main\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders == []
+
+
+def test_cap_import_offender_predicate_accepts_app_import() -> None:
+    src = "from bot.main import App\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders == []
+
+
+def test_cap_import_offender_predicate_accepts_evaluate_strategies_import() -> None:
+    src = "from bot.main import evaluate_strategies\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders == []
+
+
+def test_cap_import_offender_predicate_accepts_paper_bankroll_import() -> None:
+    src = "from bot.main import PAPER_BANKROLL\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders == []
+
+
+def test_cap_import_offender_predicate_accepts_required_cushion_import() -> None:
+    src = "from bot.main import REQUIRED_CUSHION\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders == []
+
+
+def test_cap_import_offender_predicate_accepts_unrelated_module_import() -> None:
+    src = "from elsewhere import MARKET_POSITION_CAP\n"
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders == []
+
+
+def test_cap_import_offender_predicate_accepts_monkeypatch_string_literal() -> None:
+    src = (
+        "import bot.main as bot_main\n"
+        "def t(monkeypatch):\n"
+        "    monkeypatch.setattr(bot_main, 'MARKET_POSITION_CAP', 1)\n"
+    )
+    offenders = _find_cap_import_offenders(src, "synthetic.py")
+    assert offenders == []

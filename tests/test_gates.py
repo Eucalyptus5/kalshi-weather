@@ -30,6 +30,8 @@ def _ctx(**overrides: object) -> GateContext:
         "event_position_cap": Decimal("300"),
         "series_existing_dollars": Decimal("10"),
         "series_position_cap": Decimal("100"),
+        "aggregate_existing_dollars": Decimal("0"),
+        "aggregate_exposure_cap": Decimal("10000"),
         "account_balance": Decimal("500"),
         "required_cushion": Decimal("100"),
         "market_status": "active",
@@ -204,8 +206,60 @@ def test_within_event_cap_passes_when_below_cap() -> None:
 
 def test_cap_gate_names_invariant() -> None:
     assert CAP_GATE_NAMES == frozenset(
-        {"within_market_cap", "within_event_cap", "within_series_cap"}
+        {"within_market_cap", "within_event_cap", "within_series_cap", "within_aggregate_cap"}
     )
+
+
+def test_cap_gate_names_includes_aggregate() -> None:
+    assert "within_aggregate_cap" in CAP_GATE_NAMES
+    assert CAP_GATE_NAMES == frozenset(
+        {"within_market_cap", "within_event_cap", "within_series_cap", "within_aggregate_cap"}
+    )
+
+
+def test_within_aggregate_cap_blocks_when_existing_plus_new_exceeds_cap() -> None:
+    check = evaluate(
+        _ctx(
+            aggregate_existing_dollars=Decimal("195"),
+            order_size_dollars=Decimal("10"),
+            aggregate_exposure_cap=Decimal("200"),
+        ),
+        GateMode.LIVE,
+    )
+    assert check.overall_passed is False
+    assert {r.name for r in check.failures} == {"within_aggregate_cap"}
+
+
+def test_within_aggregate_cap_passes_when_below_cap() -> None:
+    check = evaluate(
+        _ctx(
+            aggregate_existing_dollars=Decimal("100"),
+            order_size_dollars=Decimal("50"),
+            aggregate_exposure_cap=Decimal("200"),
+        ),
+        GateMode.LIVE,
+    )
+    assert check.overall_passed is True
+    assert len(check.failures) == 0
+
+
+def test_within_aggregate_cap_independent_of_market_event_series() -> None:
+    check = evaluate(
+        _ctx(
+            market_existing_dollars=Decimal("0"),
+            event_existing_dollars=Decimal("0"),
+            series_existing_dollars=Decimal("0"),
+            aggregate_existing_dollars=Decimal("199"),
+            order_size_dollars=Decimal("5"),
+            market_position_cap=Decimal("250"),
+            event_position_cap=Decimal("300"),
+            series_position_cap=Decimal("400"),
+            aggregate_exposure_cap=Decimal("200"),
+        ),
+        GateMode.LIVE,
+    )
+    assert check.overall_passed is False
+    assert {r.name for r in check.failures} == {"within_aggregate_cap"}
 
 
 def test_within_series_cap_now_correctly_aggregates() -> None:
@@ -394,3 +448,44 @@ def test_result_is_frozen() -> None:
     check = evaluate(_ctx(), GateMode.PAPER)
     with pytest.raises(Exception):
         check.all_results[0].passed = False  # type: ignore[misc]
+
+
+def test_gate_ctx_for_overlay_kwargs_are_keyword_only() -> None:
+    import inspect
+
+    import bot.main as bot_main
+
+    sig = inspect.signature(bot_main._gate_ctx_for)
+    for name in (
+        "market_existing_dollars",
+        "event_existing_dollars",
+        "series_existing_dollars",
+        "aggregate_existing_dollars",
+    ):
+        param = sig.parameters[name]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY, (
+            f"{name} must be keyword-only, got {param.kind}"
+        )
+
+
+def test_caps_derived_from_bankroll_fractions() -> None:
+    import bot.main as bot_main
+
+    seed = bot_main.PAPER_BANKROLL
+    assert getattr(bot_main, "MARKET_POSITION_CAP") == seed * Decimal("0.015")
+    assert getattr(bot_main, "EVENT_POSITION_CAP") == seed * Decimal("0.03")
+    assert getattr(bot_main, "SERIES_POSITION_CAP") == seed * Decimal("0.05")
+    assert getattr(bot_main, "AGGREGATE_EXPOSURE_CAP") == seed * Decimal("0.40")
+
+
+@pytest.mark.parametrize(
+    "bankroll",
+    [Decimal("500"), Decimal("1000"), Decimal("5000"), Decimal("10000")],
+)
+def test_caps_scale_linearly_with_bankroll(bankroll: Decimal) -> None:
+    import bot.main as bot_main
+
+    assert bankroll * bot_main.MARKET_POSITION_FRAC == bankroll * Decimal("0.015")
+    assert bankroll * bot_main.EVENT_POSITION_FRAC == bankroll * Decimal("0.03")
+    assert bankroll * bot_main.SERIES_POSITION_FRAC == bankroll * Decimal("0.05")
+    assert bankroll * bot_main.AGGREGATE_EXPOSURE_FRAC == bankroll * Decimal("0.40")

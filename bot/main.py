@@ -54,10 +54,24 @@ logger = logging.getLogger(__name__)
 
 
 PAPER_BANKROLL: Decimal = Decimal("500")
+LIVE_BANKROLL_ENABLED: bool = False
+
+
+def bankroll() -> Decimal:
+    return PAPER_BANKROLL
+
+
 REQUIRED_CUSHION: Decimal = Decimal("100")
-MARKET_POSITION_CAP: Decimal = Decimal("250")
-EVENT_POSITION_CAP: Decimal = Decimal("300")
-SERIES_POSITION_CAP: Decimal = Decimal("400")
+
+MARKET_POSITION_FRAC: Decimal = Decimal("0.015")
+EVENT_POSITION_FRAC: Decimal = Decimal("0.03")
+SERIES_POSITION_FRAC: Decimal = Decimal("0.05")
+AGGREGATE_EXPOSURE_FRAC: Decimal = Decimal("0.40")
+
+MARKET_POSITION_CAP: Decimal = PAPER_BANKROLL * MARKET_POSITION_FRAC
+EVENT_POSITION_CAP: Decimal = PAPER_BANKROLL * EVENT_POSITION_FRAC
+SERIES_POSITION_CAP: Decimal = PAPER_BANKROLL * SERIES_POSITION_FRAC
+AGGREGATE_EXPOSURE_CAP: Decimal = PAPER_BANKROLL * AGGREGATE_EXPOSURE_FRAC
 
 MARKET_REFRESH_INTERVAL = 60.0
 EVAL_INTERVAL = 60.0
@@ -402,7 +416,9 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
     intents_seen_by_series: dict[str, int] = defaultdict(int)
     async with app.db_lock:
         with app.session_factory() as session:
-            by_market, by_event, by_series = open_exposures(session, now=now)
+            by_market, by_event, by_series, cycle_aggregate_exposure = open_exposures(
+                session, now=now
+            )
             # type(x)(x) preserves any dict subclass passed in (canary in tests/test_main.py); dict(x)/copy/{**x} would coerce to plain dict.
             overlay_market = type(by_market)(by_market)
             overlay_event = type(by_event)(by_event)
@@ -477,6 +493,7 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                         market_existing_dollars=overlay_market.get(ticker, Decimal("0")),
                         event_existing_dollars=overlay_event.get(event_key, Decimal("0")),
                         series_existing_dollars=overlay_series.get(series_key, Decimal("0")),
+                        aggregate_existing_dollars=cycle_aggregate_exposure,
                     )
                     check = evaluate_gates(gate_ctx, GateMode.PAPER)
                     for failure in check.failures:
@@ -515,6 +532,7 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                     overlay_series[series_key] = (
                         overlay_series.get(series_key, Decimal("0")) + delta
                     )
+                    cycle_aggregate_exposure = cycle_aggregate_exposure + delta
                     n_trades += 1
             session.commit()
     log_stale_skip_ratio(stale_skips_by_series, intents_seen_by_series)
@@ -559,7 +577,7 @@ def _build_intents(
             yes_bid=book.yes_bid,
             fair_yes=fair_yes,
             ensemble_spread=spread,
-            bankroll=PAPER_BANKROLL,
+            bankroll=bankroll(),
             is_same_day=is_same_day,
             is_blacklisted=is_blacklisted,
             nbm_divergence=None,
@@ -600,7 +618,7 @@ def _build_intents(
             fair_yes=fair_yes,
             close_time=market.close_time,
             now=now,
-            bankroll=PAPER_BANKROLL,
+            bankroll=bankroll(),
             is_same_day=is_same_day,
         )
         tails_sig = tails_strategy.evaluate(tails_ctx)
@@ -634,6 +652,7 @@ def _gate_ctx_for(
     market_existing_dollars: Decimal,
     event_existing_dollars: Decimal,
     series_existing_dollars: Decimal,
+    aggregate_existing_dollars: Decimal,
 ) -> GateContext:
     if intent.side is TradeSide.BUY_YES:
         edge_dollars = fair_yes - mid
@@ -658,7 +677,9 @@ def _gate_ctx_for(
         event_position_cap=EVENT_POSITION_CAP,
         series_existing_dollars=series_existing_dollars,
         series_position_cap=SERIES_POSITION_CAP,
-        account_balance=PAPER_BANKROLL,
+        aggregate_existing_dollars=aggregate_existing_dollars,
+        aggregate_exposure_cap=AGGREGATE_EXPOSURE_CAP,
+        account_balance=bankroll(),
         required_cushion=REQUIRED_CUSHION,
         market_status=market.status,
         minutes_to_close=minutes_to_close,

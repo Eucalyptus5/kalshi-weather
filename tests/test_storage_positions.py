@@ -72,7 +72,7 @@ def test_open_exposures_buy_yes_max_loss_is_premium_paid() -> None:
     )
     now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
     with factory() as session:
-        by_market, _by_event, _by_series = open_exposures(session, now=now)
+        by_market, _by_event, _by_series, _agg = open_exposures(session, now=now)
     assert by_market["KXHIGHDEN-26MAY27-T70-75"] == Decimal("4.00")
 
 
@@ -89,7 +89,7 @@ def test_open_exposures_sell_yes_max_loss_is_one_minus_premium() -> None:
     )
     now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
     with factory() as session:
-        by_market, _by_event, _by_series = open_exposures(session, now=now)
+        by_market, _by_event, _by_series, _agg = open_exposures(session, now=now)
     assert by_market["KXHIGHDEN-26MAY27-T70-75"] == Decimal("6.00")
 
 
@@ -115,7 +115,7 @@ def test_open_exposures_excludes_settled_trades() -> None:
     )
     now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
     with factory() as session:
-        by_market, _by_event, _by_series = open_exposures(session, now=now)
+        by_market, _by_event, _by_series, _agg = open_exposures(session, now=now)
     assert by_market.get("KXHIGHDEN-26MAY27-T70-75") == Decimal("4.00")
     assert "KXHIGHDEN-26MAY27-T75-80" not in by_market
 
@@ -149,7 +149,7 @@ def test_open_exposures_aggregates_per_market_event_series() -> None:
     )
     now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
     with factory() as session:
-        by_market, by_event, by_series = open_exposures(session, now=now)
+        by_market, by_event, by_series, _agg = open_exposures(session, now=now)
     assert by_market["KXHIGHDEN-26MAY27-T70-75"] == Decimal("4.00")
     assert by_market["KXHIGHDEN-26MAY27-T75-80"] == Decimal("2.00")
     assert by_market["KXHIGHDEN-26MAY28-T70-75"] == Decimal("1.00")
@@ -179,7 +179,7 @@ def test_open_exposures_aggregates_4_part_t_form_bracket_under_canonical_event_k
     )
     now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
     with factory() as session:
-        _by_market, by_event, _by_series = open_exposures(session, now=now)
+        _by_market, by_event, _by_series, _agg = open_exposures(session, now=now)
     assert by_event["KXHIGHDEN-26MAY27"] == Decimal("7.00")
 
 
@@ -187,7 +187,7 @@ def test_open_exposures_returns_zero_for_unknown_ticker() -> None:
     factory, _ = _session_factory()
     now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
     with factory() as session:
-        by_market, _by_event, _by_series = open_exposures(session, now=now)
+        by_market, _by_event, _by_series, _agg = open_exposures(session, now=now)
     assert by_market.get("nonexistent", Decimal("0")) == Decimal("0")
 
 
@@ -204,7 +204,7 @@ def test_open_exposures_excludes_pending_past_grace_window() -> None:
     )
     now = datetime(2026, 5, 1, 12, 0, tzinfo=timezone.utc)
     with factory() as session:
-        by_market, by_event, by_series = open_exposures(session, now=now)
+        by_market, by_event, by_series, _agg = open_exposures(session, now=now)
     assert "KXHIGHDEN-26APR01-T70-75" not in by_market
     assert "KXHIGHDEN-26APR01" not in by_event
     assert by_series.get("KXHIGHDEN", Decimal("0")) == Decimal("0")
@@ -223,7 +223,7 @@ def test_open_exposures_includes_pending_inside_grace_window() -> None:
     )
     now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
     with factory() as session:
-        by_market, _by_event, _by_series = open_exposures(session, now=now)
+        by_market, _by_event, _by_series, _agg = open_exposures(session, now=now)
     assert by_market["KXHIGHDEN-26MAY25-T70-75"] == Decimal("4.00")
 
 
@@ -241,8 +241,8 @@ def test_open_exposures_grace_boundary_flips_with_now() -> None:
     included_now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
     excluded_now = datetime(2026, 5, 28, 12, 0, tzinfo=timezone.utc)
     with factory() as session:
-        by_market_in, _, _ = open_exposures(session, now=included_now)
-        by_market_out, _, _ = open_exposures(session, now=excluded_now)
+        by_market_in, _, _, _ = open_exposures(session, now=included_now)
+        by_market_out, _, _, _ = open_exposures(session, now=excluded_now)
     assert by_market_in["KXHIGHDEN-26MAY20-T70-75"] == Decimal("4.00")
     assert "KXHIGHDEN-26MAY20-T70-75" not in by_market_out
 
@@ -278,7 +278,7 @@ def test_open_exposures_monthly_event_uses_end_of_month_cutoff() -> None:
     )
     now = datetime(2026, 6, 9, 12, 0, tzinfo=timezone.utc)
     with factory() as session:
-        by_market, _by_event, _by_series = open_exposures(session, now=now)
+        by_market, _by_event, _by_series, _agg = open_exposures(session, now=now)
     assert by_market["KXRAINSFOM-26JUN-T1.0"] == Decimal("4.00")
 
 
@@ -295,7 +295,7 @@ def test_open_exposures_monthly_event_drops_past_grace_after_end_of_month() -> N
     )
     now = datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc)
     with factory() as session:
-        by_market, _by_event, _by_series = open_exposures(session, now=now)
+        by_market, _by_event, _by_series, _agg = open_exposures(session, now=now)
     assert "KXRAINSFOM-26JUN-T1.0" not in by_market
 
 
@@ -323,7 +323,7 @@ def test_open_exposures_skips_unparseable_ticker_does_not_raise(
     now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
     caplog.set_level(logging.WARNING, logger="bot.storage.positions")
     with factory() as session:
-        by_market, _by_event, _by_series = open_exposures(session, now=now)
+        by_market, _by_event, _by_series, _agg = open_exposures(session, now=now)
     assert by_market["KXHIGHDEN-26MAY27-T70-75"] == Decimal("4.00")
     matches = [r for r in caplog.records if "unparseable" in r.getMessage()]
     assert matches
@@ -343,5 +343,103 @@ def test_open_exposures_uses_default_now_when_none_passed() -> None:
         intended_at=intended,
     )
     with factory() as session:
-        by_market, _by_event, _by_series = open_exposures(session)
+        by_market, _by_event, _by_series, _agg = open_exposures(session)
     assert by_market[ticker] == Decimal("4.00")
+
+
+def test_open_exposures_returns_four_tuple() -> None:
+    factory, _ = _session_factory()
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        result = open_exposures(session, now=now)
+    assert isinstance(result, tuple)
+    assert len(result) == 4
+    by_market, by_event, by_series, aggregate = result
+    assert isinstance(by_market, dict)
+    assert isinstance(by_event, dict)
+    assert isinstance(by_series, dict)
+    assert isinstance(aggregate, Decimal)
+
+
+def test_open_exposures_aggregate_equals_sum_of_market_values() -> None:
+    factory, _ = _session_factory()
+    intended = datetime(2026, 5, 26, 18, 0, tzinfo=timezone.utc)
+    _insert_trade(
+        factory,
+        market_ticker="KXHIGHDEN-26MAY27-T70-75",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        intended_at=intended,
+    )
+    _insert_trade(
+        factory,
+        market_ticker="KXHIGHDEN-26MAY27-T75-80",
+        side="buy_yes",
+        contracts=20,
+        simulated_price=Decimal("0.10"),
+        intended_at=intended,
+    )
+    _insert_trade(
+        factory,
+        market_ticker="KXHIGHDEN-26MAY27-T75-80",
+        side="sell_yes",
+        contracts=5,
+        simulated_price=Decimal("0.40"),
+        intended_at=intended,
+    )
+    _insert_trade(
+        factory,
+        market_ticker="KXHIGHDEN-26MAY28-T70-75",
+        side="buy_yes",
+        contracts=5,
+        simulated_price=Decimal("0.20"),
+        intended_at=intended,
+    )
+    _insert_trade(
+        factory,
+        market_ticker="KXHIGHNY-26MAY27-T80-85",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.30"),
+        intended_at=intended,
+    )
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        by_market, _by_event, _by_series, aggregate = open_exposures(session, now=now)
+    assert aggregate == sum(by_market.values(), Decimal("0"))
+
+
+def test_open_exposures_aggregate_excludes_settled_trades() -> None:
+    factory, _ = _session_factory()
+    intended = datetime(2026, 5, 26, 18, 0, tzinfo=timezone.utc)
+    _insert_trade(
+        factory,
+        market_ticker="KXHIGHDEN-26MAY27-T70-75",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        intended_at=intended,
+    )
+    _insert_trade(
+        factory,
+        market_ticker="KXHIGHDEN-26MAY27-T75-80",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.30"),
+        intended_at=intended,
+        settled=True,
+    )
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        _by_market, _by_event, _by_series, aggregate = open_exposures(session, now=now)
+    assert aggregate == Decimal("4.00")
+
+
+def test_open_exposures_aggregate_zero_when_no_pending() -> None:
+    factory, _ = _session_factory()
+    now = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+    with factory() as session:
+        _by_market, _by_event, _by_series, aggregate = open_exposures(session, now=now)
+    assert aggregate == Decimal("0")
+    assert isinstance(aggregate, Decimal)

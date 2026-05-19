@@ -27,6 +27,8 @@ class GateContext:
     event_position_cap: Decimal
     series_existing_dollars: Decimal
     series_position_cap: Decimal
+    aggregate_existing_dollars: Decimal
+    aggregate_exposure_cap: Decimal
     account_balance: Decimal
     required_cushion: Decimal
     market_status: str
@@ -72,6 +74,7 @@ GATE_NAMES: tuple[str, ...] = (
     "within_market_cap",
     "within_event_cap",
     "within_series_cap",
+    "within_aggregate_cap",
     "account_cushion",
     "market_open",
     "time_to_close",
@@ -80,7 +83,12 @@ GATE_NAMES: tuple[str, ...] = (
 
 
 CAP_GATE_NAMES: frozenset[str] = frozenset(
-    {"within_market_cap", "within_event_cap", "within_series_cap"}
+    {
+        "within_market_cap",
+        "within_event_cap",
+        "within_series_cap",
+        "within_aggregate_cap",
+    }
 )
 
 
@@ -165,6 +173,17 @@ def evaluate(
             _fail(
                 "within_series_cap",
                 f"series_total={series_total} > cap={ctx.series_position_cap}",
+            )
+        )
+
+    aggregate_total = ctx.aggregate_existing_dollars + ctx.order_size_dollars
+    if aggregate_total <= ctx.aggregate_exposure_cap:
+        results.append(_ok("within_aggregate_cap"))
+    else:
+        results.append(
+            _fail(
+                "within_aggregate_cap",
+                f"aggregate_total={aggregate_total} > cap={ctx.aggregate_exposure_cap}",
             )
         )
 
