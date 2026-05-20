@@ -479,13 +479,48 @@ def test_caps_derived_from_bankroll_fractions() -> None:
 
 
 @pytest.mark.parametrize(
-    "bankroll",
-    [Decimal("500"), Decimal("1000"), Decimal("5000"), Decimal("10000")],
+    "bankroll,expected_market,expected_event,expected_series,expected_aggregate",
+    [
+        (
+            Decimal("500"),
+            Decimal("7.500"),
+            Decimal("15.00"),
+            Decimal("25.00"),
+            Decimal("200.00"),
+        ),
+        (
+            Decimal("1000"),
+            Decimal("15.000"),
+            Decimal("30.00"),
+            Decimal("50.00"),
+            Decimal("400.00"),
+        ),
+        (
+            Decimal("5000"),
+            Decimal("75.000"),
+            Decimal("150.00"),
+            Decimal("250.00"),
+            Decimal("2000.00"),
+        ),
+        (
+            Decimal("10000"),
+            Decimal("150.000"),
+            Decimal("300.00"),
+            Decimal("500.00"),
+            Decimal("4000.00"),
+        ),
+    ],
 )
-def test_caps_scale_linearly_with_bankroll(bankroll: Decimal) -> None:
+def test_caps_scale_linearly_with_bankroll(
+    bankroll: Decimal,
+    expected_market: Decimal,
+    expected_event: Decimal,
+    expected_series: Decimal,
+    expected_aggregate: Decimal,
+) -> None:
     import bot.main as bot_main
 
-    assert bankroll * bot_main.MARKET_POSITION_FRAC == bankroll * Decimal("0.015")
-    assert bankroll * bot_main.EVENT_POSITION_FRAC == bankroll * Decimal("0.03")
-    assert bankroll * bot_main.SERIES_POSITION_FRAC == bankroll * Decimal("0.05")
-    assert bankroll * bot_main.AGGREGATE_EXPOSURE_FRAC == bankroll * Decimal("0.40")
+    assert bankroll * bot_main.MARKET_POSITION_FRAC == expected_market
+    assert bankroll * bot_main.EVENT_POSITION_FRAC == expected_event
+    assert bankroll * bot_main.SERIES_POSITION_FRAC == expected_series
+    assert bankroll * bot_main.AGGREGATE_EXPOSURE_FRAC == expected_aggregate
