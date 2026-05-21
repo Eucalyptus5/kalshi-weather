@@ -57,7 +57,9 @@ PAPER_BANKROLL: Decimal = Decimal("500")
 LIVE_BANKROLL_ENABLED: bool = False
 
 
-def bankroll() -> Decimal:
+def bankroll(app: "App | None" = None) -> Decimal:
+    if app is not None and app.bankroll is not None:
+        return app.bankroll
     return PAPER_BANKROLL
 
 
@@ -72,6 +74,23 @@ MARKET_POSITION_CAP: Decimal = PAPER_BANKROLL * MARKET_POSITION_FRAC
 EVENT_POSITION_CAP: Decimal = PAPER_BANKROLL * EVENT_POSITION_FRAC
 SERIES_POSITION_CAP: Decimal = PAPER_BANKROLL * SERIES_POSITION_FRAC
 AGGREGATE_EXPOSURE_CAP: Decimal = PAPER_BANKROLL * AGGREGATE_EXPOSURE_FRAC
+
+
+def market_position_cap(app: "App | None" = None) -> Decimal:
+    return bankroll(app) * MARKET_POSITION_FRAC
+
+
+def event_position_cap(app: "App | None" = None) -> Decimal:
+    return bankroll(app) * EVENT_POSITION_FRAC
+
+
+def series_position_cap(app: "App | None" = None) -> Decimal:
+    return bankroll(app) * SERIES_POSITION_FRAC
+
+
+def aggregate_exposure_cap(app: "App | None" = None) -> Decimal:
+    return bankroll(app) * AGGREGATE_EXPOSURE_FRAC
+
 
 MARKET_REFRESH_INTERVAL = 60.0
 EVAL_INTERVAL = 60.0
@@ -248,6 +267,7 @@ class App:
     kalshi: KalshiDemoClient
     acis: ACISClient
     series_list: tuple[str, ...]
+    bankroll: Decimal | None = None
     db_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     reconcile_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     forecast_cdfs: dict[tuple[str, date], EnsembleCDF] = field(default_factory=dict)

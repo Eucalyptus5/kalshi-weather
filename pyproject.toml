@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.18.4",
     "httpx>=0.28.1",
-    "kalshi-python-async>=3.2.0",
+    "kalshi-python-async==3.2.0",
     "numpy>=2.4.4",
     "pandas>=3.0.2",
     "properscoring>=0.1",

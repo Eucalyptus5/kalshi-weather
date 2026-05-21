@@ -19,6 +19,7 @@ from bot.execution.paper import (
     TradeSide,
     log_stale_skip_ratio,
     simulate_taker_fill,
+    trade_side_for_demo,
 )
 
 
@@ -363,3 +364,29 @@ def test_module_logger_emits(caplog: pytest.LogCaptureFixture) -> None:
     bot.execution.paper.logger.warning("test_module_logger_emits sentinel=42")
     messages = [(rec.name, rec.getMessage()) for rec in caplog.records]
     assert any(name == "bot.execution.paper" and "sentinel=42" in msg for name, msg in messages)
+
+
+def test_trade_side_for_demo_buy_yes_maps_to_buy_yes() -> None:
+    assert trade_side_for_demo("yes") is TradeSide.BUY_YES
+
+
+def test_trade_side_for_demo_buy_no_maps_to_sell_yes() -> None:
+    assert trade_side_for_demo("no") is TradeSide.SELL_YES
+
+
+@pytest.mark.parametrize("side", ["yes", "no"])
+def test_trade_side_for_demo_round_trip_through_trade_side_value(side: str) -> None:
+    mapped = trade_side_for_demo(side)
+    assert TradeSide(mapped.value) is mapped
+
+
+def test_trade_side_for_demo_rejects_unknown_side() -> None:
+    with pytest.raises(ValueError, match="maybe"):
+        trade_side_for_demo("maybe")
+
+
+def test_bare_trade_side_constructor_rejects_kalshi_side() -> None:
+    with pytest.raises(ValueError):
+        TradeSide("yes")
+    with pytest.raises(ValueError):
+        TradeSide("no")

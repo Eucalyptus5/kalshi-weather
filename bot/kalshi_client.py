@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime
 from datetime import timezone as _timezone
@@ -10,11 +11,22 @@ import httpx
 from kalshi_python_async import KalshiAuth
 
 from bot.config import Settings
+from bot.execution.token_bucket import TokenBucket
 from bot.markets.parser import series_id
 
 logger = logging.getLogger(__name__)
 
 _API_PREFIX = "/trade-api/v2"
+
+
+def _assert_demo_host(source: str, url: str) -> None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.hostname != "demo-api.kalshi.co":
+        raise RuntimeError(f"kalshi {source} host must equal 'demo-api.kalshi.co'; refusing: {url}")
+
+
+def _resolved_request_url(client: httpx.AsyncClient, method: str, path: str) -> str:
+    return str(client.build_request(method, path).url)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +64,8 @@ class KalshiDemoClient:
         self._owns_http = http_client is None
         self._http: httpx.AsyncClient | None = http_client
         self._auth: KalshiAuth | None = None
+        self._read_bucket = TokenBucket(capacity=200, refill_per_second=200)
+        self._write_bucket = TokenBucket(capacity=100, refill_per_second=100)
 
     async def aopen(self) -> None:
         if not self._settings.kalshi_demo_key_id:
@@ -59,6 +73,11 @@ class KalshiDemoClient:
         key_path = self._settings.kalshi_demo_private_key_path
         if key_path is None or not key_path.exists():
             raise RuntimeError(f"private key file not found at {key_path}")
+
+        if self._http is None:
+            _assert_demo_host("settings", self._settings.kalshi_demo_api_base)
+        else:
+            _assert_demo_host("injected", str(self._http.base_url))
 
         private_key_pem = key_path.read_text()
         self._auth = KalshiAuth(
@@ -72,7 +91,12 @@ class KalshiDemoClient:
             )
             logger.info("kalshi_client_open host=%s", self._settings.kalshi_demo_api_base)
 
+        await self._read_bucket.aopen()
+        await self._write_bucket.aopen()
+
     async def aclose(self) -> None:
+        await self._read_bucket.aclose()
+        await self._write_bucket.aclose()
         if self._http is not None and self._owns_http:
             await self._http.aclose()
         self._http = None
@@ -80,6 +104,7 @@ class KalshiDemoClient:
 
     async def list_open_markets_for_series(self, series_ticker: str) -> list[KalshiMarket]:
         assert self._http is not None and self._auth is not None
+        await self._read_bucket.acquire(cost=1)
         path = "/markets"
         headers = self._auth.create_auth_headers("GET", f"{_API_PREFIX}{path}")
         response = await self._http.get(
@@ -130,6 +155,7 @@ class KalshiDemoClient:
 
     async def get_orderbook(self, ticker: str) -> KalshiOrderbook:
         assert self._http is not None and self._auth is not None
+        await self._read_bucket.acquire(cost=1)
         path = f"/markets/{ticker}/orderbook"
         headers = self._auth.create_auth_headers("GET", f"{_API_PREFIX}{path}")
         response = await self._http.get(path, headers=headers)
@@ -158,6 +184,35 @@ class KalshiDemoClient:
             no_bid_depth=no_bid_depth,
             snapshot_at=datetime.now(tz=_timezone.utc),
         )
+
+    async def post_signed(self, path: str, body: dict[str, object]) -> httpx.Response:
+        assert self._http is not None and self._auth is not None
+        if "://" in path:
+            raise RuntimeError("absolute URL forbidden on signed call")
+        _assert_demo_host("write", _resolved_request_url(self._http, "POST", path))
+        await self._write_bucket.acquire()
+        headers = self._auth.create_auth_headers("POST", f"{_API_PREFIX}{path}")
+        return await self._http.post(path, json=body, headers=headers)
+
+    async def delete_signed(self, path: str) -> httpx.Response:
+        assert self._http is not None and self._auth is not None
+        if "://" in path:
+            raise RuntimeError("absolute URL forbidden on signed call")
+        _assert_demo_host("write", _resolved_request_url(self._http, "DELETE", path))
+        await self._write_bucket.acquire()
+        headers = self._auth.create_auth_headers("DELETE", f"{_API_PREFIX}{path}")
+        return await self._http.delete(path, headers=headers)
+
+    async def get_balance(self) -> Decimal:
+        assert self._http is not None and self._auth is not None
+        path = "/portfolio/balance"
+        _assert_demo_host("write", _resolved_request_url(self._http, "GET", path))
+        await self._read_bucket.acquire(cost=1)
+        headers = self._auth.create_auth_headers("GET", f"{_API_PREFIX}{path}")
+        response = await self._http.get(path, headers=headers)
+        response.raise_for_status()
+        payload = response.json()
+        return Decimal(str(payload["balance_dollars"]))
 
 
 def _parse_close_time(raw: object) -> datetime | None:

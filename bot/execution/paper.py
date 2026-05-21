@@ -23,6 +23,14 @@ class TradeSide(Enum):
     SELL_YES = "sell_yes"
 
 
+def trade_side_for_demo(kalshi_side: str) -> TradeSide:
+    if kalshi_side == "yes":
+        return TradeSide.BUY_YES
+    if kalshi_side == "no":
+        return TradeSide.SELL_YES
+    raise ValueError(f"unknown kalshi side {kalshi_side!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class Orderbook:
     yes_ask: Decimal

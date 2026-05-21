@@ -11,7 +11,13 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 
 from bot.config import Settings
-from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook
+from bot.kalshi_client import (
+    KalshiDemoClient,
+    KalshiMarket,
+    KalshiOrderbook,
+    _assert_demo_host,
+    _resolved_request_url,
+)
 from bot.markets.parser import event_id
 
 
@@ -34,7 +40,7 @@ def rsa_pem(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def _settings_with_pem(pem_path: Path) -> Settings:
     return Settings(
-        paper_mode=True,
+        mode="paper",
         kalshi_demo_key_id="demo-key-id",
         kalshi_demo_private_key_path=pem_path,
     )
@@ -42,7 +48,7 @@ def _settings_with_pem(pem_path: Path) -> Settings:
 
 def _settings_no_key() -> Settings:
     return Settings(
-        paper_mode=True,
+        mode="paper",
         kalshi_demo_key_id=None,
         kalshi_demo_private_key_path=None,
     )
@@ -50,7 +56,7 @@ def _settings_no_key() -> Settings:
 
 def _settings_missing_pem(tmp_path: Path) -> Settings:
     return Settings(
-        paper_mode=True,
+        mode="paper",
         kalshi_demo_key_id="demo-key-id",
         kalshi_demo_private_key_path=tmp_path / "does-not-exist.pem",
     )
@@ -95,7 +101,9 @@ async def test_aopen_raises_when_pem_file_missing(tmp_path: Path) -> None:
 
 async def test_aopen_succeeds_with_valid_pem(rsa_pem: Path) -> None:
     transport = httpx.MockTransport(lambda req: httpx.Response(200, json={}))
-    async with httpx.AsyncClient(transport=transport) as http:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
         client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
         await client.aopen()
         await client.aclose()
@@ -716,3 +724,176 @@ async def test_get_orderbook_zero_depth_for_empty_book(rsa_pem: Path) -> None:
     assert book.no_bid_depth == 0
     assert book.yes_ask_depth == 0
     assert book.no_ask_depth == 0
+
+
+def _settings_production_base(pem_path: Path, base: str) -> Settings:
+    return Settings(
+        mode="paper",
+        kalshi_demo_api_base=base,
+        kalshi_demo_key_id="demo-key-id",
+        kalshi_demo_private_key_path=pem_path,
+    )
+
+
+async def test_aopen_refuses_production_host_in_settings(rsa_pem: Path) -> None:
+    settings = _settings_production_base(rsa_pem, "https://api.elections.kalshi.com/trade-api/v2")
+    client = KalshiDemoClient(settings)
+    with pytest.raises(RuntimeError, match="demo-api.kalshi.co"):
+        await client.aopen()
+
+
+async def test_aopen_refuses_query_string_demo_bypass(rsa_pem: Path) -> None:
+    settings = _settings_production_base(rsa_pem, "https://api.elections.kalshi.com/?env=demo")
+    client = KalshiDemoClient(settings)
+    with pytest.raises(RuntimeError, match="demo-api.kalshi.co"):
+        await client.aopen()
+
+
+async def test_aopen_refuses_injected_client_with_production_base_url(rsa_pem: Path) -> None:
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={}))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://api.elections.kalshi.com/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        with pytest.raises(RuntimeError, match="demo-api.kalshi.co"):
+            await client.aopen()
+
+
+async def test_aopen_accepts_injected_client_with_demo_base_url(rsa_pem: Path) -> None:
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={}))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        await client.aclose()
+
+
+async def test_post_signed_refuses_absolute_url_to_production(rsa_pem: Path) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        with pytest.raises(RuntimeError, match="absolute URL forbidden"):
+            await client.post_signed("https://api.elections.kalshi.com/foo", {})
+        await client.aclose()
+
+    assert calls == []
+
+
+def test_url_resolution_keeps_trade_api_v2_prefix() -> None:
+    transport = httpx.MockTransport(lambda req: httpx.Response(200))
+    client = httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    )
+    assert (
+        _resolved_request_url(client, "POST", "/portfolio/orders")
+        == "https://demo-api.kalshi.co/trade-api/v2/portfolio/orders"
+    )
+
+
+def test_resolved_url_keeps_demo_host_for_absolute_production_url() -> None:
+    transport = httpx.MockTransport(lambda req: httpx.Response(200))
+    client = httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    )
+    resolved = _resolved_request_url(client, "POST", "https://api.elections.kalshi.com/foo")
+    assert resolved == "https://api.elections.kalshi.com/foo"
+    with pytest.raises(RuntimeError, match="demo-api.kalshi.co"):
+        _assert_demo_host("write", resolved)
+
+
+async def test_post_signed_includes_kalshi_headers(rsa_pem: Path) -> None:
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["req"] = request
+        return httpx.Response(
+            201,
+            json={
+                "order": {
+                    "order_id": "ex-1",
+                    "client_order_id": "cid-1",
+                    "ticker": "KXHIGHDEN-26MAY06-T70-75",
+                    "side": "yes",
+                    "status": "executed",
+                    "filled_contracts": 1,
+                    "requested_contracts": 1,
+                    "yes_price_dollars": "0.5000",
+                    "avg_yes_fill_price_dollars": "0.5000",
+                    "fee_dollars": "0.01",
+                }
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        await client.post_signed("/portfolio/orders", {"ticker": "x"})
+        await client.aclose()
+
+    req = captured["req"]
+    assert req.method == "POST"
+    assert req.headers.get("KALSHI-ACCESS-KEY") == "demo-key-id"
+    assert req.headers.get("KALSHI-ACCESS-TIMESTAMP")
+    assert req.headers.get("KALSHI-ACCESS-SIGNATURE")
+
+
+async def test_get_balance_parses_balance_dollars(rsa_pem: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "balance": 53725,
+                "balance_dollars": "537.250000",
+                "portfolio_value": 53725,
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        balance = await client.get_balance()
+        await client.aclose()
+
+    assert balance == Decimal("537.250000")
+
+
+def test_signing_golden_pss_verifies(rsa_pem: Path) -> None:
+    import base64
+
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from kalshi_python_async import KalshiAuth
+
+    private_key_pem = rsa_pem.read_text()
+    auth = KalshiAuth(key_id="demo-key-id", private_key_pem=private_key_pem)
+    headers = auth.create_auth_headers("POST", "/trade-api/v2/portfolio/orders")
+
+    timestamp_ms = headers["KALSHI-ACCESS-TIMESTAMP"]
+    signature_b64 = headers["KALSHI-ACCESS-SIGNATURE"]
+    message = f"{timestamp_ms}POST/trade-api/v2/portfolio/orders".encode()
+
+    private_key = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
+    public_key = private_key.public_key()
+    signature = base64.b64decode(signature_b64)
+    public_key.verify(
+        signature,
+        message,
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=hashes.SHA256.digest_size),
+        hashes.SHA256(),
+    )

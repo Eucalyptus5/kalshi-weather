@@ -141,7 +141,7 @@ def _make_app(
     engine = make_engine(":memory:")
     Base.metadata.create_all(engine)
     sf = make_session_factory(engine)
-    settings = Settings(paper_mode=True)
+    settings = Settings(mode="paper")
     return App(
         settings=settings,
         engine=engine,
@@ -559,7 +559,7 @@ async def test_refresh_markets_isolates_orderbook_json_error(
         transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
     ) as http:
         settings = _Settings(
-            paper_mode=True,
+            mode="paper",
             kalshi_demo_key_id="demo-key-id",
             kalshi_demo_private_key_path=_rsa_pem,
         )
@@ -1044,7 +1044,7 @@ def test_cli_rejects_unsupported_series(monkeypatch, capsys) -> None:
     assert "KXHIGHFAKE" in (captured.err + captured.out)
 
 
-def test_cli_rejects_non_paper_mode(monkeypatch) -> None:
+def test_cli_rejects_live_mode(monkeypatch) -> None:
     monkeypatch.setattr(
         "sys.argv",
         ["bot.main", "--mode=live", "--series=KXHIGHDEN", "--duration=1m"],
@@ -3108,7 +3108,7 @@ async def test_run_checkpoints_wal_on_shutdown(monkeypatch) -> None:
             return None
 
     app = App(
-        settings=_Settings(paper_mode=True),
+        settings=_Settings(mode="paper"),
         engine=engine,
         session_factory=sf,
         meteo=_NoopMeteo(),  # type: ignore[arg-type]
@@ -3685,3 +3685,39 @@ def test_cap_import_offender_predicate_accepts_monkeypatch_string_literal() -> N
     )
     offenders = _find_cap_import_offenders(src, "synthetic.py")
     assert offenders == []
+
+
+def test_bankroll_defaults_to_paper_bankroll_when_no_app() -> None:
+    assert bot_main.bankroll() == bot_main.PAPER_BANKROLL
+    assert bot_main.bankroll(None) == bot_main.PAPER_BANKROLL
+
+
+def test_bankroll_defaults_to_paper_bankroll_when_app_bankroll_is_none() -> None:
+    app = _make_app()
+    assert app.bankroll is None
+    assert bot_main.bankroll(app) == bot_main.PAPER_BANKROLL
+
+
+def test_bankroll_returns_app_override_when_set() -> None:
+    app = _make_app()
+    app.bankroll = Decimal("1234.56")
+    assert bot_main.bankroll(app) == Decimal("1234.56")
+
+
+def test_cap_helpers_follow_app_bankroll_override() -> None:
+    app = _make_app()
+    app.bankroll = Decimal("1000")
+    assert bot_main.market_position_cap(app) == Decimal("1000") * bot_main.MARKET_POSITION_FRAC
+    assert bot_main.event_position_cap(app) == Decimal("1000") * bot_main.EVENT_POSITION_FRAC
+    assert bot_main.series_position_cap(app) == Decimal("1000") * bot_main.SERIES_POSITION_FRAC
+    assert (
+        bot_main.aggregate_exposure_cap(app) == Decimal("1000") * bot_main.AGGREGATE_EXPOSURE_FRAC
+    )
+
+
+def test_cap_helpers_fall_back_to_paper_bankroll_when_no_app() -> None:
+    base = bot_main.PAPER_BANKROLL
+    assert bot_main.market_position_cap() == base * bot_main.MARKET_POSITION_FRAC
+    assert bot_main.event_position_cap(None) == base * bot_main.EVENT_POSITION_FRAC
+    assert bot_main.series_position_cap() == base * bot_main.SERIES_POSITION_FRAC
+    assert bot_main.aggregate_exposure_cap(None) == base * bot_main.AGGREGATE_EXPOSURE_FRAC
