@@ -35,7 +35,7 @@ class TokenBucket:
                 task.cancel()
                 try:
                     await task
-                except (asyncio.CancelledError, BaseException):
+                except asyncio.CancelledError:
                     pass
             if close_task in done:
                 if sema_task in done and not sema_task.cancelled():
