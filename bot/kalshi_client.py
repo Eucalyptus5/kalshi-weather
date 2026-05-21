@@ -206,6 +206,8 @@ class KalshiDemoClient:
     async def get_balance(self) -> Decimal:
         assert self._http is not None and self._auth is not None
         path = "/portfolio/balance"
+        if "://" in path:
+            raise RuntimeError("absolute URL forbidden on signed call")
         _assert_demo_host("write", _resolved_request_url(self._http, "GET", path))
         await self._read_bucket.acquire(cost=1)
         headers = self._auth.create_auth_headers("GET", f"{_API_PREFIX}{path}")

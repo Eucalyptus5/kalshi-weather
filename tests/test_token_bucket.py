@@ -152,6 +152,35 @@ async def test_token_bucket_gather_resolves_on_close() -> None:
     await primer_task
 
 
+async def test_aclose_yields_mixed_shape_for_four_waiters() -> None:
+    bucket = TokenBucket(capacity=10, refill_per_second=1)
+    await bucket.aopen()
+
+    drained = asyncio.Event()
+
+    async def holder() -> str:
+        await bucket.acquire(cost=10)
+        drained.set()
+        return "acquired"
+
+    async def waiter() -> str:
+        await drained.wait()
+        try:
+            await bucket.acquire(cost=10)
+            return "acquired"
+        except RuntimeError:
+            return "closed"
+
+    tasks = [asyncio.create_task(holder())]
+    tasks.extend(asyncio.create_task(waiter()) for _ in range(3))
+
+    await drained.wait()
+    await asyncio.sleep(0.05)
+    await bucket.aclose()
+    results = await asyncio.wait_for(asyncio.gather(*tasks), timeout=1.0)
+    assert results == ["acquired", "closed", "closed", "closed"]
+
+
 async def test_token_bucket_acquire_after_close_via_event_during_wait() -> None:
     bucket = TokenBucket(capacity=1, refill_per_second=1)
     await bucket.aopen()
