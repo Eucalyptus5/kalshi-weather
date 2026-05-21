@@ -136,11 +136,7 @@ def _parse_order(payload: dict[str, object], placed_at: datetime) -> DemoOrder:
 
 
 async def _fetch_existing_by_cid(client: KalshiDemoClient, cid: str) -> dict[str, object] | None:
-    assert client._http is not None and client._auth is not None
-    path = "/portfolio/orders"
-    await client._read_bucket.acquire(cost=1)
-    headers = client._auth.create_auth_headers("GET", f"/trade-api/v2{path}")
-    response = await client._http.get(path, params={"client_order_id": cid}, headers=headers)
+    response = await client.get_signed("/portfolio/orders", {"client_order_id": cid})
     if response.status_code != 200:
         return None
     payload = response.json()

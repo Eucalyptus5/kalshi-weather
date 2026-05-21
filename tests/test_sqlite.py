@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 
 from bot.storage.sqlite import (
     Base,
+    DemoOrder,
     Forecast,
     GateFailure,
     Market,
@@ -568,6 +569,127 @@ def test_alembic_env_honors_injected_connection(tmp_path):
     assert not decoy_db.exists() or decoy_db.stat().st_size == 0
 
 
+def _demo_order(**overrides) -> DemoOrder:
+    when = datetime(2026, 5, 22, 12, 0, tzinfo=_timezone.utc)
+    base = dict(
+        client_order_id="kw-edge-yes-KXHIGHDEN-26MAY22-T70-2026-05-22",
+        exchange_order_id="EX1",
+        market_ticker="KXHIGHDEN-26MAY22-T70",
+        strategy="edge",
+        side="yes",
+        requested_contracts=10,
+        filled_contracts=0,
+        requested_yes_price_dollars=Decimal("0.620000"),
+        fair_at_entry=Decimal("0.650000"),
+        intended_at=when,
+        status="resting",
+        placed_at=when,
+        last_status_at=when,
+    )
+    base.update(overrides)
+    return DemoOrder(**base)
+
+
+def test_demo_orders_unique_client_order_id(session):
+    session.add(_demo_order(client_order_id="kw-edge-yes-A", exchange_order_id="EX1"))
+    session.commit()
+    session.add(_demo_order(client_order_id="kw-edge-yes-A", exchange_order_id="EX2"))
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+def test_demo_orders_client_order_id_is_not_null(session):
+    session.add(_demo_order(client_order_id=None))
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+def test_demo_orders_backfill_row_with_null_intent_fields_commits(session):
+    row = _demo_order(
+        client_order_id="kw-backfill-EX123",
+        exchange_order_id="EX123",
+        status="executed",
+        strategy=None,
+        fair_at_entry=None,
+        intended_at=None,
+        requested_yes_price_dollars=None,
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(
+        select(DemoOrder).where(DemoOrder.client_order_id == "kw-backfill-EX123")
+    ).one()
+    assert got.strategy is None
+    assert got.fair_at_entry is None
+    assert got.intended_at is None
+    assert got.requested_yes_price_dollars is None
+    assert got.exchange_order_id == "EX123"
+    assert got.status == "executed"
+
+
+def test_demo_orders_natural_key_row_round_trip(session):
+    when = datetime(2026, 5, 22, 12, 0, tzinfo=_timezone.utc)
+    row = _demo_order(
+        client_order_id="kw-edge-yes-KXHIGHDEN-26MAY22-T70-2026-05-22",
+        exchange_order_id="EX9",
+        strategy="edge",
+        fair_at_entry=Decimal("0.620000"),
+        intended_at=when,
+        requested_yes_price_dollars=Decimal("0.580000"),
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(DemoOrder).where(DemoOrder.exchange_order_id == "EX9")).one()
+    assert got.strategy == "edge"
+    assert got.fair_at_entry == Decimal("0.620000")
+    assert got.intended_at == when
+    assert got.requested_yes_price_dollars == Decimal("0.580000")
+    assert got.side == "yes"
+    assert got.market_ticker == "KXHIGHDEN-26MAY22-T70"
+
+
+def test_paper_trade_demo_link_round_trip(session):
+    when = datetime(2026, 5, 22, 18, 30, tzinfo=_timezone.utc)
+    row = PaperTradeRow(
+        intended_at=when,
+        market_ticker="KXHIGHDEN-26MAY22-T70",
+        side="buy_yes",
+        contracts=10,
+        simulated_price=Decimal("0.205000"),
+        fee_dollars=Decimal("0.070000"),
+        fair_at_entry=Decimal("0.620000"),
+        strategy="edge",
+        demo_order_client_id="kw-edge-yes-KXHIGHDEN-26MAY22-T70-2026-05-22",
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(PaperTradeRow)).one()
+    assert got.demo_order_client_id == "kw-edge-yes-KXHIGHDEN-26MAY22-T70-2026-05-22"
+
+
+def test_paper_trade_demo_link_allows_multiple_nulls(session):
+    when = datetime(2026, 5, 22, 18, 30, tzinfo=_timezone.utc)
+    for _ in range(2):
+        session.add(
+            PaperTradeRow(
+                intended_at=when,
+                market_ticker="KXHIGHDEN-26MAY22-T70",
+                side="buy_yes",
+                contracts=5,
+                simulated_price=Decimal("0.40"),
+                fee_dollars=Decimal("0.01"),
+                fair_at_entry=Decimal("0.50"),
+                strategy="edge",
+                demo_order_client_id=None,
+            )
+        )
+    session.commit()
+    assert len(session.scalars(select(PaperTradeRow)).all()) == 2
+
+
 def test_ensure_baseline_stamped_stamps_unstamped_create_all_db(tmp_path):
     db_file = tmp_path / "state.db"
     engine = make_engine(db_file)
@@ -645,7 +767,7 @@ def test_migrate_script_stamps_head_on_head_shape_db(tmp_path):
     cfg = _alembic_cfg(tmp_path, db_file)
     script_dir = ScriptDirectory.from_config(cfg)
     baseline = _detect_baseline(engine, script_dir)
-    assert baseline == "0002"
+    assert baseline == "0003"
     ensure_baseline_stamped(engine, baseline)
     with engine.connect() as connection:
         cfg.attributes["connection"] = connection
@@ -653,7 +775,7 @@ def test_migrate_script_stamps_head_on_head_shape_db(tmp_path):
 
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0002"
+    assert version == "0003"
     engine.dispose()
 
 
@@ -674,7 +796,7 @@ def test_migrate_script_stamps_0001_on_baseline_shape_db(tmp_path):
 
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0002"
+    assert version == "0003"
     engine.dispose()
 
 
@@ -715,7 +837,7 @@ def test_detect_baseline_raises_on_partial_drift_two_of_three(tmp_path):
     engine.dispose()
 
 
-def test_detect_baseline_returns_literal_0002_even_when_head_is_0003(tmp_path):
+def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecognized(tmp_path):
     from scripts.migrate import _detect_baseline
 
     alembic_dir = tmp_path / "alembic"
@@ -733,16 +855,19 @@ def test_detect_baseline_returns_literal_0002_even_when_head_is_0003(tmp_path):
             REPO_ROOT / "alembic" / "versions" / "0002_orderbook_depth_and_trade_features.py"
         ).read_text()
     )
-    (versions / "0003_decoy.py").write_text(
-        '"""decoy 0003 for forward-compat test\n\n'
-        "Revision ID: 0003\n"
-        "Revises: 0002\n"
-        "Create Date: 2026-05-27 13:00:00.000000\n\n"
+    (versions / "0003_demo_orders.py").write_text(
+        (REPO_ROOT / "alembic" / "versions" / "0003_demo_orders.py").read_text()
+    )
+    (versions / "0004_decoy.py").write_text(
+        '"""decoy 0004 for forward-compat test\n\n'
+        "Revision ID: 0004\n"
+        "Revises: 0003\n"
+        "Create Date: 2026-05-28 13:00:00.000000\n\n"
         '"""\n\n'
         "from typing import Sequence, Union\n\n"
         "from alembic import op  # noqa: F401\n\n\n"
-        'revision: str = "0003"\n'
-        'down_revision: Union[str, Sequence[str], None] = "0002"\n'
+        'revision: str = "0004"\n'
+        'down_revision: Union[str, Sequence[str], None] = "0003"\n'
         "branch_labels: Union[str, Sequence[str], None] = None\n"
         "depends_on: Union[str, Sequence[str], None] = None\n\n\n"
         "def upgrade() -> None:\n"
@@ -761,8 +886,8 @@ def test_detect_baseline_returns_literal_0002_even_when_head_is_0003(tmp_path):
     engine = make_engine(db_file)
     Base.metadata.create_all(engine)
     script_dir = ScriptDirectory.from_config(cfg)
-    assert script_dir.get_current_head() == "0003"
-    assert _detect_baseline(engine, script_dir) == "0002"
+    assert script_dir.get_current_head() == "0004"
+    assert _detect_baseline(engine, script_dir) == "0003"
     engine.dispose()
 
 

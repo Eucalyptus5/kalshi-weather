@@ -185,6 +185,17 @@ class KalshiDemoClient:
             snapshot_at=datetime.now(tz=_timezone.utc),
         )
 
+    async def get_signed(
+        self, path: str, params: dict[str, object] | None = None
+    ) -> httpx.Response:
+        assert self._http is not None and self._auth is not None
+        if "://" in path:
+            raise RuntimeError("absolute URL forbidden on signed call")
+        _assert_demo_host("read", _resolved_request_url(self._http, "GET", path))
+        await self._read_bucket.acquire(cost=1)
+        headers = self._auth.create_auth_headers("GET", f"{_API_PREFIX}{path}")
+        return await self._http.get(path, params=params, headers=headers)
+
     async def post_signed(self, path: str, body: dict[str, object]) -> httpx.Response:
         assert self._http is not None and self._auth is not None
         if "://" in path:

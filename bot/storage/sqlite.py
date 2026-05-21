@@ -124,9 +124,37 @@ class PaperTradeRow(Base):
     ensemble_spread_sigma_t: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
     lead_time_hours: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
     nbm_divergence: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
+    demo_order_client_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now)
 
     __table_args__ = (Index("ix_paper_trades_strategy_intended_at", "strategy", "intended_at"),)
+
+
+class DemoOrder(Base):
+    __tablename__ = "demo_orders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    client_order_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    exchange_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
+    market_ticker: Mapped[str] = mapped_column(String(64), index=True)
+    strategy: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    side: Mapped[str] = mapped_column(String(16))
+    requested_contracts: Mapped[int] = mapped_column(Integer)
+    filled_contracts: Mapped[int] = mapped_column(Integer, default=0)
+    requested_yes_price_dollars: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 6), nullable=True
+    )
+    fair_at_entry: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
+    intended_at: Mapped[datetime | None] = mapped_column(UtcDateTime(), nullable=True)
+    avg_fill_price: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
+    fee_dollars: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
+    realized_pnl_dollars: Mapped[Decimal | None] = mapped_column(Numeric(10, 6), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), index=True)
+    placed_at: Mapped[datetime] = mapped_column(UtcDateTime())
+    last_status_at: Mapped[datetime] = mapped_column(UtcDateTime())
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now)
 
 
 class SimulatedPnl(Base):

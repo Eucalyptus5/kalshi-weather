@@ -789,6 +789,49 @@ async def test_post_signed_refuses_absolute_url_to_production(rsa_pem: Path) -> 
     assert calls == []
 
 
+async def test_get_signed_refuses_absolute_url_to_production(rsa_pem: Path) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        with pytest.raises(RuntimeError, match="absolute URL forbidden"):
+            await client.get_signed("https://api.elections.kalshi.com/portfolio/fills")
+        await client.aclose()
+
+    assert calls == []
+
+
+async def test_get_signed_sends_params_and_signed_headers(rsa_pem: Path) -> None:
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["req"] = request
+        return httpx.Response(200, json={"orders": []})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        await client.get_signed("/portfolio/orders", {"client_order_id": "kw-edge-yes-x"})
+        await client.aclose()
+
+    req = captured["req"]
+    assert req.method == "GET"
+    assert req.url.params.get("client_order_id") == "kw-edge-yes-x"
+    assert req.headers.get("KALSHI-ACCESS-KEY") == "demo-key-id"
+    assert req.headers.get("KALSHI-ACCESS-SIGNATURE")
+
+
 def test_url_resolution_keeps_trade_api_v2_prefix() -> None:
     transport = httpx.MockTransport(lambda req: httpx.Response(200))
     client = httpx.AsyncClient(

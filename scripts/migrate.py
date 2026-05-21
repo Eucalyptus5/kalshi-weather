@@ -7,6 +7,7 @@ from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine.reflection import Inspector
 
 from bot.storage.sqlite import ensure_baseline_stamped, make_engine, make_session_factory
 from scripts.annotate_market_open_noise import annotate
@@ -18,24 +19,46 @@ SENTINELS_0002: tuple[tuple[str, str], ...] = (
     ("orderbook_snapshots", "yes_ask_depth"),
 )
 
+SENTINELS_0003: tuple[tuple[str, str], ...] = (
+    ("demo_orders", "client_order_id"),
+    ("paper_trades", "demo_order_client_id"),
+)
 
-def _detect_baseline(engine: Engine, script_dir: ScriptDirectory) -> str:
-    inspector = inspect(engine)
-    tables = set(inspector.get_table_names())
+
+def _present_sentinels(
+    inspector: Inspector, tables: set[str], sentinels: tuple[tuple[str, str], ...]
+) -> set[tuple[str, str]]:
     present: set[tuple[str, str]] = set()
-    for table, column in SENTINELS_0002:
+    for table, column in sentinels:
         if table not in tables:
             continue
         if column in {c["name"] for c in inspector.get_columns(table)}:
             present.add((table, column))
-    if not present:
+    return present
+
+
+def _detect_baseline(engine: Engine, script_dir: ScriptDirectory) -> str:
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+
+    present_0002 = _present_sentinels(inspector, tables, SENTINELS_0002)
+    if not present_0002:
         return "0001"
-    if len(present) == len(SENTINELS_0002):
+    if len(present_0002) != len(SENTINELS_0002):
+        missing = set(SENTINELS_0002) - present_0002
+        raise RuntimeError(
+            f"partial 0002 schema detected; present={sorted(present_0002)} missing={sorted(missing)}"
+        )
+
+    present_0003 = _present_sentinels(inspector, tables, SENTINELS_0003)
+    if not present_0003:
         return "0002"
-    missing = set(SENTINELS_0002) - present
-    raise RuntimeError(
-        f"partial 0002 schema detected; present={sorted(present)} missing={sorted(missing)}"
-    )
+    if len(present_0003) != len(SENTINELS_0003):
+        missing = set(SENTINELS_0003) - present_0003
+        raise RuntimeError(
+            f"partial 0003 schema detected; present={sorted(present_0003)} missing={sorted(missing)}"
+        )
+    return "0003"
 
 
 def main() -> None:
