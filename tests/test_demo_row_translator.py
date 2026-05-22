@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime
 from datetime import timezone as _timezone
 from decimal import Decimal
@@ -9,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from bot.execution.demo_row_translator import (
+    _demo_order_values,
     paper_trade_row_from_demo_order,
     paper_trade_row_values,
     yes_frame_price,
@@ -223,6 +225,55 @@ def test_placer_side_translator_sell_yes_rebases_to_yes_frame():
 def test_placer_side_translator_returns_none_on_zero_price_partial_fill():
     order = _demo_order(status="executed", filled_contracts=10, avg=Decimal("0.0000"))
     assert paper_trade_row_from_demo_order(order, _intent(), intended_at=_now()) is None
+
+
+def test_demo_order_values_projects_intent_carry_columns(session):
+    order = _demo_order(
+        side_kalshi="no",
+        status="resting",
+        filled_contracts=0,
+        avg=None,
+        client_order_id="kw-tails-no-KXHIGHDEN-26MAY22-T70-2026-05-22",
+    )
+    intent = TradeIntent(
+        market_ticker="KXHIGHDEN-26MAY22-T70",
+        side=TradeSide.SELL_YES,
+        contracts=10,
+        fair_yes=Decimal("0.18"),
+        strategy="tails",
+    )
+    now_pre_post = _now()
+    values = _demo_order_values(order, intent, now_pre_post)
+
+    assert values["strategy"] == "tails"
+    assert values["side"] == "no"
+    assert values["fair_at_entry"] == Decimal("0.18")
+    assert values["intended_at"] == now_pre_post
+    assert values["requested_yes_price_dollars"] == order.requested_yes_price_dollars
+    assert values["client_order_id"] == order.client_order_id
+    assert values["exchange_order_id"] == "EX1"
+    assert values["market_ticker"] == "KXHIGHDEN-26MAY22-T70"
+    assert values["requested_contracts"] == 10
+    assert values["filled_contracts"] == 0
+    assert values["avg_fill_price"] is None
+    assert values["fee_dollars"] == order.fee_dollars
+    assert values["status"] == "resting"
+    assert values["placed_at"] == order.placed_at
+    assert values["last_status_at"] == order.placed_at
+
+    session.execute(sqlite_insert(DemoOrderRow).values(**values))
+    session.commit()
+    got = session.scalars(select(DemoOrderRow)).one()
+    assert got.client_order_id == order.client_order_id
+    assert got.strategy == "tails"
+    assert got.intended_at == now_pre_post
+
+
+def test_demo_order_values_blank_exchange_id_becomes_none():
+    order = _demo_order(client_order_id="kw-edge-yes-X")
+    order = dataclasses.replace(order, exchange_order_id="")
+    values = _demo_order_values(order, _intent(), _now())
+    assert values["exchange_order_id"] is None
 
 
 def test_paper_trade_row_values_excludes_id_and_created_at():

@@ -11,6 +11,7 @@ log = logging.getLogger(__name__)
 
 class GateMode(Enum):
     PAPER = "paper"
+    DEMO = "demo"
     LIVE = "live"
 
 
@@ -228,7 +229,7 @@ def evaluate(
             mode.value,
         )
 
-    overall_passed = True if mode == GateMode.PAPER else len(failures) == 0
+    overall_passed = True if mode is GateMode.PAPER else len(failures) == 0
     return RiskCheck(
         overall_passed=overall_passed,
         all_results=tuple(results),

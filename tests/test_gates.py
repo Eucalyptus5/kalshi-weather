@@ -64,6 +64,36 @@ def test_all_pass_live() -> None:
     assert tuple(_names(check)) == GATE_NAMES
 
 
+def test_evaluate_demo_blocks_on_single_failure() -> None:
+    check = evaluate(_ctx(edge=Decimal("0.01")), GateMode.DEMO)
+    assert check.overall_passed is False
+    assert len(check.failures) == 1
+
+
+def test_evaluate_demo_blocks_on_multiple_failures() -> None:
+    check = evaluate(
+        _ctx(edge=Decimal("0.01"), market_status="closed", minutes_to_close=1),
+        GateMode.DEMO,
+    )
+    assert check.overall_passed is False
+    assert len(check.failures) >= 2
+
+
+def test_evaluate_demo_passes_when_all_predicates_pass() -> None:
+    check = evaluate(_ctx(), GateMode.DEMO)
+    assert check.overall_passed is True
+    assert len(check.failures) == 0
+
+
+def test_evaluate_paper_stays_advisory() -> None:
+    check = evaluate(
+        _ctx(edge=Decimal("0.01"), market_status="closed"),
+        GateMode.PAPER,
+    )
+    assert check.overall_passed is True
+    assert len(check.failures) >= 2
+
+
 def test_fair_value_none_paper_continues() -> None:
     check = evaluate(_ctx(fair_yes=None), GateMode.PAPER)
     assert check.overall_passed is True

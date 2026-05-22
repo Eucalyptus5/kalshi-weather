@@ -17,6 +17,8 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import SQLAlchemyError
 
 import bot.main as bot_main
 from bot.execution.gate_cost_basis import cost_per_contract_from_book
@@ -920,6 +922,8 @@ def test_build_intents_skips_blacklisted_lax_series() -> None:
     market = _market_from("KXHIGHLAX-26MAY08-T70-75", "0.20", "0.18", close_at)
     book = _book_from(market.ticker, "0.20", "0.18")
     intents = _build_intents(
+        app=_make_app(),
+        mode="paper",
         ticker=market.ticker,
         market=market,
         book=book,
@@ -939,6 +943,8 @@ def test_build_intents_skips_blacklisted_mia_series() -> None:
     market = _market_from("KXHIGHMIA-26MAY08-T70-75", "0.20", "0.18", close_at)
     book = _book_from(market.ticker, "0.20", "0.18")
     intents = _build_intents(
+        app=_make_app(),
+        mode="paper",
         ticker=market.ticker,
         market=market,
         book=book,
@@ -958,6 +964,8 @@ def test_build_intents_emits_for_normal_series() -> None:
     market = _market_from("KXHIGHDEN-26MAY08-T70-75", "0.20", "0.18", close_at)
     book = _book_from(market.ticker, "0.20", "0.18")
     intents = _build_intents(
+        app=_make_app(),
+        mode="paper",
         ticker=market.ticker,
         market=market,
         book=book,
@@ -1686,6 +1694,8 @@ def test_build_intents_routes_tail_to_tails_only(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(bot_main.tails_strategy, "evaluate", tails_rec)
 
     _build_intents(
+        app=_make_app(),
+        mode="paper",
         ticker=market.ticker,
         market=market,
         book=book,
@@ -1732,6 +1742,8 @@ def test_build_intents_routes_bracket_to_edge_only(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(bot_main.tails_strategy, "evaluate", tails_rec)
 
     _build_intents(
+        app=_make_app(),
+        mode="paper",
         ticker=market.ticker,
         market=market,
         book=book,
@@ -1781,6 +1793,8 @@ def test_build_intents_blacklisted_skips_both(monkeypatch: pytest.MonkeyPatch) -
         edge_calls.clear()
         tails_calls.clear()
         _build_intents(
+            app=_make_app(),
+            mode="paper",
             ticker=market.ticker,
             market=market,
             book=book,
@@ -1832,6 +1846,8 @@ def test_build_intents_routes_b_form_bracket_to_edge(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(bot_main.tails_strategy, "evaluate", tails_rec)
 
     _build_intents(
+        app=_make_app(),
+        mode="paper",
         ticker=market.ticker,
         market=market,
         book=book,
@@ -2142,7 +2158,18 @@ async def test_evaluate_strategies_within_cycle_event_cap_blocks_second_bracket(
     await refresh_markets(app)
 
     def stub_intent(
-        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        mid,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        now,
+        app,
+        mode,
     ):
         return [
             TradeIntent(
@@ -2228,7 +2255,18 @@ async def test_evaluate_strategies_overlay_strip_regression_canary(
     await refresh_markets(app)
 
     def stub_intent(
-        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        mid,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        now,
+        app,
+        mode,
     ):
         return [
             TradeIntent(
@@ -2424,7 +2462,18 @@ async def test_evaluate_strategies_partial_fill_on_thin_book(monkeypatch) -> Non
     await refresh_markets(app)
 
     def stub_intent(
-        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        mid,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        now,
+        app,
+        mode,
     ):
         return [
             TradeIntent(
@@ -2515,7 +2564,18 @@ async def test_evaluate_strategies_partial_fill_overlay_uses_trade_contracts_acr
     await refresh_markets(app)
 
     def stub_intent(
-        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        mid,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        now,
+        app,
+        mode,
     ):
         return [
             TradeIntent(
@@ -2587,7 +2647,18 @@ async def test_evaluate_strategies_stale_orderbook_skips(
     await refresh_markets(app)
 
     def stub_intent(
-        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        mid,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        now,
+        app,
+        mode,
     ):
         return [
             TradeIntent(
@@ -2638,7 +2709,18 @@ async def test_evaluate_strategies_stale_snapshot_drives_zero_trades(
     await refresh_markets(app)
 
     def stub_intent(
-        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        mid,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        now,
+        app,
+        mode,
     ):
         return [
             TradeIntent(
@@ -2694,7 +2776,18 @@ async def test_evaluate_strategies_stale_skip_ratio_warns(
         app.latest_orderbooks[m.ticker] = books[m.ticker]
 
     def stub_intent(
-        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        mid,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        now,
+        app,
+        mode,
     ):
         return [
             TradeIntent(
@@ -2771,7 +2864,18 @@ async def test_evaluate_strategies_per_series_stale_skip_warns_on_one_stuck_seri
         app.latest_orderbooks[m.ticker] = all_books[m.ticker]
 
     def stub_intent(
-        ticker, market, book, fair_yes, spread, mid, is_same_day, is_blacklisted, is_tail, now
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        mid,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        now,
+        app,
+        mode,
     ):
         return [
             TradeIntent(
@@ -3771,3 +3875,1362 @@ def test_cap_helpers_fall_back_to_paper_bankroll_when_no_app() -> None:
     assert bot_main.event_position_cap(None) == base * bot_main.EVENT_POSITION_FRAC
     assert bot_main.series_position_cap() == base * bot_main.SERIES_POSITION_FRAC
     assert bot_main.aggregate_exposure_cap(None) == base * bot_main.AGGREGATE_EXPOSURE_FRAC
+
+
+# --- demo-mode wiring (brief 04 commit 3) ---
+
+from bot.config import Settings as _DemoSettings  # noqa: E402
+from bot.execution.order_placer import DemoOrder  # noqa: E402
+from bot.storage.sqlite import DemoOrder as DemoOrderRow  # noqa: E402
+
+
+class _DemoKalshi(_StubKalshi):
+    def __init__(self, markets, orderbooks) -> None:
+        super().__init__(markets, orderbooks)
+        self.balance = Decimal("500")
+
+    async def get_balance(self) -> Decimal:
+        return self.balance
+
+
+def _make_demo_app(
+    meteo: _StubMeteo | None = None,
+    kalshi: _StubKalshi | None = None,
+    series_list: tuple[str, ...] = ("KXHIGHDEN",),
+    bankroll: Decimal | None = None,
+) -> App:
+    engine = make_engine(":memory:")
+    Base.metadata.create_all(engine)
+    sf = make_session_factory(engine)
+    settings = _DemoSettings(mode="demo", kalshi_demo_key_id="demo-key-id")
+    return App(
+        settings=settings,
+        engine=engine,
+        session_factory=sf,
+        meteo=meteo,  # type: ignore[arg-type]
+        kalshi=kalshi,  # type: ignore[arg-type]
+        acis=_StubACIS(None),  # type: ignore[arg-type]
+        series_list=series_list,
+        bankroll=bankroll,
+    )
+
+
+def _demo_bracket_setup(now: datetime):
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.20", "0.18")
+    return meteo, market, book
+
+
+def _one_intent_stub(
+    side: TradeSide = TradeSide.BUY_YES, contracts: int = 5, strategy: str = "edge"
+):
+    def stub_intent(
+        *,
+        app,
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        mid,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        mode,
+        now,
+    ):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=side,
+                contracts=contracts,
+                fair_yes=Decimal("0.50"),
+                strategy=strategy,
+            )
+        ]
+
+    return stub_intent
+
+
+def _demo_order(
+    *,
+    cid: str = "kw-edge-yes-KXHIGHDEN-26MAY08-T70-75-2026-05-08",
+    eid: str = "EX-1",
+    ticker: str = "KXHIGHDEN-26MAY08-T70-75",
+    side_kalshi: str = "yes",
+    requested: int = 5,
+    filled: int = 5,
+    avg: Decimal | None = Decimal("0.20"),
+    status: str = "executed",
+    now: datetime | None = None,
+) -> DemoOrder:
+    return DemoOrder(
+        client_order_id=cid,
+        exchange_order_id=eid,
+        ticker=ticker,
+        side_kalshi=side_kalshi,
+        requested_contracts=requested,
+        filled_contracts=filled,
+        requested_yes_price_dollars=Decimal("0.20"),
+        avg_yes_fill_price_dollars=avg,
+        fee_dollars=Decimal("0.01"),
+        status=status,
+        placed_at=now or datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+    )
+
+
+async def test_evaluate_strategies_routes_to_simulator_in_paper_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    posted: list[object] = []
+
+    async def boom(*a, **k):
+        posted.append(a)
+        raise AssertionError("placer must not be called in paper mode")
+
+    monkeypatch.setattr(bot_main, "place_order_demo", boom)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+        demo_orders = session.scalars(select(DemoOrderRow)).all()
+    assert len(trades) == 1
+    assert demo_orders == []
+    assert posted == []
+
+
+async def test_evaluate_strategies_routes_to_demo_placer_in_demo_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
+    _lift_caps(monkeypatch)
+
+    async def fake_place(intent, book, client, *, now):
+        return _demo_order(now=now)
+
+    monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        demo_orders = session.scalars(select(DemoOrderRow)).all()
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert len(demo_orders) == 1
+    assert len(trades) == 1
+    assert trades[0].demo_order_client_id == demo_orders[0].client_order_id
+
+
+async def test_evaluate_strategies_demo_does_not_post_on_failing_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, _market, book = _demo_bracket_setup(now)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+        status="closed",
+    )
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    # closed markets are dropped by refresh; seed caches directly.
+    app.latest_markets[market.ticker] = market
+    app.latest_orderbooks[market.ticker] = book
+    _lift_caps(monkeypatch)
+
+    posted: list[object] = []
+
+    async def boom(*a, **k):
+        posted.append(a)
+        raise AssertionError("must not post on failing gate")
+
+    monkeypatch.setattr(bot_main, "place_order_demo", boom)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+        gate_failures = session.scalars(
+            select(GateFailure).where(GateFailure.gate_name == "market_open")
+        ).all()
+    assert trades == []
+    assert posted == []
+    assert gate_failures
+    assert all(f.mode == "demo" for f in gate_failures)
+
+
+async def test_evaluate_strategies_demo_mode_asserts_no_cost_per_contract_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    posted: list[object] = []
+
+    async def boom(*a, **k):
+        posted.append(a)
+        return _demo_order(now=now)
+
+    monkeypatch.setattr(bot_main, "place_order_demo", boom)
+
+    def bad_intents(
+        *,
+        app,
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        mid,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        mode,
+        now,
+    ):
+        edge_strategy.evaluate(
+            edge_strategy.EdgeContext(
+                yes_ask=book.yes_ask,
+                yes_bid=book.yes_bid,
+                fair_yes=fair_yes,
+                ensemble_spread=spread,
+                bankroll=Decimal("500"),
+                is_same_day=False,
+                is_blacklisted=False,
+                nbm_divergence=None,
+                no_cost_per_contract=None,
+            ),
+            mode="demo",
+        )
+        return []
+
+    monkeypatch.setattr(bot_main, "_build_intents", bad_intents)
+
+    with pytest.raises(RuntimeError, match="demo mode requires book-derived cost basis"):
+        await evaluate_strategies(app, now)
+    assert posted == []
+
+
+async def test_evaluate_strategies_paper_mode_none_cost_per_contract_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    def ok_intents(
+        *,
+        app,
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        mid,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        mode,
+        now,
+    ):
+        edge_strategy.evaluate(
+            edge_strategy.EdgeContext(
+                yes_ask=book.yes_ask,
+                yes_bid=book.yes_bid,
+                fair_yes=fair_yes,
+                ensemble_spread=spread,
+                bankroll=Decimal("500"),
+                is_same_day=False,
+                is_blacklisted=False,
+                nbm_divergence=None,
+                no_cost_per_contract=None,
+            ),
+            mode="paper",
+        )
+        return []
+
+    monkeypatch.setattr(bot_main, "_build_intents", ok_intents)
+    await evaluate_strategies(app, now)
+
+
+async def test_evaluate_strategies_does_not_hold_db_lock_during_intent_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    observed: list[bool] = []
+    real_stub = _one_intent_stub()
+
+    def spy(**kwargs):
+        observed.append(app.db_lock.locked())
+        return real_stub(**kwargs)
+
+    monkeypatch.setattr(bot_main, "_build_intents", spy)
+    await evaluate_strategies(app, now)
+
+    assert observed
+    assert all(v is False for v in observed)
+
+
+async def test_snapshot_markets_atomically_returns_consistent_pair_under_contention() -> None:
+    app = _make_app()
+    for i in range(50):
+        t = f"KXHIGHDEN-26MAY08-T{i}"
+        app.latest_markets[t] = _market_from(
+            t, "0.20", "0.18", datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+        )
+        app.latest_orderbooks[t] = _book_from(t, "0.20", "0.18")
+
+    stop = asyncio.Event()
+
+    async def mutator():
+        flip = True
+        while not stop.is_set():
+            async with app.db_lock:
+                if flip:
+                    t = "KXHIGHDEN-26MAY08-Tnew"
+                    app.latest_markets[t] = _market_from(
+                        t, "0.20", "0.18", datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+                    )
+                    app.latest_orderbooks[t] = _book_from(t, "0.20", "0.18")
+                else:
+                    app.latest_markets.pop("KXHIGHDEN-26MAY08-Tnew", None)
+                    app.latest_orderbooks.pop("KXHIGHDEN-26MAY08-Tnew", None)
+                flip = not flip
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(mutator())
+    try:
+        for _ in range(200):
+            markets, books = await bot_main._snapshot_markets_atomically(app)
+            assert {t for t, _m in markets} == set(books.keys())
+    finally:
+        stop.set()
+        await task
+
+
+async def test_naive_two_line_snapshot_can_disagree() -> None:
+    app = _make_app()
+    t = "KXHIGHDEN-26MAY08-Tnew"
+    app.latest_markets[t] = _market_from(
+        t, "0.20", "0.18", datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    )
+    app.latest_orderbooks[t] = _book_from(t, "0.20", "0.18")
+
+    async def naive_snapshot():
+        markets = tuple(app.latest_markets.items())
+        await asyncio.sleep(0)
+        books = dict(app.latest_orderbooks)
+        return markets, books
+
+    snap_task = asyncio.create_task(naive_snapshot())
+    await asyncio.sleep(0)
+    app.latest_orderbooks.pop(t, None)
+    markets, books = await snap_task
+    assert {tk for tk, _m in markets} != set(books.keys())
+
+
+async def test_snapshot_is_immune_to_post_call_mutation() -> None:
+    app = _make_app()
+    t = "KXHIGHDEN-26MAY08-T1"
+    app.latest_markets[t] = _market_from(
+        t, "0.20", "0.18", datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    )
+    app.latest_orderbooks[t] = _book_from(t, "0.20", "0.18")
+
+    markets, books = await bot_main._snapshot_markets_atomically(app)
+    app.latest_markets.clear()
+    app.latest_orderbooks.clear()
+
+    assert {tk for tk, _m in markets} == {t}
+    assert set(books.keys()) == {t}
+
+
+async def test_evaluate_strategies_write_phase_blocks_on_competing_lock_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    snapshot_done = asyncio.Event()
+    holder_acquired = asyncio.Event()
+    release = asyncio.Event()
+    real_snapshot = bot_main._snapshot_markets_atomically
+
+    async def snapshot_spy(app):
+        pair = await real_snapshot(app)
+        snapshot_done.set()
+        await holder_acquired.wait()
+        return pair
+
+    monkeypatch.setattr(bot_main, "_snapshot_markets_atomically", snapshot_spy)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    async def hold_lock():
+        await snapshot_done.wait()
+        async with app.db_lock:
+            holder_acquired.set()
+            await release.wait()
+
+    holder = asyncio.create_task(hold_lock())
+    eval_task = asyncio.create_task(evaluate_strategies(app, now))
+    await asyncio.wait_for(holder_acquired.wait(), timeout=2.0)
+    assert app.db_lock.locked()
+    assert not eval_task.done()
+
+    release.set()
+    await holder
+    await asyncio.wait_for(eval_task, timeout=2.0)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert len(trades) == 1
+
+
+async def test_phase1_skips_post_if_ticker_evicted_before_placement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    posted: list[str] = []
+
+    async def fake_place(intent, book, client, *, now):
+        posted.append(intent.market_ticker)
+        return _demo_order(now=now)
+
+    monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    app.latest_markets.pop(market.ticker, None)
+
+    await evaluate_strategies(app, now)
+
+    assert posted == []
+    with app.session_factory() as session:
+        demo_orders = session.scalars(select(DemoOrderRow)).all()
+    assert demo_orders == []
+
+
+def _phase2_drain_app() -> App:
+    return _make_demo_app()
+
+
+async def _run_phase2(app: App, *, demo_rows=None, paper_rows=None, gate_failures=None):
+    demo_rows = demo_rows or []
+    paper_rows = paper_rows or []
+    gate_failures = gate_failures or []
+    async with app.db_lock:
+        with app.session_factory() as session:
+            for failure_row in gate_failures:
+                session.add(failure_row)
+            for paper_row in paper_rows:
+                if paper_row.demo_order_client_id is None:
+                    session.add(paper_row)
+                else:
+                    session.execute(
+                        sqlite_insert(PaperTradeRow)
+                        .values(**bot_main.paper_trade_row_values(paper_row))
+                        .on_conflict_do_nothing(index_elements=["demo_order_client_id"])
+                    )
+            for values in demo_rows:
+                try:
+                    with session.begin_nested():
+                        eid = values.get("exchange_order_id")
+                        stitched = False
+                        if eid is not None:
+                            existing = session.execute(
+                                select(DemoOrderRow).where(DemoOrderRow.exchange_order_id == eid)
+                            ).scalar_one_or_none()
+                            if existing is not None:
+                                bot_main.stitch_natural_key_order(
+                                    session,
+                                    exchange_order_id=eid,
+                                    client_order_id=values["client_order_id"],
+                                    strategy=values["strategy"],
+                                    side=values["side"],
+                                    fair_at_entry=values["fair_at_entry"],
+                                    intended_at=values["intended_at"],
+                                    requested_yes_price_dollars=values[
+                                        "requested_yes_price_dollars"
+                                    ],
+                                )
+                                stitched = True
+                        if not stitched:
+                            session.execute(
+                                sqlite_insert(DemoOrderRow)
+                                .values(**values)
+                                .on_conflict_do_update(
+                                    index_elements=["client_order_id"],
+                                    set_={
+                                        "strategy": values["strategy"],
+                                        "side": values["side"],
+                                        "fair_at_entry": values["fair_at_entry"],
+                                        "intended_at": values["intended_at"],
+                                        "requested_yes_price_dollars": values[
+                                            "requested_yes_price_dollars"
+                                        ],
+                                    },
+                                )
+                            )
+                except (ValueError, SQLAlchemyError) as err:
+                    bot_main.logger.error("demo_row_stitch_corrupted err=%s", err)
+                    continue
+            session.commit()
+
+
+def _demo_values(now: datetime, **overrides) -> dict:
+    intent = TradeIntent(
+        market_ticker="KXHIGHDEN-26MAY08-T70-75",
+        side=TradeSide.BUY_YES,
+        contracts=5,
+        fair_yes=Decimal("0.50"),
+        strategy="edge",
+    )
+    order = _demo_order(
+        now=now,
+        **{
+            k: overrides.pop(k)
+            for k in list(overrides)
+            if k in {"cid", "eid", "side_kalshi", "filled", "avg", "status"}
+        },
+    )
+    values = bot_main._demo_order_values(order, intent, now)
+    values.update(overrides)
+    return values
+
+
+async def test_phase2_legacy_merge_pattern_raises_integrity_error() -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    app = _phase2_drain_app()
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    with app.session_factory() as session:
+        session.add(
+            DemoOrderRow(
+                client_order_id="kw-edge-yes-X",
+                exchange_order_id="EXR",
+                market_ticker="KXHIGHDEN-26MAY08-T70-75",
+                strategy="edge",
+                side="yes",
+                requested_contracts=5,
+                filled_contracts=5,
+                status="executed",
+                placed_at=now,
+                last_status_at=now,
+            )
+        )
+        session.commit()
+
+    with pytest.raises(IntegrityError):
+        with app.session_factory() as session:
+            session.merge(
+                DemoOrderRow(
+                    client_order_id="kw-edge-yes-X",
+                    exchange_order_id="EX-OTHER",
+                    market_ticker="KXHIGHDEN-26MAY08-T70-75",
+                    strategy="edge",
+                    side="yes",
+                    requested_contracts=5,
+                    filled_contracts=0,
+                    status="resting",
+                    placed_at=now,
+                    last_status_at=now,
+                )
+            )
+            session.flush()
+
+
+async def test_phase2_upsert_preserves_reconciler_terminal_state() -> None:
+    app = _phase2_drain_app()
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    cid = "kw-edge-yes-X"
+    with app.session_factory() as session:
+        session.add(
+            DemoOrderRow(
+                client_order_id=cid,
+                exchange_order_id=None,
+                market_ticker="KXHIGHDEN-26MAY08-T70-75",
+                strategy=None,
+                side="yes",
+                requested_contracts=5,
+                filled_contracts=10,
+                avg_fill_price=Decimal("0.205"),
+                fee_dollars=Decimal("0.07"),
+                status="executed",
+                placed_at=now,
+                last_status_at=now,
+            )
+        )
+        session.commit()
+
+    values = _demo_values(now, cid=cid, eid="")
+    values["status"] = "resting"
+    values["filled_contracts"] = 0
+    await _run_phase2(app, demo_rows=[values])
+
+    with app.session_factory() as session:
+        row = session.scalars(select(DemoOrderRow).where(DemoOrderRow.client_order_id == cid)).one()
+    assert row.status == "executed"
+    assert row.filled_contracts == 10
+    assert row.avg_fill_price == Decimal("0.205")
+    assert row.fee_dollars == Decimal("0.07")
+    assert row.strategy == "edge"
+    assert row.fair_at_entry == Decimal("0.50")
+    assert row.intended_at == now
+
+
+async def test_phase2_upsert_inserts_on_no_collision() -> None:
+    app = _phase2_drain_app()
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    values = _demo_values(now, cid="kw-edge-yes-FRESH", eid="")
+    await _run_phase2(app, demo_rows=[values])
+
+    with app.session_factory() as session:
+        rows = session.scalars(select(DemoOrderRow)).all()
+    assert len(rows) == 1
+    assert rows[0].client_order_id == "kw-edge-yes-FRESH"
+    assert rows[0].strategy == "edge"
+    assert rows[0].status == "executed"
+
+
+async def test_phase2_upsert_commits_gate_failures_despite_demo_row_savepoint_rollback() -> None:
+    app = _phase2_drain_app()
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    # Seed a holder row with a different exchange id so stitch raises case-4 ValueError.
+    with app.session_factory() as session:
+        session.add(
+            DemoOrderRow(
+                client_order_id="kw-edge-yes-COLLIDE",
+                exchange_order_id="EX-OTHER",
+                market_ticker="KXHIGHDEN-26MAY08-T70-75",
+                strategy="edge",
+                side="yes",
+                requested_contracts=5,
+                filled_contracts=5,
+                status="executed",
+                placed_at=now,
+                last_status_at=now,
+            )
+        )
+        session.add(
+            DemoOrderRow(
+                client_order_id="kw-backfill-EX-2",
+                exchange_order_id="EX-2",
+                market_ticker="KXHIGHDEN-26MAY08-T70-75",
+                strategy=None,
+                side="yes",
+                requested_contracts=5,
+                filled_contracts=0,
+                status="resting",
+                placed_at=now,
+                last_status_at=now,
+            )
+        )
+        session.commit()
+
+    values = _demo_values(now, cid="kw-edge-yes-COLLIDE", eid="EX-2")
+    gate_failure = GateFailure(
+        evaluated_at=now,
+        gate_name="edge_threshold",
+        reason="x",
+        mode="demo",
+        market_ticker="KXHIGHDEN-26MAY08-T70-75",
+    )
+    await _run_phase2(app, demo_rows=[values], gate_failures=[gate_failure])
+
+    with app.session_factory() as session:
+        failures = session.scalars(select(GateFailure)).all()
+    assert len(failures) == 1
+
+
+async def test_phase2_paper_rows_upsert_survives_duplicate_demo_order_client_id() -> None:
+    app = _phase2_drain_app()
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    cid = "kw-edge-yes-DUP"
+    with app.session_factory() as session:
+        session.add(
+            PaperTradeRow(
+                intended_at=now,
+                market_ticker="KXHIGHDEN-26MAY08-T70-75",
+                side="buy_yes",
+                contracts=5,
+                simulated_price=Decimal("0.20"),
+                fee_dollars=Decimal("0.01"),
+                fair_at_entry=Decimal("0.50"),
+                strategy="edge",
+                demo_order_client_id=cid,
+            )
+        )
+        session.commit()
+
+    dup_row = PaperTradeRow(
+        intended_at=now,
+        market_ticker="KXHIGHDEN-26MAY08-T70-75",
+        side="buy_yes",
+        contracts=5,
+        simulated_price=Decimal("0.20"),
+        fee_dollars=Decimal("0.01"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        demo_order_client_id=cid,
+    )
+    legacy_row = PaperTradeRow(
+        intended_at=now,
+        market_ticker="KXHIGHDEN-26MAY08-T70-75",
+        side="buy_yes",
+        contracts=5,
+        simulated_price=Decimal("0.20"),
+        fee_dollars=Decimal("0.01"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+        demo_order_client_id=None,
+    )
+    gate_failure = GateFailure(
+        evaluated_at=now, gate_name="edge_threshold", reason="x", mode="demo", market_ticker="T"
+    )
+    await _run_phase2(app, paper_rows=[dup_row, legacy_row], gate_failures=[gate_failure])
+
+    with app.session_factory() as session:
+        for_cid = session.scalars(
+            select(PaperTradeRow).where(PaperTradeRow.demo_order_client_id == cid)
+        ).all()
+        legacy = session.scalars(
+            select(PaperTradeRow).where(PaperTradeRow.demo_order_client_id.is_(None))
+        ).all()
+        failures = session.scalars(select(GateFailure)).all()
+    assert len(for_cid) == 1
+    assert len(legacy) == 1
+    assert len(failures) == 1
+
+
+async def test_phase2_resting_order_skips_paper_row_insert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
+    _lift_caps(monkeypatch)
+
+    async def fake_place(intent, book, client, *, now):
+        return _demo_order(now=now, status="resting", filled=0, avg=None)
+
+    monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        demo_orders = session.scalars(select(DemoOrderRow)).all()
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert len(demo_orders) == 1
+    assert demo_orders[0].status == "resting"
+    assert trades == []
+
+
+async def test_phase2_late_fill_via_reconciler_inserts_paper_row() -> None:
+    app = _make_demo_app()
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    cid = "kw-edge-yes-LATE"
+    with app.session_factory() as session:
+        session.add(
+            DemoOrderRow(
+                client_order_id=cid,
+                exchange_order_id="EX-LATE",
+                market_ticker="KXHIGHDEN-26MAY08-T70-75",
+                strategy="edge",
+                side="yes",
+                requested_contracts=10,
+                filled_contracts=0,
+                requested_yes_price_dollars=Decimal("0.20"),
+                fair_at_entry=Decimal("0.50"),
+                intended_at=now,
+                status="resting",
+                placed_at=now,
+                last_status_at=now,
+            )
+        )
+        session.commit()
+
+    from bot.execution.order_reconciler import DemoFill, reconcile_fills_into_demo_orders
+
+    fill = DemoFill(
+        fill_id="F1",
+        order_id="EX-LATE",
+        ticker="KXHIGHDEN-26MAY08-T70-75",
+        outcome_side="yes",
+        book_side="yes",
+        count=10,
+        yes_price_dollars=Decimal("0.795"),
+        no_price_dollars=Decimal("0.205"),
+        is_taker=True,
+        created_time="",
+        fee_cost=Decimal("0.02"),
+    )
+    order = _demo_order(cid=cid, eid="EX-LATE", filled=10, avg=Decimal("0.795"), now=now)
+    async with app.db_lock:
+        with app.session_factory() as session:
+            reconcile_fills_into_demo_orders(session, [fill], [order])
+            session.commit()
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert len(trades) == 1
+    assert trades[0].simulated_price == Decimal("0.795")
+    assert trades[0].strategy == "edge"
+
+
+async def test_demo_intended_at_uses_pre_post_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
+    _lift_caps(monkeypatch)
+
+    async def slow_drain(items, placer):
+        out = []
+        for item in items:
+            await asyncio.sleep(0.05)
+            r = await placer(item)
+            if r is not None:
+                out.append(r)
+        return out
+
+    async def fake_place(intent, book, client, *, now):
+        return _demo_order(now=now + timedelta(milliseconds=100))
+
+    monkeypatch.setattr(bot_main, "place_orders_resilient", slow_drain)
+    monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        row = session.scalars(select(DemoOrderRow)).one()
+    assert row.intended_at == now
+
+
+async def test_paper_intended_at_uses_simulate_taker_fill_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        row = session.scalars(select(PaperTradeRow)).one()
+    assert row.intended_at == now
+
+
+def _wide_tails_market(now: datetime):
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(7).normal(40.0, 5.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T100",
+        "0.98",
+        "0.10",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.98", "0.10")
+    return meteo, market, book
+
+
+async def _capture_tails_call(app, meteo, market, book, now, monkeypatch):
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    app.forecast_cdfs[("KDEN", date(2026, 5, 8))] = _StrongTailCdf()
+    app.ensemble_spreads[("KDEN", date(2026, 5, 8))] = Decimal("5.0")
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
+    _lift_caps(monkeypatch)
+
+    captured: list[dict] = []
+    real = tails_strategy.evaluate
+
+    def rec(ctx, **kwargs):
+        captured.append(kwargs)
+        return real(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.tails_strategy, "evaluate", rec)
+    await evaluate_strategies(app, now)
+    return captured
+
+
+class _StrongTailCdf:
+    def prob_range(self, lo: float, hi: float) -> float:
+        return 0.01
+
+    def cdf(self, x: float) -> float:
+        return 0.99
+
+
+async def test_tails_call_site_paper_mode_baseline_byte_for_byte(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _wide_tails_market(now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    captured = await _capture_tails_call(app, meteo, market, book, now, monkeypatch)
+
+    assert captured
+    for kwargs in captured:
+        assert "position_cap" not in kwargs
+        assert "contracts_cap" not in kwargs
+        assert kwargs.get("mode") == "paper"
+
+
+async def test_tails_call_site_demo_mode_clamps_to_market_position_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _wide_tails_market(now)
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi, bankroll=Decimal("500"))
+
+    async def fake_place(intent, book, client, *, now):
+        return _demo_order(now=now, ticker=intent.market_ticker, side_kalshi="no")
+
+    monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
+    captured = await _capture_tails_call(app, meteo, market, book, now, monkeypatch)
+
+    assert captured
+    kwargs = captured[0]
+    assert kwargs["position_cap"] == Decimal("7.50")
+    assert kwargs["contracts_cap"] == int(Decimal("7.50") / Decimal("0.90"))
+    assert kwargs["contracts_cap"] == 8
+
+
+async def test_tails_contracts_cap_scales_with_app_bankroll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _wide_tails_market(now)
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi, bankroll=Decimal("1000"))
+
+    async def fake_place(intent, book, client, *, now):
+        return _demo_order(now=now, ticker=intent.market_ticker, side_kalshi="no")
+
+    monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
+    captured = await _capture_tails_call(app, meteo, market, book, now, monkeypatch)
+
+    assert captured
+    kwargs = captured[0]
+    assert kwargs["position_cap"] == Decimal("15.00")
+    assert kwargs["contracts_cap"] == int(Decimal("15.00") / Decimal("0.90"))
+    assert kwargs["contracts_cap"] == 16
+
+
+async def test_tails_call_site_demo_mode_zero_wired_cost_omits_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(7).normal(40.0, 5.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T100",
+        "1.00",
+        "1.00",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "1.00", "1.00")
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi, bankroll=Decimal("500"))
+    captured = await _capture_tails_call(app, meteo, market, book, now, monkeypatch)
+
+    assert captured
+    for kwargs in captured:
+        assert "position_cap" not in kwargs
+        assert "contracts_cap" not in kwargs
+
+
+async def test_tails_call_site_paper_mode_baseline_negative_companion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _wide_tails_market(now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    captured = await _capture_tails_call(app, meteo, market, book, now, monkeypatch)
+    assert captured
+    monkeypatch.undo()
+    paper_contracts = None
+    real = tails_strategy.evaluate
+    for kwargs in captured:
+        ctx = tails_strategy.TailsContext(
+            yes_ask=book.yes_ask,
+            yes_bid=book.yes_bid,
+            no_bid=book.no_bid,
+            fair_yes=Decimal("0.01"),
+            close_time=market.close_time,
+            now=now,
+            bankroll=Decimal("500"),
+            is_same_day=False,
+        )
+        paper_sig = real(ctx, mode="paper")
+        clamped = real(
+            ctx,
+            mode="paper",
+            position_cap=Decimal("7.50"),
+            contracts_cap=8,
+        )
+        paper_contracts = paper_sig.contracts
+        assert clamped.contracts < paper_contracts
+
+
+async def test_startup_backfill_runs_before_eval_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _rsa_pem: Path,
+) -> None:
+    order = _demo_order(now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc))
+
+    from bot.execution.order_reconciler import DemoFill
+
+    fill = DemoFill(
+        fill_id="F1",
+        order_id=order.exchange_order_id,
+        ticker=order.ticker,
+        outcome_side="yes",
+        book_side="yes",
+        count=5,
+        yes_price_dollars=Decimal("0.20"),
+        no_price_dollars=Decimal("0.80"),
+        is_taker=True,
+        created_time="",
+        fee_cost=Decimal("0.01"),
+    )
+
+    order_calls: list[int] = []
+
+    async def fake_poll_orders(client, watermark):
+        order_calls.append(1)
+        return [order]
+
+    async def fake_poll_fills(client, watermark):
+        return [fill]
+
+    sequence: list[str] = []
+
+    async def fake_get_balance():
+        return Decimal("500")
+
+    async def fake_run(app, duration):
+        sequence.append("run")
+
+    monkeypatch.setattr(bot_main, "poll_open_orders", fake_poll_orders)
+    monkeypatch.setattr(bot_main, "poll_fills", fake_poll_fills)
+    monkeypatch.setattr(bot_main, "run", fake_run)
+
+    engine = make_engine(":memory:")
+    Base.metadata.create_all(engine)
+    sf = make_session_factory(engine)
+    settings = _DemoSettings(
+        mode="demo", kalshi_demo_key_id="demo-key-id", kalshi_demo_private_key_path=_rsa_pem
+    )
+
+    class _BalanceKalshi(_DemoKalshi):
+        async def aopen(self) -> None:
+            sequence.append("aopen")
+
+        async def get_balance(self) -> Decimal:
+            sequence.append("balance")
+            return Decimal("500")
+
+    kalshi = _BalanceKalshi(markets=[], orderbooks={})
+    app = App(
+        settings=settings,
+        engine=engine,
+        session_factory=sf,
+        meteo=_StubMeteo({}),  # type: ignore[arg-type]
+        kalshi=kalshi,
+        acis=_StubACIS(None),  # type: ignore[arg-type]
+        series_list=("KXHIGHDEN",),
+    )
+
+    async def _go() -> None:
+        await app.kalshi.aopen()
+        if app.settings.mode == "demo":
+            balance = await app.kalshi.get_balance()
+            bot_main.logger.info("demo_account_balance balance_dollars=%s", balance)
+            app.bankroll = balance
+            watermark = datetime.now(timezone.utc) - timedelta(hours=1)
+            open_orders = await bot_main.poll_open_orders(app.kalshi, watermark)
+            fills = await bot_main.poll_fills(app.kalshi, watermark)
+            bot_main.logger.info(
+                "demo_startup_backfill watermark=%s open_orders=%d fills=%d",
+                watermark.isoformat(),
+                len(open_orders),
+                len(fills),
+            )
+            async with app.db_lock:
+                with app.session_factory() as session:
+                    for record in open_orders:
+                        bot_main.upsert_exchange_record(session, record)
+                    bot_main.reconcile_fills_into_demo_orders(session, fills, open_orders)
+                    session.commit()
+        await bot_main.run(app, timedelta(seconds=1))
+
+    caplog.set_level(logging.INFO, logger="bot.main")
+    await _go()
+
+    assert order_calls
+    assert sequence.index("balance") < sequence.index("run")
+    with app.session_factory() as session:
+        demo_orders = session.scalars(select(DemoOrderRow)).all()
+    assert len(demo_orders) == 1
+    assert any("demo_startup_backfill" in r.getMessage() for r in caplog.records)
+    engine.dispose()
+
+
+def test_cli_accepts_demo_mode(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        ["bot.main", "--mode=demo", "--series=KXHIGHDEN", "--duration=1s"],
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run(coro):
+        coro.close()
+        captured["ran"] = True
+
+    monkeypatch.setattr(
+        bot_main, "get_settings", lambda: _DemoSettings(mode="demo", kalshi_demo_key_id="k")
+    )
+    monkeypatch.setattr(bot_main.asyncio, "run", fake_run)
+    monkeypatch.setattr(bot_main, "make_engine", lambda p: make_engine(":memory:"))
+    main()
+    assert captured.get("ran") is True
+
+
+def test_cli_mode_demo_overrides_env_paper(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "sys.argv",
+        ["bot.main", "--mode=demo", "--series=KXHIGHDEN", "--duration=1s"],
+    )
+    seen: dict[str, object] = {}
+
+    def fake_run(coro):
+        coro.close()
+
+    monkeypatch.setattr(
+        bot_main, "get_settings", lambda: _DemoSettings(mode="paper", kalshi_demo_key_id="k")
+    )
+    monkeypatch.setattr(bot_main.asyncio, "run", fake_run)
+    monkeypatch.setattr(bot_main, "make_engine", lambda p: make_engine(":memory:"))
+
+    real_app = bot_main.App
+
+    def app_spy(*args, **kwargs):
+        seen["mode"] = kwargs["settings"].mode
+        return real_app(*args, **kwargs)
+
+    monkeypatch.setattr(bot_main, "App", app_spy)
+    main()
+    assert seen["mode"] == "demo"
+
+
+def test_cli_mode_demo_without_key_raises_validation_error(monkeypatch) -> None:
+    from pydantic import ValidationError
+
+    monkeypatch.setattr(
+        "sys.argv",
+        ["bot.main", "--mode=demo", "--series=KXHIGHDEN", "--duration=1s"],
+    )
+    monkeypatch.setattr(
+        bot_main, "get_settings", lambda: _DemoSettings(mode="paper", kalshi_demo_key_id=None)
+    )
+    constructed: list[int] = []
+    real_app = bot_main.App
+
+    def app_spy(*args, **kwargs):
+        constructed.append(1)
+        return real_app(*args, **kwargs)
+
+    monkeypatch.setattr(bot_main, "App", app_spy)
+    monkeypatch.setattr(bot_main, "make_engine", lambda p: make_engine(":memory:"))
+    with pytest.raises(ValidationError):
+        main()
+    assert constructed == []
+
+
+async def test_demo_integration_one_cycle_via_mock_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    _rsa_pem: Path,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+
+    cid = "kw-edge-yes-KXHIGHDEN-26MAY08-T70-75-2026-05-08"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/portfolio/orders") and request.method == "POST":
+            return httpx.Response(
+                201,
+                json={
+                    "order": {
+                        "client_order_id": cid,
+                        "order_id": "EX-INT-1",
+                        "ticker": market.ticker,
+                        "side": "yes",
+                        "status": "executed",
+                        "requested_contracts": 5,
+                        "filled_contracts": 5,
+                        "avg_yes_fill_price_dollars": "0.2000",
+                        "yes_price_dollars": "0.2000",
+                        "fee_dollars": "0.0100",
+                    }
+                },
+            )
+        return httpx.Response(200, json={"orders": [], "fills": []})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        settings = _DemoSettings(
+            mode="demo", kalshi_demo_key_id="demo-key-id", kalshi_demo_private_key_path=_rsa_pem
+        )
+        client = KalshiDemoClient(settings, http_client=http)
+        await client.aopen()
+
+        engine = make_engine(":memory:")
+        Base.metadata.create_all(engine)
+        sf = make_session_factory(engine)
+        app = App(
+            settings=settings,
+            engine=engine,
+            session_factory=sf,
+            meteo=meteo,  # type: ignore[arg-type]
+            kalshi=client,
+            acis=_StubACIS(None),  # type: ignore[arg-type]
+            series_list=("KXHIGHDEN",),
+        )
+        await refresh_forecasts(app)
+        app.latest_markets[market.ticker] = market
+        app.latest_orderbooks[market.ticker] = book
+        app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
+        _lift_caps(monkeypatch)
+        monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+        await evaluate_strategies(app, now)
+        await client.aclose()
+
+    with app.session_factory() as session:
+        demo_orders = session.scalars(select(DemoOrderRow)).all()
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert len(demo_orders) == 1
+    assert demo_orders[0].status == "executed"
+    assert len(trades) == 1
+    assert trades[0].demo_order_client_id == demo_orders[0].client_order_id
+    engine.dispose()
+
+
+async def test_demo_integration_paper_mode_regression_demo_orders_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        demo_orders = session.scalars(select(DemoOrderRow)).all()
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert demo_orders == []
+    assert len(trades) == 1

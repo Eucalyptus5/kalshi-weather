@@ -16,11 +16,27 @@ from decimal import Decimal
 import httpx
 import numpy as np
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from bot.config import Settings, get_settings
+from bot.execution.demo_row_translator import (
+    _demo_order_values,
+    paper_trade_row_from_demo_order,
+    paper_trade_row_values,
+)
 from bot.execution.gate_cost_basis import cost_per_contract_from_book
+from bot.execution.order_loop import place_orders_resilient
+from bot.execution.order_placer import DemoOrder, place_order_demo
+from bot.execution.order_reconciler import (
+    poll_fills,
+    poll_open_orders,
+    reconcile_fills_into_demo_orders,
+    stitch_natural_key_order,
+    upsert_exchange_record,
+)
 from bot.execution.paper import (
     Orderbook,
     PaperTrade,
@@ -38,6 +54,7 @@ from bot.risk.gates import CAP_GATE_NAMES, GateContext, GateMode, evaluate as ev
 from bot.storage.positions import open_exposures
 from bot.storage.sqlite import (
     Base,
+    DemoOrder as DemoOrderRow,
     Forecast,
     GateFailure,
     Market,
@@ -95,6 +112,7 @@ def aggregate_exposure_cap(app: "App | None" = None) -> Decimal:
 
 MARKET_REFRESH_INTERVAL = 60.0
 EVAL_INTERVAL = 60.0
+RECONCILE_INTERVAL_SECONDS: float = 30.0
 SETTLEMENT_INTERVAL_SECONDS: float = 6 * 3600
 _SETTLEMENT_GRACE_DAYS: int = 1
 GFS_CYCLES_HOURS: tuple[int, ...] = (0, 6, 12, 18)
@@ -431,133 +449,234 @@ async def refresh_markets(app: App) -> int:
     return total
 
 
+def _gate_mode_for_settings(settings: Settings) -> GateMode:
+    if settings.mode == "demo":
+        return GateMode.DEMO
+    if settings.mode == "paper":
+        return GateMode.PAPER
+    return GateMode.PAPER
+
+
+async def _snapshot_markets_atomically(
+    app: App,
+) -> tuple[tuple[tuple[str, KalshiMarket], ...], dict[str, KalshiOrderbook]]:
+    async with app.db_lock:
+        return tuple(app.latest_markets.items()), dict(app.latest_orderbooks)
+
+
 async def evaluate_strategies(app: App, now: datetime) -> int:
     n_trades = 0
     stale_skips_by_series: dict[str, int] = defaultdict(int)
     intents_seen_by_series: dict[str, int] = defaultdict(int)
+
+    markets_snapshot, orderbooks_snapshot = await _snapshot_markets_atomically(app)
+
+    with app.session_factory() as session:
+        by_market, by_event, by_series, cycle_aggregate_exposure = open_exposures(session, now=now)
+    # type(x)(x) preserves any dict subclass passed in (canary in tests/test_main.py); dict(x)/copy/{**x} would coerce to plain dict.
+    overlay_market = type(by_market)(by_market)
+    overlay_event = type(by_event)(by_event)
+    overlay_series = type(by_series)(by_series)
+
+    gate_mode = _gate_mode_for_settings(app.settings)
+    gate_failures: list[GateFailure] = []
+    paper_rows: list[PaperTradeRow] = []
+    demo_rows: list[dict[str, object]] = []
+    pending_intents: list[tuple[TradeIntent, KalshiOrderbook, datetime]] = []
+
+    for ticker, market in markets_snapshot:
+        book = orderbooks_snapshot.get(ticker)
+        if book is None:
+            continue
+        try:
+            parsed = parse_ticker(ticker)
+        except ValueError as err:
+            logger.warning("eval_unparseable_ticker ticker=%s err=%s", ticker, err)
+            continue
+
+        cfg = STATIONS.get(parsed.series)
+        if cfg is None:
+            logger.warning("eval_unknown_series ticker=%s series=%s", ticker, parsed.series)
+            continue
+
+        cdf_key = (cfg.station, parsed.event_date)
+        cdf = app.forecast_cdfs.get(cdf_key)
+        if cdf is None:
+            continue
+        spread = app.ensemble_spreads[cdf_key]
+        run_time = app.forecast_run_times[cdf_key]
+
+        if parsed.kind == "bracket":
+            lo = float(parsed.strikes[0])
+            hi = float(parsed.strikes[1])
+            fair_yes = Decimal(str(cdf.prob_range(lo, hi)))
+        elif parsed.kind == "above":
+            fair_yes = Decimal(str(1.0 - cdf.cdf(float(parsed.strikes[0]))))
+        else:
+            fair_yes = Decimal(str(cdf.cdf(float(parsed.strikes[0]))))
+
+        start_utc, end_utc = observation_window(cfg.timezone, parsed.event_date)
+        is_same_day = start_utc <= now < end_utc
+
+        mid = (book.yes_ask + book.yes_bid) / Decimal("2")
+        is_blacklisted = parsed.series in STRATEGY_BLACKLIST
+
+        event_key = market.event_ticker
+        series_key = parsed.series
+
+        for intent in _build_intents(
+            app=app,
+            ticker=ticker,
+            market=market,
+            book=book,
+            fair_yes=fair_yes,
+            spread=spread,
+            mid=mid,
+            is_same_day=is_same_day,
+            is_blacklisted=is_blacklisted,
+            is_tail=parsed.is_tail,
+            mode=app.settings.mode,
+            now=now,
+        ):
+            intents_seen_by_series[series_key] += 1
+            cost_per_contract = cost_per_contract_from_book(intent.side, book)
+
+            gate_ctx = _gate_ctx_for(
+                intent=intent,
+                market=market,
+                fair_yes=fair_yes,
+                spread=spread,
+                mid=mid,
+                run_time=run_time,
+                now=now,
+                book=book,
+                market_existing_dollars=overlay_market.get(ticker, Decimal("0")),
+                event_existing_dollars=overlay_event.get(event_key, Decimal("0")),
+                series_existing_dollars=overlay_series.get(series_key, Decimal("0")),
+                aggregate_existing_dollars=cycle_aggregate_exposure,
+            )
+            check = evaluate_gates(gate_ctx, gate_mode)
+            for failure in check.failures:
+                gate_failures.append(
+                    GateFailure(
+                        evaluated_at=now,
+                        gate_name=failure.name,
+                        reason=failure.reason or "",
+                        mode=gate_mode.value,
+                        market_ticker=ticker,
+                    )
+                )
+            if any(f.name in CAP_GATE_NAMES for f in check.failures):
+                continue
+            if not check.overall_passed:
+                continue
+
+            if app.settings.mode == "paper":
+                trade = simulate_taker_fill(
+                    intent,
+                    Orderbook(
+                        yes_ask=book.yes_ask,
+                        yes_bid=book.yes_bid,
+                        yes_ask_depth=book.yes_ask_depth,
+                        yes_bid_depth=book.yes_bid_depth,
+                        snapshot_at=book.snapshot_at,
+                    ),
+                    now,
+                )
+                if trade is None:
+                    stale_skips_by_series[series_key] += 1
+                    continue
+                paper_rows.append(_paper_trade_row(trade))
+                delta = cost_per_contract * Decimal(trade.contracts)
+            else:
+                if ticker not in app.latest_markets:
+                    continue
+                now_pre_post: datetime = now
+                pending_intents.append((intent, book, now_pre_post))
+                delta = cost_per_contract * Decimal(intent.contracts)
+
+            overlay_market[ticker] = overlay_market.get(ticker, Decimal("0")) + delta
+            overlay_event[event_key] = overlay_event.get(event_key, Decimal("0")) + delta
+            overlay_series[series_key] = overlay_series.get(series_key, Decimal("0")) + delta
+            cycle_aggregate_exposure = cycle_aggregate_exposure + delta
+            n_trades += 1
+
+    async def _place(
+        triple: tuple[TradeIntent, KalshiOrderbook, datetime],
+    ) -> tuple[TradeIntent, DemoOrder, datetime] | None:
+        intent, book, now_pre_post = triple
+        order = await place_order_demo(intent, book, app.kalshi, now=now_pre_post)
+        return None if order is None else (intent, order, now_pre_post)
+
+    for intent, order, now_pre_post in await place_orders_resilient(pending_intents, _place):
+        demo_rows.append(_demo_order_values(order, intent, now_pre_post))
+        row = paper_trade_row_from_demo_order(order, intent, intended_at=now_pre_post)
+        if row is not None:
+            paper_rows.append(row)
+
     async with app.db_lock:
         with app.session_factory() as session:
-            by_market, by_event, by_series, cycle_aggregate_exposure = open_exposures(
-                session, now=now
-            )
-            # type(x)(x) preserves any dict subclass passed in (canary in tests/test_main.py); dict(x)/copy/{**x} would coerce to plain dict.
-            overlay_market = type(by_market)(by_market)
-            overlay_event = type(by_event)(by_event)
-            overlay_series = type(by_series)(by_series)
-            for ticker, market in app.latest_markets.items():
-                book = app.latest_orderbooks.get(ticker)
-                if book is None:
-                    continue
-                try:
-                    parsed = parse_ticker(ticker)
-                except ValueError as err:
-                    logger.warning("eval_unparseable_ticker ticker=%s err=%s", ticker, err)
-                    continue
-
-                cfg = STATIONS.get(parsed.series)
-                if cfg is None:
-                    logger.warning("eval_unknown_series ticker=%s series=%s", ticker, parsed.series)
-                    continue
-
-                cdf_key = (cfg.station, parsed.event_date)
-                cdf = app.forecast_cdfs.get(cdf_key)
-                if cdf is None:
-                    continue
-                spread = app.ensemble_spreads[cdf_key]
-                run_time = app.forecast_run_times[cdf_key]
-
-                if parsed.kind == "bracket":
-                    lo = float(parsed.strikes[0])
-                    hi = float(parsed.strikes[1])
-                    fair_yes = Decimal(str(cdf.prob_range(lo, hi)))
-                elif parsed.kind == "above":
-                    fair_yes = Decimal(str(1.0 - cdf.cdf(float(parsed.strikes[0]))))
+            for failure_row in gate_failures:
+                session.add(failure_row)
+            for paper_row in paper_rows:
+                if paper_row.demo_order_client_id is None:
+                    session.add(paper_row)
                 else:
-                    fair_yes = Decimal(str(cdf.cdf(float(parsed.strikes[0]))))
-
-                start_utc, end_utc = observation_window(cfg.timezone, parsed.event_date)
-                is_same_day = start_utc <= now < end_utc
-
-                mid = (book.yes_ask + book.yes_bid) / Decimal("2")
-                is_blacklisted = parsed.series in STRATEGY_BLACKLIST
-
-                event_key = market.event_ticker
-                series_key = parsed.series
-
-                for intent in _build_intents(
-                    ticker=ticker,
-                    market=market,
-                    book=book,
-                    fair_yes=fair_yes,
-                    spread=spread,
-                    mid=mid,
-                    is_same_day=is_same_day,
-                    is_blacklisted=is_blacklisted,
-                    is_tail=parsed.is_tail,
-                    now=now,
-                ):
-                    intents_seen_by_series[series_key] += 1
-                    cost_per_contract = cost_per_contract_from_book(intent.side, book)
-
-                    gate_ctx = _gate_ctx_for(
-                        intent=intent,
-                        market=market,
-                        fair_yes=fair_yes,
-                        spread=spread,
-                        mid=mid,
-                        run_time=run_time,
-                        now=now,
-                        book=book,
-                        market_existing_dollars=overlay_market.get(ticker, Decimal("0")),
-                        event_existing_dollars=overlay_event.get(event_key, Decimal("0")),
-                        series_existing_dollars=overlay_series.get(series_key, Decimal("0")),
-                        aggregate_existing_dollars=cycle_aggregate_exposure,
+                    session.execute(
+                        sqlite_insert(PaperTradeRow)
+                        .values(**paper_trade_row_values(paper_row))
+                        .on_conflict_do_nothing(index_elements=["demo_order_client_id"])
                     )
-                    check = evaluate_gates(gate_ctx, GateMode.PAPER)
-                    for failure in check.failures:
-                        session.add(
-                            GateFailure(
-                                evaluated_at=now,
-                                gate_name=failure.name,
-                                reason=failure.reason or "",
-                                mode="paper",
-                                market_ticker=ticker,
+            for values in demo_rows:
+                try:
+                    with session.begin_nested():
+                        eid = values.get("exchange_order_id")
+                        stitched = False
+                        if eid is not None:
+                            existing = session.execute(
+                                select(DemoOrderRow).where(DemoOrderRow.exchange_order_id == eid)
+                            ).scalar_one_or_none()
+                            if existing is not None:
+                                stitch_natural_key_order(
+                                    session,
+                                    exchange_order_id=eid,  # type: ignore[arg-type]
+                                    client_order_id=values["client_order_id"],  # type: ignore[arg-type]
+                                    strategy=values["strategy"],  # type: ignore[arg-type]
+                                    side=values["side"],  # type: ignore[arg-type]
+                                    fair_at_entry=values["fair_at_entry"],  # type: ignore[arg-type]
+                                    intended_at=values["intended_at"],  # type: ignore[arg-type]
+                                    requested_yes_price_dollars=values[  # type: ignore[arg-type]
+                                        "requested_yes_price_dollars"
+                                    ],
+                                )
+                                stitched = True
+                        if not stitched:
+                            session.execute(
+                                sqlite_insert(DemoOrderRow)
+                                .values(**values)
+                                .on_conflict_do_update(
+                                    index_elements=["client_order_id"],
+                                    set_={
+                                        "strategy": values["strategy"],
+                                        "side": values["side"],
+                                        "fair_at_entry": values["fair_at_entry"],
+                                        "intended_at": values["intended_at"],
+                                        "requested_yes_price_dollars": values[
+                                            "requested_yes_price_dollars"
+                                        ],
+                                    },
+                                )
                             )
-                        )
-                    if any(f.name in CAP_GATE_NAMES for f in check.failures):
-                        continue
-                    if not check.overall_passed:
-                        continue
-
-                    trade = simulate_taker_fill(
-                        intent,
-                        Orderbook(
-                            yes_ask=book.yes_ask,
-                            yes_bid=book.yes_bid,
-                            yes_ask_depth=book.yes_ask_depth,
-                            yes_bid_depth=book.yes_bid_depth,
-                            snapshot_at=book.snapshot_at,
-                        ),
-                        now,
-                    )
-                    if trade is None:
-                        stale_skips_by_series[series_key] += 1
-                        continue
-                    session.add(_paper_trade_row(trade))
-                    delta = cost_per_contract * Decimal(trade.contracts)
-                    overlay_market[ticker] = overlay_market.get(ticker, Decimal("0")) + delta
-                    overlay_event[event_key] = overlay_event.get(event_key, Decimal("0")) + delta
-                    overlay_series[series_key] = (
-                        overlay_series.get(series_key, Decimal("0")) + delta
-                    )
-                    cycle_aggregate_exposure = cycle_aggregate_exposure + delta
-                    n_trades += 1
+                except (ValueError, SQLAlchemyError) as err:
+                    logger.error("demo_row_stitch_corrupted err=%s values=%r", err, values)
+                    continue
             session.commit()
+
     log_stale_skip_ratio(stale_skips_by_series, intents_seen_by_series)
     logger.info(
         "evaluate_strategies trades=%d markets=%d stale_skips=%d intents=%d",
         n_trades,
-        len(app.latest_markets),
+        len(markets_snapshot),
         sum(stale_skips_by_series.values()),
         sum(intents_seen_by_series.values()),
     )
@@ -575,6 +694,7 @@ def _compute_lead_time_hours(market: KalshiMarket, now: datetime) -> Decimal | N
 
 def _build_intents(
     *,
+    app: App,
     ticker: str,
     market: KalshiMarket,
     book: KalshiOrderbook,
@@ -584,10 +704,14 @@ def _build_intents(
     is_same_day: bool,
     is_blacklisted: bool,
     is_tail: bool,
+    mode: str,
     now: datetime,
 ) -> list[TradeIntent]:
     intents: list[TradeIntent] = []
     lead_time_hours = _compute_lead_time_hours(market, now)
+    is_demo = mode == "demo"
+    ctx_bankroll = bankroll(app) if is_demo else bankroll()
+    no_cost_per_contract = book.no_ask if is_demo else None
 
     if not is_tail:
         edge_ctx = edge_strategy.EdgeContext(
@@ -595,12 +719,13 @@ def _build_intents(
             yes_bid=book.yes_bid,
             fair_yes=fair_yes,
             ensemble_spread=spread,
-            bankroll=bankroll(),
+            bankroll=ctx_bankroll,
             is_same_day=is_same_day,
             is_blacklisted=is_blacklisted,
             nbm_divergence=None,
+            no_cost_per_contract=no_cost_per_contract,
         )
-        edge_sig = edge_strategy.evaluate(edge_ctx)
+        edge_sig = edge_strategy.evaluate(edge_ctx, mode=mode)
         if edge_sig.action is edge_strategy.EdgeAction.BUY_YES:
             intents.append(
                 TradeIntent(
@@ -636,10 +761,24 @@ def _build_intents(
             fair_yes=fair_yes,
             close_time=market.close_time,
             now=now,
-            bankroll=bankroll(),
+            bankroll=ctx_bankroll,
             is_same_day=is_same_day,
+            no_cost_per_contract=no_cost_per_contract,
         )
-        tails_sig = tails_strategy.evaluate(tails_ctx)
+        if is_demo:
+            wired_no_cost = Decimal("1") - book.yes_bid
+            if wired_no_cost > Decimal("0"):
+                cap = market_position_cap(app)
+                tails_sig = tails_strategy.evaluate(
+                    tails_ctx,
+                    mode=mode,
+                    position_cap=cap,
+                    contracts_cap=int(cap / wired_no_cost),
+                )
+            else:
+                tails_sig = tails_strategy.evaluate(tails_ctx, mode=mode)
+        else:
+            tails_sig = tails_strategy.evaluate(tails_ctx, mode=mode)
         if tails_sig.action is tails_strategy.TailsAction.SELL_YES:
             intents.append(
                 TradeIntent(
@@ -757,6 +896,29 @@ async def _eval_loop(app: App, stop: asyncio.Event) -> None:
             logger.exception("loop_iteration_failed name=eval_loop")
         try:
             await asyncio.wait_for(stop.wait(), timeout=EVAL_INTERVAL)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def _order_reconcile_loop(app: App, stop: asyncio.Event) -> None:
+    watermark = datetime.now(tz=_timezone.utc) - timedelta(hours=1)
+    while not stop.is_set():
+        if app.settings.mode == "demo":
+            try:
+                now = datetime.now(tz=_timezone.utc)
+                fills = await poll_fills(app.kalshi, watermark)
+                open_orders = await poll_open_orders(app.kalshi, watermark)
+                async with app.db_lock:
+                    with app.session_factory() as session:
+                        for record in open_orders:
+                            upsert_exchange_record(session, record)
+                        reconcile_fills_into_demo_orders(session, fills, open_orders)
+                        session.commit()
+                watermark = now
+            except Exception:
+                logger.exception("loop_iteration_failed name=order_reconcile_loop")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=RECONCILE_INTERVAL_SECONDS)
         except asyncio.TimeoutError:
             pass
 
@@ -937,6 +1099,7 @@ async def run(app: App, duration: timedelta) -> None:
         asyncio.create_task(_market_loop(app, stop), name="market_loop"),
         asyncio.create_task(_eval_loop(app, stop), name="eval_loop"),
         asyncio.create_task(_settlement_loop(app, stop), name="settlement_loop"),
+        asyncio.create_task(_order_reconcile_loop(app, stop), name="order_reconcile_loop"),
     ]
 
     try:
@@ -990,7 +1153,7 @@ def _parse_series_arg(raw: str) -> tuple[str, ...]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bot.main")
-    parser.add_argument("--mode", choices=["paper"], default="paper")
+    parser.add_argument("--mode", choices=["paper", "demo"], default=None)
     parser.add_argument("--series", default="all")
     parser.add_argument("--duration", default="24h")
     args = parser.parse_args()
@@ -999,6 +1162,8 @@ def main() -> None:
     duration = _parse_duration(args.duration)
 
     settings = get_settings()
+    if args.mode is not None and args.mode != settings.mode:
+        settings = Settings.model_validate({**settings.model_dump(), "mode": args.mode})
     logging.basicConfig(
         level=settings.log_level,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
@@ -1023,6 +1188,27 @@ def main() -> None:
 
     async def _go() -> None:
         await app.kalshi.aopen()
+        if app.settings.mode == "demo":
+            balance = await app.kalshi.get_balance()
+            logger.info("demo_account_balance balance_dollars=%s", balance)
+            if balance <= Decimal("0"):
+                raise RuntimeError("demo account has no balance; fund via demo UI before MODE=demo")
+            app.bankroll = balance
+            watermark = datetime.now(tz=_timezone.utc) - timedelta(hours=1)
+            open_orders = await poll_open_orders(app.kalshi, watermark)
+            fills = await poll_fills(app.kalshi, watermark)
+            logger.info(
+                "demo_startup_backfill watermark=%s open_orders=%d fills=%d",
+                watermark.isoformat(),
+                len(open_orders),
+                len(fills),
+            )
+            async with app.db_lock:
+                with app.session_factory() as session:
+                    for record in open_orders:
+                        upsert_exchange_record(session, record)
+                    reconcile_fills_into_demo_orders(session, fills, open_orders)
+                    session.commit()
         try:
             await run(app, duration)
         finally:

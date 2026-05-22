@@ -79,3 +79,25 @@ def paper_trade_row_values(row: PaperTradeRow) -> dict[str, object]:
         for column in PaperTradeRow.__table__.columns
         if column.name not in _EXCLUDED_FROM_VALUES
     }
+
+
+def _demo_order_values(
+    order: DemoOrder, intent: TradeIntent, now_pre_post: datetime
+) -> dict[str, object]:
+    return {
+        "client_order_id": order.client_order_id,
+        "exchange_order_id": order.exchange_order_id or None,
+        "market_ticker": order.ticker,
+        "strategy": intent.strategy,
+        "side": order.side_kalshi,
+        "requested_contracts": order.requested_contracts,
+        "filled_contracts": order.filled_contracts,
+        "requested_yes_price_dollars": order.requested_yes_price_dollars,
+        "fair_at_entry": intent.fair_yes,
+        "intended_at": now_pre_post,
+        "avg_fill_price": order.avg_yes_fill_price_dollars,
+        "fee_dollars": order.fee_dollars,
+        "status": order.status,
+        "placed_at": order.placed_at,
+        "last_status_at": order.placed_at,
+    }
