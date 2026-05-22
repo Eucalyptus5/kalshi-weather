@@ -20,6 +20,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from bot.config import Settings, get_settings
+from bot.execution.gate_cost_basis import cost_per_contract_from_book
 from bot.execution.paper import (
     Orderbook,
     PaperTrade,
@@ -496,10 +497,7 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                     now=now,
                 ):
                     intents_seen_by_series[series_key] += 1
-                    if intent.side is TradeSide.BUY_YES:
-                        cost_per_contract = book.yes_ask
-                    else:
-                        cost_per_contract = Decimal("1") - book.yes_bid
+                    cost_per_contract = cost_per_contract_from_book(intent.side, book)
 
                     gate_ctx = _gate_ctx_for(
                         intent=intent,
@@ -509,7 +507,7 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                         mid=mid,
                         run_time=run_time,
                         now=now,
-                        cost_per_contract=cost_per_contract,
+                        book=book,
                         market_existing_dollars=overlay_market.get(ticker, Decimal("0")),
                         event_existing_dollars=overlay_event.get(event_key, Decimal("0")),
                         series_existing_dollars=overlay_series.get(series_key, Decimal("0")),
@@ -668,7 +666,7 @@ def _gate_ctx_for(
     mid: Decimal,
     run_time: datetime,
     now: datetime,
-    cost_per_contract: Decimal,
+    book: KalshiOrderbook,
     market_existing_dollars: Decimal,
     event_existing_dollars: Decimal,
     series_existing_dollars: Decimal,
@@ -678,6 +676,7 @@ def _gate_ctx_for(
         edge_dollars = fair_yes - mid
     else:
         edge_dollars = mid - fair_yes
+    cost_per_contract = cost_per_contract_from_book(intent.side, book)
     order_dollars = cost_per_contract * Decimal(intent.contracts)
     minutes_to_close = 99999
     if market.close_time is not None:

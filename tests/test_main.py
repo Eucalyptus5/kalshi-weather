@@ -19,6 +19,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from sqlalchemy import select
 
 import bot.main as bot_main
+from bot.execution.gate_cost_basis import cost_per_contract_from_book
 from bot.execution.paper import PaperTrade, TradeIntent, TradeSide
 from bot.forecast.cdf import EnsembleCDF
 from bot.forecast.open_meteo import StationForecast
@@ -2290,64 +2291,113 @@ async def test_evaluate_strategies_overlay_strip_regression_canary(
     assert len(trades) == 2
 
 
-def test_gate_ctx_cost_per_contract_pins_to_orderbook_under_price_drift() -> None:
-    market = _market_from(
-        "KXHIGHDEN-26MAY08-T70-75",
-        "0.50",
-        "0.48",
-        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
-    )
-    intent_buy = TradeIntent(
-        market_ticker=market.ticker,
-        side=TradeSide.BUY_YES,
-        contracts=10,
-        fair_yes=Decimal("0.50"),
-        strategy="edge",
-    )
-    ctx = _gate_ctx_for(
-        intent=intent_buy,
+def _gate_ctx_kwargs(intent: TradeIntent, market: KalshiMarket, book: KalshiOrderbook) -> dict:
+    return dict(
+        intent=intent,
         market=market,
         fair_yes=Decimal("0.50"),
         spread=Decimal("3.0"),
         mid=Decimal("0.49"),
         run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
         now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
-        cost_per_contract=Decimal("0.40"),
+        book=book,
         market_existing_dollars=Decimal("0"),
         event_existing_dollars=Decimal("0"),
         series_existing_dollars=Decimal("0"),
         aggregate_existing_dollars=Decimal("0"),
     )
-    assert ctx.order_size_dollars == Decimal("4.00")
 
-    market_sell = _market_from(
+
+def test_gate_ctx_for_sell_yes_uses_book_no_ask_on_wide_book() -> None:
+    market = _market_from(
         "KXHIGHDEN-26MAY08-T70-75",
         "0.50",
-        "0.48",
+        "0.20",
         datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
     )
-    intent_sell = TradeIntent(
-        market_ticker=market_sell.ticker,
+    book = _book_from(market.ticker, "0.50", "0.20")
+    assert book.no_ask == Decimal("0.80")
+    intent = TradeIntent(
+        market_ticker=market.ticker,
         side=TradeSide.SELL_YES,
         contracts=10,
         fair_yes=Decimal("0.50"),
         strategy="edge",
     )
-    ctx_sell = _gate_ctx_for(
-        intent=intent_sell,
-        market=market_sell,
-        fair_yes=Decimal("0.50"),
-        spread=Decimal("3.0"),
-        mid=Decimal("0.49"),
-        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
-        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
-        cost_per_contract=Decimal("1") - Decimal("0.30"),
-        market_existing_dollars=Decimal("0"),
-        event_existing_dollars=Decimal("0"),
-        series_existing_dollars=Decimal("0"),
-        aggregate_existing_dollars=Decimal("0"),
+    ctx = _gate_ctx_for(**_gate_ctx_kwargs(intent, market, book))
+    assert ctx.order_size_dollars == Decimal("0.80") * Decimal(10)
+
+
+def test_gate_ctx_for_sell_yes_book_no_ask_diverges_from_market_complement_when_snapshots_lag() -> (
+    None
+):
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.50",
+        "0.25",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
     )
-    assert ctx_sell.order_size_dollars == Decimal("7.0")
+    book = _book_from(market.ticker, "0.50", "0.20")
+    assert cost_per_contract_from_book(TradeSide.SELL_YES, book) == Decimal("0.80")
+    assert Decimal("1") - market.yes_bid == Decimal("0.75")
+    intent = TradeIntent(
+        market_ticker=market.ticker,
+        side=TradeSide.SELL_YES,
+        contracts=10,
+        fair_yes=Decimal("0.50"),
+        strategy="edge",
+    )
+    ctx = _gate_ctx_for(**_gate_ctx_kwargs(intent, market, book))
+    assert ctx.order_size_dollars == Decimal("0.80") * Decimal(10)
+
+
+def test_gate_ctx_for_buy_yes_uses_book_yes_ask() -> None:
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.40",
+        "0.20",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.40", "0.20")
+    intent = TradeIntent(
+        market_ticker=market.ticker,
+        side=TradeSide.BUY_YES,
+        contracts=10,
+        fair_yes=Decimal("0.50"),
+        strategy="edge",
+    )
+    ctx = _gate_ctx_for(**_gate_ctx_kwargs(intent, market, book))
+    assert ctx.order_size_dollars == Decimal("0.40") * Decimal(10)
+
+
+def test_gate_ctx_for_requires_book_kwarg() -> None:
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.40",
+        "0.20",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    intent = TradeIntent(
+        market_ticker=market.ticker,
+        side=TradeSide.BUY_YES,
+        contracts=10,
+        fair_yes=Decimal("0.50"),
+        strategy="edge",
+    )
+    with pytest.raises(TypeError):
+        _gate_ctx_for(
+            intent=intent,
+            market=market,
+            fair_yes=Decimal("0.50"),
+            spread=Decimal("3.0"),
+            mid=Decimal("0.49"),
+            run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+            now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+            market_existing_dollars=Decimal("0"),
+            event_existing_dollars=Decimal("0"),
+            series_existing_dollars=Decimal("0"),
+            aggregate_existing_dollars=Decimal("0"),
+        )
 
 
 async def test_evaluate_strategies_partial_fill_on_thin_book(monkeypatch) -> None:
@@ -3451,7 +3501,7 @@ async def test_bankroll_accessor_drives_all_downstream_reads(
         mid=Decimal("0.19"),
         run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
         now=now,
-        cost_per_contract=Decimal("0.20"),
+        book=bracket_book,
         market_existing_dollars=Decimal("0"),
         event_existing_dollars=Decimal("0"),
         series_existing_dollars=Decimal("0"),

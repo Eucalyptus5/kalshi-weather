@@ -43,6 +43,7 @@ def test_sell_yes_happy_path() -> None:
             yes_ask=Decimal("0.32"),
             yes_bid=Decimal("0.30"),
             fair_yes=Decimal("0.20"),
+            no_cost_per_contract=None,
         )
     )
     assert sig.action is EdgeAction.SELL_YES
@@ -208,3 +209,63 @@ def test_signal_is_frozen_dataclass() -> None:
     sig = evaluate(_ctx())
     with pytest.raises(Exception):
         sig.contracts = 99  # type: ignore[misc]
+
+
+def test_edge_sell_yes_paper_mode_no_cost_per_contract_absent_matches_legacy_denominator() -> None:
+    ctx = _ctx(
+        yes_ask=Decimal("0.22"),
+        yes_bid=Decimal("0.20"),
+        fair_yes=Decimal("0.05"),
+        no_cost_per_contract=None,
+    )
+    sig = evaluate(ctx)
+    assert sig.action is EdgeAction.SELL_YES
+    legacy_cost = Decimal("1") - Decimal("0.20")
+    assert sig.contracts == 140
+    assert sig.notional_dollars == legacy_cost * Decimal(sig.contracts)
+    assert sig.notional_dollars == Decimal("112.00")
+
+
+def test_edge_sell_yes_demo_mode_no_cost_per_contract_present_uses_no_ask() -> None:
+    paper = evaluate(
+        _ctx(
+            yes_ask=Decimal("0.22"),
+            yes_bid=Decimal("0.20"),
+            fair_yes=Decimal("0.05"),
+            no_cost_per_contract=None,
+        )
+    )
+    demo = evaluate(
+        _ctx(
+            yes_ask=Decimal("0.22"),
+            yes_bid=Decimal("0.20"),
+            fair_yes=Decimal("0.05"),
+            no_cost_per_contract=Decimal("0.40"),
+        )
+    )
+    assert demo.action is EdgeAction.SELL_YES
+    assert demo.notional_dollars == Decimal("0.40") * Decimal(demo.contracts)
+    assert demo.contracts == 281
+    assert demo.contracts == 2 * paper.contracts + 1
+
+
+def test_edge_buy_yes_unaffected_by_no_cost_per_contract_field() -> None:
+    without = evaluate(_ctx(no_cost_per_contract=None))
+    with_field = evaluate(_ctx(no_cost_per_contract=Decimal("0.40")))
+    assert without.action is EdgeAction.BUY_YES
+    assert with_field.action is EdgeAction.BUY_YES
+    assert with_field.contracts == without.contracts
+    assert with_field.notional_dollars == without.notional_dollars
+
+
+def test_edge_demo_mode_without_cost_basis_raises() -> None:
+    with pytest.raises(RuntimeError) as excinfo:
+        evaluate(_ctx(no_cost_per_contract=None), mode="demo")
+    assert str(excinfo.value) == (
+        "demo mode requires book-derived cost basis; _build_intents failed to thread book.no_ask"
+    )
+
+
+def test_edge_paper_mode_without_cost_basis_accepted() -> None:
+    sig = evaluate(_ctx(no_cost_per_contract=None), mode="paper")
+    assert sig.action is EdgeAction.BUY_YES

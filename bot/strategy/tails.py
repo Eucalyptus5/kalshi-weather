@@ -21,6 +21,7 @@ class TailsContext:
     now: datetime
     bankroll: Decimal
     is_same_day: bool
+    no_cost_per_contract: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,9 +53,16 @@ def _skip(reason: str) -> TailsSignal:
 def evaluate(
     ctx: TailsContext,
     *,
+    mode: str = "paper",
     kelly_fraction: Decimal = DEFAULT_KELLY_FRACTION,
     position_cap: Decimal = DEFAULT_POSITION_CAP,
+    contracts_cap: int | None = None,
 ) -> TailsSignal:
+    if mode == "demo" and ctx.no_cost_per_contract is None:
+        raise RuntimeError(
+            "demo mode requires book-derived cost basis; "
+            "_build_intents failed to thread book.no_ask"
+        )
     if ctx.yes_ask <= ASK_THRESHOLD:
         return _skip("ask_too_low")
     if ctx.no_bid <= Decimal("0"):
@@ -76,15 +84,23 @@ def evaluate(
     if edge <= Decimal("0"):
         return _skip("negative_edge")
 
-    edge_ratio = edge / (Decimal("1") - ctx.no_bid)
+    cost_per_contract = (
+        ctx.no_cost_per_contract if ctx.no_cost_per_contract is not None else ctx.no_bid
+    )
+    if cost_per_contract == Decimal("1"):
+        return _skip("cost_basis_unusable")
+
+    edge_ratio = edge / (Decimal("1") - cost_per_contract)
     notional_target = kelly_fraction * ctx.bankroll * edge_ratio
     notional = min(notional_target, position_cap)
 
-    contracts = int(notional / ctx.no_bid)
+    contracts = int(notional / cost_per_contract)
+    if contracts_cap is not None:
+        contracts = min(contracts, contracts_cap)
     if contracts < 1:
         return _skip("below_min_size")
 
-    actual_notional = ctx.no_bid * Decimal(contracts)
+    actual_notional = cost_per_contract * Decimal(contracts)
     return TailsSignal(
         action=TailsAction.SELL_YES,
         contracts=contracts,

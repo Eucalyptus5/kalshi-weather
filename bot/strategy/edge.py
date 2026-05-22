@@ -21,6 +21,7 @@ class EdgeContext:
     is_same_day: bool
     is_blacklisted: bool
     nbm_divergence: Decimal | None
+    no_cost_per_contract: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,9 +51,15 @@ def _skip(reason: str) -> EdgeSignal:
 def evaluate(
     ctx: EdgeContext,
     *,
+    mode: str = "paper",
     min_spread: Decimal = DEFAULT_MIN_SPREAD,
     kelly_multiplier: Decimal = KELLY_MULTIPLIER,
 ) -> EdgeSignal:
+    if mode == "demo" and ctx.no_cost_per_contract is None:
+        raise RuntimeError(
+            "demo mode requires book-derived cost basis; "
+            "_build_intents failed to thread book.no_ask"
+        )
     mid = (ctx.yes_ask + ctx.yes_bid) / Decimal("2")
     if ctx.is_blacklisted:
         return _skip("blacklisted")
@@ -72,7 +79,11 @@ def evaluate(
         reason = "trade_buy"
     elif ctx.fair_yes < ctx.yes_bid - DIRECTION_CUSHION:
         action = EdgeAction.SELL_YES
-        cost_per_contract = Decimal("1") - ctx.yes_bid
+        cost_per_contract = (
+            ctx.no_cost_per_contract
+            if ctx.no_cost_per_contract is not None
+            else Decimal("1") - ctx.yes_bid
+        )
         kelly_fraction_full = (ctx.yes_bid - ctx.fair_yes) / ctx.yes_bid
         reason = "trade_sell"
     else:
