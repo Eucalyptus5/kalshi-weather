@@ -554,6 +554,7 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                 event_existing_dollars=overlay_event.get(event_key, Decimal("0")),
                 series_existing_dollars=overlay_series.get(series_key, Decimal("0")),
                 aggregate_existing_dollars=cycle_aggregate_exposure,
+                app=app,
             )
             check = evaluate_gates(gate_ctx, gate_mode)
             for failure in check.failures:
@@ -605,6 +606,8 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
         triple: tuple[TradeIntent, KalshiOrderbook, datetime],
     ) -> tuple[TradeIntent, DemoOrder, datetime] | None:
         intent, book, now_pre_post = triple
+        if intent.market_ticker not in app.latest_markets:
+            return None
         order = await place_order_demo(intent, book, app.kalshi, now=now_pre_post)
         return None if order is None else (intent, order, now_pre_post)
 
@@ -614,6 +617,31 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
         if row is not None:
             paper_rows.append(row)
 
+    await _commit_phase2(
+        app,
+        gate_failures=gate_failures,
+        paper_rows=paper_rows,
+        demo_rows=demo_rows,
+    )
+
+    log_stale_skip_ratio(stale_skips_by_series, intents_seen_by_series)
+    logger.info(
+        "evaluate_strategies trades=%d markets=%d stale_skips=%d intents=%d",
+        n_trades,
+        len(markets_snapshot),
+        sum(stale_skips_by_series.values()),
+        sum(intents_seen_by_series.values()),
+    )
+    return n_trades
+
+
+async def _commit_phase2(
+    app: App,
+    *,
+    gate_failures: list[GateFailure],
+    paper_rows: list[PaperTradeRow],
+    demo_rows: list[dict[str, object]],
+) -> None:
     async with app.db_lock:
         with app.session_factory() as session:
             for failure_row in gate_failures:
@@ -671,16 +699,6 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                     logger.error("demo_row_stitch_corrupted err=%s values=%r", err, values)
                     continue
             session.commit()
-
-    log_stale_skip_ratio(stale_skips_by_series, intents_seen_by_series)
-    logger.info(
-        "evaluate_strategies trades=%d markets=%d stale_skips=%d intents=%d",
-        n_trades,
-        len(markets_snapshot),
-        sum(stale_skips_by_series.values()),
-        sum(intents_seen_by_series.values()),
-    )
-    return n_trades
 
 
 def _compute_lead_time_hours(market: KalshiMarket, now: datetime) -> Decimal | None:
@@ -810,6 +828,7 @@ def _gate_ctx_for(
     event_existing_dollars: Decimal,
     series_existing_dollars: Decimal,
     aggregate_existing_dollars: Decimal,
+    app: "App | None" = None,
 ) -> GateContext:
     if intent.side is TradeSide.BUY_YES:
         edge_dollars = fair_yes - mid
@@ -830,14 +849,14 @@ def _gate_ctx_for(
         edge=edge_dollars,
         order_size_dollars=order_dollars,
         market_existing_dollars=market_existing_dollars,
-        market_position_cap=MARKET_POSITION_CAP,
+        market_position_cap=market_position_cap(app),
         event_existing_dollars=event_existing_dollars,
-        event_position_cap=EVENT_POSITION_CAP,
+        event_position_cap=event_position_cap(app),
         series_existing_dollars=series_existing_dollars,
-        series_position_cap=SERIES_POSITION_CAP,
+        series_position_cap=series_position_cap(app),
         aggregate_existing_dollars=aggregate_existing_dollars,
-        aggregate_exposure_cap=AGGREGATE_EXPOSURE_CAP,
-        account_balance=bankroll(),
+        aggregate_exposure_cap=aggregate_exposure_cap(app),
+        account_balance=bankroll(app),
         required_cushion=REQUIRED_CUSHION,
         market_status=market.status,
         minutes_to_close=minutes_to_close,
@@ -1151,6 +1170,29 @@ def _parse_series_arg(raw: str) -> tuple[str, ...]:
     return requested
 
 
+async def _demo_startup_backfill(app: App) -> None:
+    balance = await app.kalshi.get_balance()
+    logger.info("demo_account_balance balance_dollars=%s", balance)
+    if balance <= Decimal("0"):
+        raise RuntimeError("demo account has no balance; fund via demo UI before MODE=demo")
+    app.bankroll = balance
+    watermark = datetime.now(tz=_timezone.utc) - timedelta(hours=1)
+    open_orders = await poll_open_orders(app.kalshi, watermark)
+    fills = await poll_fills(app.kalshi, watermark)
+    logger.info(
+        "demo_startup_backfill watermark=%s open_orders=%d fills=%d",
+        watermark.isoformat(),
+        len(open_orders),
+        len(fills),
+    )
+    async with app.db_lock:
+        with app.session_factory() as session:
+            for record in open_orders:
+                upsert_exchange_record(session, record)
+            reconcile_fills_into_demo_orders(session, fills, open_orders)
+            session.commit()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="bot.main")
     parser.add_argument("--mode", choices=["paper", "demo"], default=None)
@@ -1189,26 +1231,7 @@ def main() -> None:
     async def _go() -> None:
         await app.kalshi.aopen()
         if app.settings.mode == "demo":
-            balance = await app.kalshi.get_balance()
-            logger.info("demo_account_balance balance_dollars=%s", balance)
-            if balance <= Decimal("0"):
-                raise RuntimeError("demo account has no balance; fund via demo UI before MODE=demo")
-            app.bankroll = balance
-            watermark = datetime.now(tz=_timezone.utc) - timedelta(hours=1)
-            open_orders = await poll_open_orders(app.kalshi, watermark)
-            fills = await poll_fills(app.kalshi, watermark)
-            logger.info(
-                "demo_startup_backfill watermark=%s open_orders=%d fills=%d",
-                watermark.isoformat(),
-                len(open_orders),
-                len(fills),
-            )
-            async with app.db_lock:
-                with app.session_factory() as session:
-                    for record in open_orders:
-                        upsert_exchange_record(session, record)
-                    reconcile_fills_into_demo_orders(session, fills, open_orders)
-                    session.commit()
+            await _demo_startup_backfill(app)
         try:
             await run(app, duration)
         finally:

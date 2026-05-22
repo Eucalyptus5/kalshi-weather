@@ -17,8 +17,6 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from sqlalchemy import select
-from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import SQLAlchemyError
 
 import bot.main as bot_main
 from bot.execution.gate_cost_basis import cost_per_contract_from_book
@@ -222,11 +220,16 @@ def _market_from(
     )
 
 
-def _lift_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+def _lift_caps(monkeypatch: pytest.MonkeyPatch, *, lift_market: bool = True) -> None:
     monkeypatch.setattr(bot_main, "MARKET_POSITION_CAP", Decimal("10000"))
     monkeypatch.setattr(bot_main, "EVENT_POSITION_CAP", Decimal("10000"))
     monkeypatch.setattr(bot_main, "SERIES_POSITION_CAP", Decimal("10000"))
     monkeypatch.setattr(bot_main, "AGGREGATE_EXPOSURE_CAP", Decimal("100000"))
+    if lift_market:
+        monkeypatch.setattr(bot_main, "market_position_cap", lambda app=None: Decimal("10000"))
+    monkeypatch.setattr(bot_main, "event_position_cap", lambda app=None: Decimal("10000"))
+    monkeypatch.setattr(bot_main, "series_position_cap", lambda app=None: Decimal("10000"))
+    monkeypatch.setattr(bot_main, "aggregate_exposure_cap", lambda app=None: Decimal("100000"))
 
 
 def _lift_per_key_caps_keep_aggregate(
@@ -236,6 +239,10 @@ def _lift_per_key_caps_keep_aggregate(
     monkeypatch.setattr(bot_main, "EVENT_POSITION_CAP", Decimal("100"))
     monkeypatch.setattr(bot_main, "SERIES_POSITION_CAP", Decimal("100"))
     monkeypatch.setattr(bot_main, "AGGREGATE_EXPOSURE_CAP", aggregate_cap)
+    monkeypatch.setattr(bot_main, "market_position_cap", lambda app=None: Decimal("100"))
+    monkeypatch.setattr(bot_main, "event_position_cap", lambda app=None: Decimal("100"))
+    monkeypatch.setattr(bot_main, "series_position_cap", lambda app=None: Decimal("100"))
+    monkeypatch.setattr(bot_main, "aggregate_exposure_cap", lambda app=None: aggregate_cap)
 
 
 _AGGREGATE_TEST_PRICES: tuple[tuple[Decimal, Decimal, Decimal], ...] = (
@@ -2056,10 +2063,10 @@ async def test_evaluate_strategies_caps_market_after_threshold(
     await refresh_forecasts(app)
     await refresh_markets(app)
 
-    monkeypatch.setattr(bot_main, "MARKET_POSITION_CAP", Decimal("40"))
-    monkeypatch.setattr(bot_main, "EVENT_POSITION_CAP", Decimal("10000"))
-    monkeypatch.setattr(bot_main, "SERIES_POSITION_CAP", Decimal("10000"))
-    monkeypatch.setattr(bot_main, "AGGREGATE_EXPOSURE_CAP", Decimal("100000"))
+    monkeypatch.setattr(bot_main, "market_position_cap", lambda app=None: Decimal("40"))
+    monkeypatch.setattr(bot_main, "event_position_cap", lambda app=None: Decimal("10000"))
+    monkeypatch.setattr(bot_main, "series_position_cap", lambda app=None: Decimal("10000"))
+    monkeypatch.setattr(bot_main, "aggregate_exposure_cap", lambda app=None: Decimal("100000"))
 
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     for _ in range(20):
@@ -2182,7 +2189,7 @@ async def test_evaluate_strategies_within_cycle_event_cap_blocks_second_bracket(
         ]
 
     monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
-    monkeypatch.setattr(bot_main, "EVENT_POSITION_CAP", Decimal("3"))
+    monkeypatch.setattr(bot_main, "event_position_cap", lambda app=None: Decimal("3"))
 
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     await evaluate_strategies(app, now)
@@ -2436,6 +2443,56 @@ def test_gate_ctx_for_requires_book_kwarg() -> None:
             series_existing_dollars=Decimal("0"),
             aggregate_existing_dollars=Decimal("0"),
         )
+
+
+def test_gate_ctx_for_caps_scale_with_demo_app_bankroll() -> None:
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.40",
+        "0.20",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.40", "0.20")
+    intent = TradeIntent(
+        market_ticker=market.ticker,
+        side=TradeSide.BUY_YES,
+        contracts=10,
+        fair_yes=Decimal("0.50"),
+        strategy="edge",
+    )
+    app = _make_demo_app(bankroll=Decimal("1000"))
+    ctx = _gate_ctx_for(**_gate_ctx_kwargs(intent, market, book), app=app)
+
+    assert ctx.market_position_cap == Decimal("1000") * bot_main.MARKET_POSITION_FRAC
+    assert ctx.event_position_cap == Decimal("1000") * bot_main.EVENT_POSITION_FRAC
+    assert ctx.series_position_cap == Decimal("1000") * bot_main.SERIES_POSITION_FRAC
+    assert ctx.aggregate_exposure_cap == Decimal("1000") * bot_main.AGGREGATE_EXPOSURE_FRAC
+    assert ctx.account_balance == Decimal("1000")
+
+
+def test_gate_ctx_for_caps_match_legacy_constants_without_app() -> None:
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.40",
+        "0.20",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.40", "0.20")
+    intent = TradeIntent(
+        market_ticker=market.ticker,
+        side=TradeSide.BUY_YES,
+        contracts=10,
+        fair_yes=Decimal("0.50"),
+        strategy="edge",
+    )
+    ctx = _gate_ctx_for(**_gate_ctx_kwargs(intent, market, book))
+
+    base = bot_main.PAPER_BANKROLL
+    assert ctx.market_position_cap == base * bot_main.MARKET_POSITION_FRAC
+    assert ctx.event_position_cap == base * bot_main.EVENT_POSITION_FRAC
+    assert ctx.series_position_cap == base * bot_main.SERIES_POSITION_FRAC
+    assert ctx.aggregate_exposure_cap == base * bot_main.AGGREGATE_EXPOSURE_FRAC
+    assert ctx.account_balance == base
 
 
 async def test_evaluate_strategies_partial_fill_on_thin_book(monkeypatch) -> None:
@@ -3537,8 +3594,7 @@ async def test_bankroll_accessor_drives_all_downstream_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sentinel = Decimal("777.77")
-    monkeypatch.setattr(bot_main, "bankroll", lambda: sentinel)
-    _lift_caps(monkeypatch)
+    monkeypatch.setattr(bot_main, "bankroll", lambda app=None: sentinel)
 
     edge_seen: list[Decimal] = []
     tails_seen: list[Decimal] = []
@@ -3617,6 +3673,10 @@ async def test_bankroll_accessor_drives_all_downstream_reads(
     assert all(v == sentinel for v in edge_seen)
     assert all(v == sentinel for v in tails_seen)
     assert direct_ctx.account_balance == sentinel
+    assert direct_ctx.market_position_cap == sentinel * bot_main.MARKET_POSITION_FRAC
+    assert direct_ctx.event_position_cap == sentinel * bot_main.EVENT_POSITION_FRAC
+    assert direct_ctx.series_position_cap == sentinel * bot_main.SERIES_POSITION_FRAC
+    assert direct_ctx.aggregate_exposure_cap == sentinel * bot_main.AGGREGATE_EXPOSURE_FRAC
 
 
 def test_caps_observed_at_runtime_follow_bankroll_accessor(
@@ -4371,71 +4431,56 @@ async def test_phase1_skips_post_if_ticker_evicted_before_placement(
     assert demo_orders == []
 
 
+async def test_phase1_skips_post_if_ticker_evicted_after_accumulation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
+    _lift_caps(monkeypatch)
+
+    posted: list[str] = []
+
+    async def fake_place(intent, book, client, *, now):
+        posted.append(intent.market_ticker)
+        return _demo_order(now=now)
+
+    real_drain = bot_main.place_orders_resilient
+
+    async def evicting_drain(items, placer):
+        assert list(items), "intent must reach the drain before eviction"
+        app.latest_markets.pop(market.ticker, None)
+        return await real_drain(items, placer)
+
+    monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
+    monkeypatch.setattr(bot_main, "place_orders_resilient", evicting_drain)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    assert market.ticker in app.latest_markets
+
+    await evaluate_strategies(app, now)
+
+    assert posted == []
+    with app.session_factory() as session:
+        demo_orders = session.scalars(select(DemoOrderRow)).all()
+    assert demo_orders == []
+
+
 def _phase2_drain_app() -> App:
     return _make_demo_app()
 
 
 async def _run_phase2(app: App, *, demo_rows=None, paper_rows=None, gate_failures=None):
-    demo_rows = demo_rows or []
-    paper_rows = paper_rows or []
-    gate_failures = gate_failures or []
-    async with app.db_lock:
-        with app.session_factory() as session:
-            for failure_row in gate_failures:
-                session.add(failure_row)
-            for paper_row in paper_rows:
-                if paper_row.demo_order_client_id is None:
-                    session.add(paper_row)
-                else:
-                    session.execute(
-                        sqlite_insert(PaperTradeRow)
-                        .values(**bot_main.paper_trade_row_values(paper_row))
-                        .on_conflict_do_nothing(index_elements=["demo_order_client_id"])
-                    )
-            for values in demo_rows:
-                try:
-                    with session.begin_nested():
-                        eid = values.get("exchange_order_id")
-                        stitched = False
-                        if eid is not None:
-                            existing = session.execute(
-                                select(DemoOrderRow).where(DemoOrderRow.exchange_order_id == eid)
-                            ).scalar_one_or_none()
-                            if existing is not None:
-                                bot_main.stitch_natural_key_order(
-                                    session,
-                                    exchange_order_id=eid,
-                                    client_order_id=values["client_order_id"],
-                                    strategy=values["strategy"],
-                                    side=values["side"],
-                                    fair_at_entry=values["fair_at_entry"],
-                                    intended_at=values["intended_at"],
-                                    requested_yes_price_dollars=values[
-                                        "requested_yes_price_dollars"
-                                    ],
-                                )
-                                stitched = True
-                        if not stitched:
-                            session.execute(
-                                sqlite_insert(DemoOrderRow)
-                                .values(**values)
-                                .on_conflict_do_update(
-                                    index_elements=["client_order_id"],
-                                    set_={
-                                        "strategy": values["strategy"],
-                                        "side": values["side"],
-                                        "fair_at_entry": values["fair_at_entry"],
-                                        "intended_at": values["intended_at"],
-                                        "requested_yes_price_dollars": values[
-                                            "requested_yes_price_dollars"
-                                        ],
-                                    },
-                                )
-                            )
-                except (ValueError, SQLAlchemyError) as err:
-                    bot_main.logger.error("demo_row_stitch_corrupted err=%s", err)
-                    continue
-            session.commit()
+    await bot_main._commit_phase2(
+        app,
+        gate_failures=gate_failures or [],
+        paper_rows=paper_rows or [],
+        demo_rows=demo_rows or [],
+    )
 
 
 def _demo_values(now: datetime, **overrides) -> dict:
@@ -4817,13 +4862,13 @@ def _wide_tails_market(now: datetime):
     return meteo, market, book
 
 
-async def _capture_tails_call(app, meteo, market, book, now, monkeypatch):
+async def _capture_tails_call(app, meteo, market, book, now, monkeypatch, *, lift_market=True):
     await refresh_forecasts(app)
     await refresh_markets(app)
     app.forecast_cdfs[("KDEN", date(2026, 5, 8))] = _StrongTailCdf()
     app.ensemble_spreads[("KDEN", date(2026, 5, 8))] = Decimal("5.0")
     app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
-    _lift_caps(monkeypatch)
+    _lift_caps(monkeypatch, lift_market=lift_market)
 
     captured: list[dict] = []
     real = tails_strategy.evaluate
@@ -4873,7 +4918,9 @@ async def test_tails_call_site_demo_mode_clamps_to_market_position_cap(
         return _demo_order(now=now, ticker=intent.market_ticker, side_kalshi="no")
 
     monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
-    captured = await _capture_tails_call(app, meteo, market, book, now, monkeypatch)
+    captured = await _capture_tails_call(
+        app, meteo, market, book, now, monkeypatch, lift_market=False
+    )
 
     assert captured
     kwargs = captured[0]
@@ -4894,7 +4941,9 @@ async def test_tails_contracts_cap_scales_with_app_bankroll(
         return _demo_order(now=now, ticker=intent.market_ticker, side_kalshi="no")
 
     monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
-    captured = await _capture_tails_call(app, meteo, market, book, now, monkeypatch)
+    captured = await _capture_tails_call(
+        app, meteo, market, book, now, monkeypatch, lift_market=False
+    )
 
     assert captured
     kwargs = captured[0]
@@ -5001,9 +5050,6 @@ async def test_startup_backfill_runs_before_eval_loop(
 
     sequence: list[str] = []
 
-    async def fake_get_balance():
-        return Decimal("500")
-
     async def fake_run(app, duration):
         sequence.append("run")
 
@@ -5040,24 +5086,7 @@ async def test_startup_backfill_runs_before_eval_loop(
     async def _go() -> None:
         await app.kalshi.aopen()
         if app.settings.mode == "demo":
-            balance = await app.kalshi.get_balance()
-            bot_main.logger.info("demo_account_balance balance_dollars=%s", balance)
-            app.bankroll = balance
-            watermark = datetime.now(timezone.utc) - timedelta(hours=1)
-            open_orders = await bot_main.poll_open_orders(app.kalshi, watermark)
-            fills = await bot_main.poll_fills(app.kalshi, watermark)
-            bot_main.logger.info(
-                "demo_startup_backfill watermark=%s open_orders=%d fills=%d",
-                watermark.isoformat(),
-                len(open_orders),
-                len(fills),
-            )
-            async with app.db_lock:
-                with app.session_factory() as session:
-                    for record in open_orders:
-                        bot_main.upsert_exchange_record(session, record)
-                    bot_main.reconcile_fills_into_demo_orders(session, fills, open_orders)
-                    session.commit()
+            await bot_main._demo_startup_backfill(app)
         await bot_main.run(app, timedelta(seconds=1))
 
     caplog.set_level(logging.INFO, logger="bot.main")
