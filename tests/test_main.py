@@ -221,10 +221,6 @@ def _market_from(
 
 
 def _lift_caps(monkeypatch: pytest.MonkeyPatch, *, lift_market: bool = True) -> None:
-    monkeypatch.setattr(bot_main, "MARKET_POSITION_CAP", Decimal("10000"))
-    monkeypatch.setattr(bot_main, "EVENT_POSITION_CAP", Decimal("10000"))
-    monkeypatch.setattr(bot_main, "SERIES_POSITION_CAP", Decimal("10000"))
-    monkeypatch.setattr(bot_main, "AGGREGATE_EXPOSURE_CAP", Decimal("100000"))
     if lift_market:
         monkeypatch.setattr(bot_main, "market_position_cap", lambda app=None: Decimal("10000"))
     monkeypatch.setattr(bot_main, "event_position_cap", lambda app=None: Decimal("10000"))
@@ -235,10 +231,6 @@ def _lift_caps(monkeypatch: pytest.MonkeyPatch, *, lift_market: bool = True) -> 
 def _lift_per_key_caps_keep_aggregate(
     monkeypatch: pytest.MonkeyPatch, *, aggregate_cap: Decimal
 ) -> None:
-    monkeypatch.setattr(bot_main, "MARKET_POSITION_CAP", Decimal("100"))
-    monkeypatch.setattr(bot_main, "EVENT_POSITION_CAP", Decimal("100"))
-    monkeypatch.setattr(bot_main, "SERIES_POSITION_CAP", Decimal("100"))
-    monkeypatch.setattr(bot_main, "AGGREGATE_EXPOSURE_CAP", aggregate_cap)
     monkeypatch.setattr(bot_main, "market_position_cap", lambda app=None: Decimal("100"))
     monkeypatch.setattr(bot_main, "event_position_cap", lambda app=None: Decimal("100"))
     monkeypatch.setattr(bot_main, "series_position_cap", lambda app=None: Decimal("100"))
@@ -2116,10 +2108,10 @@ async def test_evaluate_strategies_caps_event_across_brackets(
     await refresh_forecasts(app)
     await refresh_markets(app)
 
-    monkeypatch.setattr(bot_main, "MARKET_POSITION_CAP", Decimal("10000"))
-    monkeypatch.setattr(bot_main, "EVENT_POSITION_CAP", Decimal("10"))
-    monkeypatch.setattr(bot_main, "SERIES_POSITION_CAP", Decimal("10000"))
-    monkeypatch.setattr(bot_main, "AGGREGATE_EXPOSURE_CAP", Decimal("100000"))
+    monkeypatch.setattr(bot_main, "market_position_cap", lambda app=None: Decimal("10000"))
+    monkeypatch.setattr(bot_main, "event_position_cap", lambda app=None: Decimal("10"))
+    monkeypatch.setattr(bot_main, "series_position_cap", lambda app=None: Decimal("10000"))
+    monkeypatch.setattr(bot_main, "aggregate_exposure_cap", lambda app=None: Decimal("100000"))
 
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     for _ in range(50):
@@ -3936,8 +3928,6 @@ def test_cap_helpers_fall_back_to_paper_bankroll_when_no_app() -> None:
     assert bot_main.series_position_cap() == base * bot_main.SERIES_POSITION_FRAC
     assert bot_main.aggregate_exposure_cap(None) == base * bot_main.AGGREGATE_EXPOSURE_FRAC
 
-
-# --- demo-mode wiring (brief 04 commit 3) ---
 
 from bot.config import Settings as _DemoSettings  # noqa: E402
 from bot.execution.order_placer import DemoOrder  # noqa: E402
