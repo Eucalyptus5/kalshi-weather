@@ -17,6 +17,7 @@ from bot.execution.order_placer import DemoOrder
 from bot.execution.order_reconciler import (
     DemoFill,
     poll_fills,
+    poll_open_orders,
     reconcile_fills_into_demo_orders,
     stitch_natural_key_order,
     upsert_exchange_record,
@@ -200,6 +201,63 @@ async def test_poll_fills_paginates_via_cursor(rsa_pem: Path) -> None:
 
     assert [f.fill_id for f in fills] == ["F1", "F2"]
     assert all(f.order_id == "EX1" for f in fills)
+    assert calls[1].get("cursor") == "page2"
+
+
+async def test_poll_open_orders_paginates_via_cursor(rsa_pem: Path) -> None:
+    pages = [
+        {
+            "orders": [
+                {
+                    "order_id": "EX1",
+                    "client_order_id": "kw-edge-yes-A",
+                    "ticker": "KXHIGHDEN-26MAY22-T70",
+                    "side": "yes",
+                    "status": "executed",
+                    "requested_contracts": 10,
+                    "filled_contracts": 10,
+                    "yes_price_dollars": "0.58",
+                    "avg_yes_fill_price_dollars": "0.205",
+                    "fee_dollars": "0.07",
+                }
+            ],
+            "cursor": "page2",
+        },
+        {
+            "orders": [
+                {
+                    "order_id": "EX2",
+                    "client_order_id": "kw-edge-no-B",
+                    "ticker": "KXHIGHDEN-26MAY22-T70",
+                    "side": "no",
+                    "status": "canceled",
+                    "requested_contracts": 5,
+                    "filled_contracts": 0,
+                    "no_price_dollars": "0.42",
+                    "fee_dollars": "0.00",
+                }
+            ],
+            "cursor": "",
+        },
+    ]
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        page = pages[len(calls) - 1]
+        return httpx.Response(200, json=page)
+
+    client = await _client_with_handler(rsa_pem, handler)
+    try:
+        orders = await poll_open_orders(client, _now())
+    finally:
+        await client.aclose()
+
+    assert [o.exchange_order_id for o in orders] == ["EX1", "EX2"]
+    assert [o.status for o in orders] == ["executed", "canceled"]
+    assert calls[0].get("status") == "executed,canceled"
+    assert calls[0].get("min_ts") == str(int(_now().timestamp()))
+    assert "cursor" not in calls[0]
     assert calls[1].get("cursor") == "page2"
 
 
