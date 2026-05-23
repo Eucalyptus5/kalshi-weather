@@ -5,6 +5,9 @@ from datetime import timezone as _timezone
 from decimal import Decimal
 from pathlib import Path
 
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
+from alembic.script import ScriptDirectory
 from sqlalchemy import (
     Boolean,
     Date,
@@ -23,6 +26,9 @@ from sqlalchemy import (
 )
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+
+_REPO_ROOT: Path = Path(__file__).resolve().parent.parent.parent
 
 
 class UtcDateTime(TypeDecorator):
@@ -231,3 +237,77 @@ def ensure_baseline_stamped(engine: Engine, baseline: str) -> None:
             text("INSERT INTO alembic_version (version_num) VALUES (:rev)"),
             {"rev": baseline},
         )
+
+
+_DEPTH_COLUMNS: frozenset[str] = frozenset(
+    {"yes_ask_depth", "yes_bid_depth", "no_ask_depth", "no_bid_depth"}
+)
+
+
+def upgrade_schema(
+    db_path: Path | str,
+    script_location: Path | None = None,
+) -> None:
+    abs_db_path = Path(db_path).resolve()
+    abs_script_location = (
+        script_location.resolve() if script_location is not None else _REPO_ROOT / "alembic"
+    )
+    cfg = AlembicConfig()
+    cfg.set_main_option("script_location", str(abs_script_location))
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{abs_db_path}")
+
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+
+    engine = make_engine(abs_db_path)
+    with engine.begin() as conn:
+        tables = set(inspect(conn).get_table_names())
+        ob_cols: set[str] = set()
+        if "orderbook_snapshots" in tables:
+            ob_cols = {c["name"] for c in inspect(conn).get_columns("orderbook_snapshots")}
+
+        if "alembic_version" not in tables and "forecasts" not in tables:
+            conn.execute(
+                text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+            )
+        elif "alembic_version" not in tables or (
+            "alembic_version" in tables
+            and conn.execute(text("SELECT version_num FROM alembic_version")).first() is None
+        ):
+            if "alembic_version" not in tables:
+                conn.execute(
+                    text(
+                        "CREATE TABLE alembic_version "
+                        "(version_num VARCHAR(32) NOT NULL PRIMARY KEY)"
+                    )
+                )
+            if "orderbook_snapshots" in tables and _DEPTH_COLUMNS <= ob_cols:
+                # physical schema already matches head: a create_all-materialized DB
+                # needs head stamp, not baseline.
+                conn.execute(
+                    text("INSERT INTO alembic_version (version_num) VALUES (:v)"),
+                    {"v": head},
+                )
+            else:
+                # baseline, not head: a 0001-era physical schema with empty
+                # alembic_version needs to walk 0002+ migrations.
+                conn.execute(
+                    text("INSERT INTO alembic_version (version_num) VALUES (:v)"),
+                    {"v": "0001"},
+                )
+        else:
+            current = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            if (
+                current == "0001"
+                and "orderbook_snapshots" in tables
+                and _DEPTH_COLUMNS <= ob_cols
+                and current != head
+            ):
+                # physical schema already matches head: a create_all-materialized DB
+                # needs head stamp, not baseline.
+                conn.execute(
+                    text("UPDATE alembic_version SET version_num = :v"),
+                    {"v": head},
+                )
+
+    engine.dispose()
+    alembic_command.upgrade(cfg, "head")

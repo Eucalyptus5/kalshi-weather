@@ -22,6 +22,7 @@ class TailsContext:
     bankroll: Decimal
     is_same_day: bool
     no_cost_per_contract: Decimal | None = None
+    yes_bid_depth: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,8 +35,9 @@ class TailsSignal:
 
 ASK_THRESHOLD: Decimal = Decimal("0.10")
 FAIR_THRESHOLD: Decimal = Decimal("0.07")
-FEE_CUSHION: Decimal = Decimal("0.005")
-YES_BID_FLOOR: Decimal = FAIR_THRESHOLD + FEE_CUSHION
+# load-bearing: tuning below 0.095 flips the real-spread margin negative against
+# the friction gate's real-fee-plus-real-half-tick boundary.
+YES_BID_FLOOR: Decimal = FAIR_THRESHOLD + Decimal("0.025")
 MIN_MINUTES_TO_CLOSE: int = 60
 DEFAULT_KELLY_FRACTION: Decimal = Decimal("0.15")
 DEFAULT_POSITION_CAP: Decimal = Decimal("50")
@@ -84,6 +86,9 @@ def evaluate(
     if edge <= Decimal("0"):
         return _skip("negative_edge")
 
+    if ctx.yes_bid_depth is not None and ctx.yes_bid_depth <= 0:
+        return _skip("yes_bid_depth_zero")
+
     cost_per_contract = (
         ctx.no_cost_per_contract if ctx.no_cost_per_contract is not None else ctx.no_bid
     )
@@ -97,6 +102,8 @@ def evaluate(
     contracts = int(notional / cost_per_contract)
     if contracts_cap is not None:
         contracts = min(contracts, contracts_cap)
+    if ctx.yes_bid_depth is not None and contracts > ctx.yes_bid_depth:
+        contracts = ctx.yes_bid_depth
     if contracts < 1:
         return _skip("below_min_size")
 

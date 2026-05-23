@@ -928,7 +928,6 @@ def test_build_intents_skips_blacklisted_lax_series() -> None:
         book=book,
         fair_yes=Decimal("0.05"),
         spread=Decimal("3.0"),
-        mid=Decimal("0.19"),
         is_same_day=False,
         is_blacklisted=True,
         is_tail=False,
@@ -949,7 +948,6 @@ def test_build_intents_skips_blacklisted_mia_series() -> None:
         book=book,
         fair_yes=Decimal("0.05"),
         spread=Decimal("3.0"),
-        mid=Decimal("0.19"),
         is_same_day=False,
         is_blacklisted=True,
         is_tail=False,
@@ -970,7 +968,6 @@ def test_build_intents_emits_for_normal_series() -> None:
         book=book,
         fair_yes=Decimal("0.80"),
         spread=Decimal("3.0"),
-        mid=Decimal("0.19"),
         is_same_day=False,
         is_blacklisted=False,
         is_tail=False,
@@ -1700,7 +1697,6 @@ def test_build_intents_routes_tail_to_tails_only(monkeypatch: pytest.MonkeyPatch
         book=book,
         fair_yes=Decimal("0.04"),
         spread=Decimal("3.0"),
-        mid=Decimal("0.49"),
         is_same_day=False,
         is_blacklisted=False,
         is_tail=True,
@@ -1748,7 +1744,6 @@ def test_build_intents_routes_bracket_to_edge_only(monkeypatch: pytest.MonkeyPat
         book=book,
         fair_yes=Decimal("0.50"),
         spread=Decimal("3.0"),
-        mid=Decimal("0.19"),
         is_same_day=False,
         is_blacklisted=False,
         is_tail=False,
@@ -1799,7 +1794,6 @@ def test_build_intents_blacklisted_skips_both(monkeypatch: pytest.MonkeyPatch) -
             book=book,
             fair_yes=Decimal("0.04"),
             spread=Decimal("3.0"),
-            mid=Decimal("0.49"),
             is_same_day=False,
             is_blacklisted=True,
             is_tail=is_tail,
@@ -1852,7 +1846,6 @@ def test_build_intents_routes_b_form_bracket_to_edge(monkeypatch: pytest.MonkeyP
         book=book,
         fair_yes=Decimal("0.30"),
         spread=Decimal("3.0"),
-        mid=Decimal("0.39"),
         is_same_day=False,
         is_blacklisted=False,
         is_tail=parsed.is_tail,
@@ -2162,7 +2155,6 @@ async def test_evaluate_strategies_within_cycle_event_cap_blocks_second_bracket(
         book,
         fair_yes,
         spread,
-        mid,
         is_same_day,
         is_blacklisted,
         is_tail,
@@ -2259,7 +2251,6 @@ async def test_evaluate_strategies_overlay_strip_regression_canary(
         book,
         fair_yes,
         spread,
-        mid,
         is_same_day,
         is_blacklisted,
         is_tail,
@@ -2334,7 +2325,6 @@ def _gate_ctx_kwargs(intent: TradeIntent, market: KalshiMarket, book: KalshiOrde
         market=market,
         fair_yes=Decimal("0.50"),
         spread=Decimal("3.0"),
-        mid=Decimal("0.49"),
         run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
         now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
         book=book,
@@ -2427,7 +2417,6 @@ def test_gate_ctx_for_requires_book_kwarg() -> None:
             market=market,
             fair_yes=Decimal("0.50"),
             spread=Decimal("3.0"),
-            mid=Decimal("0.49"),
             run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
             now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
             market_existing_dollars=Decimal("0"),
@@ -2516,7 +2505,6 @@ async def test_evaluate_strategies_partial_fill_on_thin_book(monkeypatch) -> Non
         book,
         fair_yes,
         spread,
-        mid,
         is_same_day,
         is_blacklisted,
         is_tail,
@@ -2618,7 +2606,6 @@ async def test_evaluate_strategies_partial_fill_overlay_uses_trade_contracts_acr
         book,
         fair_yes,
         spread,
-        mid,
         is_same_day,
         is_blacklisted,
         is_tail,
@@ -2701,7 +2688,6 @@ async def test_evaluate_strategies_stale_orderbook_skips(
         book,
         fair_yes,
         spread,
-        mid,
         is_same_day,
         is_blacklisted,
         is_tail,
@@ -2763,7 +2749,6 @@ async def test_evaluate_strategies_stale_snapshot_drives_zero_trades(
         book,
         fair_yes,
         spread,
-        mid,
         is_same_day,
         is_blacklisted,
         is_tail,
@@ -2830,7 +2815,6 @@ async def test_evaluate_strategies_stale_skip_ratio_warns(
         book,
         fair_yes,
         spread,
-        mid,
         is_same_day,
         is_blacklisted,
         is_tail,
@@ -2849,6 +2833,13 @@ async def test_evaluate_strategies_stale_skip_ratio_warns(
         ]
 
     monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+    from bot.risk.gates import RiskCheck as _RiskCheck
+
+    monkeypatch.setattr(
+        bot_main,
+        "evaluate_gates",
+        lambda *_a, **_k: _RiskCheck(overall_passed=True, all_results=(), failures=()),
+    )
     caplog.set_level(logging.WARNING, logger="bot.execution.paper")
 
     await evaluate_strategies(app, now)
@@ -2918,7 +2909,6 @@ async def test_evaluate_strategies_per_series_stale_skip_warns_on_one_stuck_seri
         book,
         fair_yes,
         spread,
-        mid,
         is_same_day,
         is_blacklisted,
         is_tail,
@@ -2937,6 +2927,13 @@ async def test_evaluate_strategies_per_series_stale_skip_warns_on_one_stuck_seri
         ]
 
     monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+    from bot.risk.gates import RiskCheck as _RiskCheck
+
+    monkeypatch.setattr(
+        bot_main,
+        "evaluate_gates",
+        lambda *_a, **_k: _RiskCheck(overall_passed=True, all_results=(), failures=()),
+    )
     caplog.set_level(logging.WARNING, logger="bot.execution.paper")
 
     await evaluate_strategies(app, now)
@@ -3650,7 +3647,6 @@ async def test_bankroll_accessor_drives_all_downstream_reads(
         market=bracket,
         fair_yes=Decimal("0.50"),
         spread=Decimal("3.0"),
-        mid=Decimal("0.19"),
         run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
         now=now,
         book=bracket_book,
@@ -3996,7 +3992,6 @@ def _one_intent_stub(
         book,
         fair_yes,
         spread,
-        mid,
         is_same_day,
         is_blacklisted,
         is_tail,
@@ -4170,7 +4165,6 @@ async def test_evaluate_strategies_demo_mode_asserts_no_cost_per_contract_presen
         book,
         fair_yes,
         spread,
-        mid,
         is_same_day,
         is_blacklisted,
         is_tail,
@@ -4219,7 +4213,6 @@ async def test_evaluate_strategies_paper_mode_none_cost_per_contract_accepted(
         book,
         fair_yes,
         spread,
-        mid,
         is_same_day,
         is_blacklisted,
         is_tail,
@@ -5253,3 +5246,337 @@ async def test_demo_integration_paper_mode_regression_demo_orders_empty(
         trades = session.scalars(select(PaperTradeRow)).all()
     assert demo_orders == []
     assert len(trades) == 1
+
+
+async def test_intent_with_thin_edge_on_low_priced_contract_is_blocked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=now - timedelta(hours=1),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T60-65",
+        "0.07",
+        "0.05",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.07", "0.05", now=now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    def stub_intent(
+        *,
+        app,
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        mode,
+        now,
+    ):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.BUY_YES,
+                contracts=1,
+                fair_yes=fair_yes,
+                strategy="edge",
+            )
+        ]
+
+    monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+        failures = session.scalars(
+            select(GateFailure).where(GateFailure.gate_name == "edge_after_friction")
+        ).all()
+    assert trades == []
+    assert failures
+
+
+async def test_intent_with_thick_edge_still_clears(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=now - timedelta(hours=1),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.07",
+        "0.05",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.07", "0.05", now=now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    def stub_intent(
+        *,
+        app,
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        mode,
+        now,
+    ):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.BUY_YES,
+                contracts=1,
+                fair_yes=fair_yes,
+                strategy="edge",
+            )
+        ]
+
+    monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert len(trades) == 1
+
+
+async def test_paper_mode_edge_after_friction_failure_blocks_papertrade_insert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=now - timedelta(hours=1),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T60-65",
+        "0.07",
+        "0.05",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.07", "0.05", now=now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    def stub_intent(
+        *,
+        app,
+        ticker,
+        market,
+        book,
+        fair_yes,
+        spread,
+        is_same_day,
+        is_blacklisted,
+        is_tail,
+        mode,
+        now,
+    ):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.BUY_YES,
+                contracts=1,
+                fair_yes=fair_yes,
+                strategy="edge",
+            )
+        ]
+
+    monkeypatch.setattr(bot_main, "_build_intents", stub_intent)
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        trades = session.scalars(select(PaperTradeRow)).all()
+        failures = session.scalars(
+            select(GateFailure).where(GateFailure.gate_name == "edge_after_friction")
+        ).all()
+    assert trades == []
+    assert failures
+
+
+def test_gate_ctx_for_buy_yes_uses_side_specific_edge() -> None:
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.40",
+        "0.30",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.40", "0.30")
+    intent = TradeIntent(
+        market_ticker=market.ticker,
+        side=TradeSide.BUY_YES,
+        contracts=10,
+        fair_yes=Decimal("0.50"),
+        strategy="edge",
+    )
+    ctx = _gate_ctx_for(
+        intent=intent,
+        market=market,
+        fair_yes=Decimal("0.50"),
+        spread=Decimal("3.0"),
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+        book=book,
+        market_existing_dollars=Decimal("0"),
+        event_existing_dollars=Decimal("0"),
+        series_existing_dollars=Decimal("0"),
+        aggregate_existing_dollars=Decimal("0"),
+    )
+    assert ctx.edge == Decimal("0.10")
+    mid = Decimal("0.35")
+    assert ctx.edge != Decimal("0.50") - mid
+
+
+def test_gate_ctx_for_sell_yes_uses_side_specific_edge() -> None:
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.40",
+        "0.30",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.40", "0.30")
+    intent = TradeIntent(
+        market_ticker=market.ticker,
+        side=TradeSide.SELL_YES,
+        contracts=10,
+        fair_yes=Decimal("0.20"),
+        strategy="edge",
+    )
+    ctx = _gate_ctx_for(
+        intent=intent,
+        market=market,
+        fair_yes=Decimal("0.20"),
+        spread=Decimal("3.0"),
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+        book=book,
+        market_existing_dollars=Decimal("0"),
+        event_existing_dollars=Decimal("0"),
+        series_existing_dollars=Decimal("0"),
+        aggregate_existing_dollars=Decimal("0"),
+    )
+    assert ctx.edge == book.yes_bid - Decimal("0.20")
+    assert ctx.edge == Decimal("0.10")
+    mid = Decimal("0.35")
+    assert ctx.edge != mid - Decimal("0.20")
+
+
+def test_gate_ctx_for_sources_edge_from_book_not_market() -> None:
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.40",
+        "0.30",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.41", "0.30")
+    assert market.yes_ask == Decimal("0.40")
+    assert book.yes_ask == Decimal("0.41")
+    intent = TradeIntent(
+        market_ticker=market.ticker,
+        side=TradeSide.BUY_YES,
+        contracts=10,
+        fair_yes=Decimal("0.50"),
+        strategy="edge",
+    )
+    ctx = _gate_ctx_for(
+        intent=intent,
+        market=market,
+        fair_yes=Decimal("0.50"),
+        spread=Decimal("3.0"),
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+        book=book,
+        market_existing_dollars=Decimal("0"),
+        event_existing_dollars=Decimal("0"),
+        series_existing_dollars=Decimal("0"),
+        aggregate_existing_dollars=Decimal("0"),
+    )
+    assert ctx.edge == Decimal("0.09")
+    assert ctx.edge != Decimal("0.50") - market.yes_ask
+
+
+def test_gate_ctx_for_passes_orderbook_depth_through() -> None:
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.40",
+        "0.30",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(
+        market.ticker,
+        "0.40",
+        "0.30",
+        yes_bid_depth=11,
+        no_bid_depth=7,
+    )
+    buy = TradeIntent(
+        market_ticker=market.ticker,
+        side=TradeSide.BUY_YES,
+        contracts=10,
+        fair_yes=Decimal("0.50"),
+        strategy="edge",
+    )
+    sell = TradeIntent(
+        market_ticker=market.ticker,
+        side=TradeSide.SELL_YES,
+        contracts=10,
+        fair_yes=Decimal("0.20"),
+        strategy="edge",
+    )
+    base = dict(
+        market=market,
+        spread=Decimal("3.0"),
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+        book=book,
+        market_existing_dollars=Decimal("0"),
+        event_existing_dollars=Decimal("0"),
+        series_existing_dollars=Decimal("0"),
+        aggregate_existing_dollars=Decimal("0"),
+    )
+    ctx_buy = _gate_ctx_for(intent=buy, fair_yes=Decimal("0.50"), **base)
+    ctx_sell = _gate_ctx_for(intent=sell, fair_yes=Decimal("0.20"), **base)
+    assert ctx_buy.depth_at_price == 7
+    assert ctx_sell.depth_at_price == 11

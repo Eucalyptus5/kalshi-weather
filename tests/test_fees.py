@@ -105,3 +105,15 @@ def test_taker_returns_decimal() -> None:
 
 def test_maker_returns_decimal() -> None:
     assert isinstance(maker_fee(10, Decimal("0.40")), Decimal)
+
+
+def test_taker_fee_at_0905_is_six_thousand_nineteen_millionths() -> None:
+    assert taker_fee(1, Decimal("0.905")) == Decimal("0.006019")
+
+
+def test_tails_boundary_modeled_headroom_is_zero_point_zero_one_three_nine_eight_one() -> None:
+    sell_price = Decimal("1") - Decimal("0.095")
+    fee = taker_fee(1, sell_price)
+    assert fee == Decimal("0.006019")
+    headroom = Decimal("0.025") - fee - Decimal("0.005")
+    assert headroom == Decimal("0.013981")

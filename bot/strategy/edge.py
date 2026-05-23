@@ -22,6 +22,8 @@ class EdgeContext:
     is_blacklisted: bool
     nbm_divergence: Decimal | None
     no_cost_per_contract: Decimal | None = None
+    no_bid_depth: int | None = None
+    yes_bid_depth: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +79,7 @@ def evaluate(
         cost_per_contract = ctx.yes_ask
         kelly_fraction_full = (ctx.fair_yes - ctx.yes_ask) / (Decimal("1") - ctx.yes_ask)
         reason = "trade_buy"
+        depth_cap = ctx.no_bid_depth
     elif ctx.fair_yes < ctx.yes_bid - DIRECTION_CUSHION:
         action = EdgeAction.SELL_YES
         cost_per_contract = (
@@ -86,11 +89,17 @@ def evaluate(
         )
         kelly_fraction_full = (ctx.yes_bid - ctx.fair_yes) / ctx.yes_bid
         reason = "trade_sell"
+        depth_cap = ctx.yes_bid_depth
     else:
         return _skip("no_direction")
 
+    if depth_cap is not None and depth_cap <= 0:
+        return _skip("depth_zero_clamp")
+
     size_dollars = kelly_multiplier * kelly_fraction_full * ctx.bankroll
     contracts = int(size_dollars / cost_per_contract)
+    if depth_cap is not None and contracts > depth_cap:
+        contracts = depth_cap
     if contracts < 1:
         return _skip("below_min_size")
 

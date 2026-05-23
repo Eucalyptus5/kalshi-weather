@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from datetime import timezone as _timezone
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
 import pytest
 
@@ -10,7 +10,6 @@ from bot.execution.fees import taker_fee
 from bot.strategy.tails import (
     DEFAULT_POSITION_CAP,
     FAIR_THRESHOLD,
-    FEE_CUSHION,
     YES_BID_FLOOR,
     TailsAction,
     TailsContext,
@@ -247,7 +246,7 @@ def test_yes_bid_at_floor_passes() -> None:
     sig = evaluate(
         _ctx(
             yes_ask=Decimal("0.85"),
-            yes_bid=Decimal("0.075"),
+            yes_bid=Decimal("0.095"),
             no_bid=Decimal("0.10"),
             fair_yes=Decimal("0.02"),
         )
@@ -255,9 +254,9 @@ def test_yes_bid_at_floor_passes() -> None:
     assert sig.action is TailsAction.SELL_YES
 
 
-def test_yes_bid_floor_covers_fee_cushion() -> None:
-    assert YES_BID_FLOOR >= FAIR_THRESHOLD + FEE_CUSHION
-    assert FEE_CUSHION > Decimal("0")
+def test_yes_bid_floor_covers_fee_cushion_with_safety() -> None:
+    assert YES_BID_FLOOR == FAIR_THRESHOLD + Decimal("0.025")
+    assert YES_BID_FLOOR == Decimal("0.095")
 
 
 def test_yes_bid_floor_admit_is_net_ev_positive() -> None:
@@ -270,14 +269,16 @@ def test_yes_bid_floor_admit_is_net_ev_positive() -> None:
     sig = evaluate(ctx)
     assert sig.action is TailsAction.SELL_YES
     gross = ctx.yes_bid - ctx.fair_yes
-    fee = taker_fee(1, ctx.yes_bid)
-    assert gross - fee > Decimal("0")
+    sell_price = Decimal("1") - ctx.yes_bid
+    fee = taker_fee(1, sell_price)
+    half_tick = Decimal("0.0125")
+    assert gross - fee - half_tick > Decimal("0")
 
 
 def test_net_ev_anchor_fires_when_taker_rate_breaks_invariant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("bot.execution.fees.TAKER_RATE", Decimal("0.073"))
+    monkeypatch.setattr("bot.execution.fees.TAKER_RATE", Decimal("0.30"))
     ctx = _ctx(
         yes_ask=Decimal("0.85"),
         yes_bid=YES_BID_FLOOR,
@@ -297,6 +298,10 @@ def test_net_ev_anchor_fires_when_taker_rate_breaks_invariant(
         Decimal("0.069"),
         Decimal("0.07"),
         Decimal("0.074"),
+        Decimal("0.085"),
+        Decimal("0.089"),
+        Decimal("0.090"),
+        Decimal("0.094"),
     ],
 )
 def test_yes_bid_in_contaminated_band_is_skipped(yes_bid: Decimal) -> None:
@@ -480,3 +485,119 @@ def test_contracts_cap_none_keeps_byte_for_byte_sizing() -> None:
     with_none = evaluate(_ctx(**fixture), contracts_cap=None)
     assert with_none.contracts == baseline.contracts
     assert with_none.notional_dollars == baseline.notional_dollars
+
+
+def test_fee_cushion_constant_removed() -> None:
+    from bot.strategy import tails
+
+    assert not hasattr(tails, "FEE_CUSHION")
+
+
+def test_yes_bid_floor_clears_real_cent_ceiled_fee_with_positive_margin() -> None:
+    yes_bid = YES_BID_FLOOR
+    fair_yes = Decimal("0.07")
+    sell_price = Decimal("1") - yes_bid
+    real_fee = (Decimal("0.07") * sell_price * (Decimal("1") - sell_price)).quantize(
+        Decimal("0.01"), rounding=ROUND_CEILING
+    )
+    assert (yes_bid - fair_yes) - real_fee - Decimal("0.0125") > Decimal("0")
+
+
+def test_yes_bid_at_prior_target_0090_yields_non_positive_real_margin() -> None:
+    yes_bid = Decimal("0.090")
+    fair_yes = Decimal("0.07")
+    sell_price = Decimal("1") - yes_bid
+    real_fee = (Decimal("0.07") * sell_price * (Decimal("1") - sell_price)).quantize(
+        Decimal("0.01"), rounding=ROUND_CEILING
+    )
+    assert (yes_bid - fair_yes) - real_fee - Decimal("0.0125") <= Decimal("0")
+
+
+@pytest.mark.parametrize(
+    "no_bid,yes_bid_depth,bankroll,expected_contracts",
+    [
+        (Decimal("0.910"), 10, Decimal("1000"), 10),
+        (Decimal("0.500"), 4, Decimal("10000"), 4),
+        (Decimal("0.300"), 3, Decimal("10000"), 3),
+    ],
+)
+def test_yes_bid_depth_caps_contracts_on_sell_yes_axis(
+    no_bid: Decimal,
+    yes_bid_depth: int,
+    bankroll: Decimal,
+    expected_contracts: int,
+) -> None:
+    yes_ask = max(Decimal("1") - no_bid, Decimal("0.11"))
+    ctx = TailsContext(
+        yes_ask=yes_ask,
+        yes_bid=Decimal("0.095"),
+        no_bid=no_bid,
+        fair_yes=Decimal("0.069"),
+        close_time=_NOW + timedelta(hours=4),
+        now=_NOW,
+        bankroll=bankroll,
+        is_same_day=False,
+        yes_bid_depth=yes_bid_depth,
+    )
+    sig = evaluate(ctx)
+    assert sig.action is TailsAction.SELL_YES
+    assert sig.contracts == expected_contracts
+
+
+def test_yes_bid_depth_cap_applies_after_contracts_cap() -> None:
+    common = dict(
+        yes_ask=Decimal("0.85"),
+        yes_bid=Decimal("0.095"),
+        no_bid=Decimal("0.10"),
+        fair_yes=Decimal("0.069"),
+        bankroll=Decimal("100000"),
+    )
+    sig_a = evaluate(_ctx(**common, yes_bid_depth=4), contracts_cap=11)
+    assert sig_a.contracts == 4
+    sig_b = evaluate(_ctx(**common, yes_bid_depth=11), contracts_cap=4)
+    assert sig_b.contracts == 4
+    sig_c = evaluate(_ctx(**common, yes_bid_depth=4), contracts_cap=4)
+    assert sig_c.contracts == 4
+
+
+def test_yes_bid_depth_zero_emits_distinct_skip_reason_over_below_min_size() -> None:
+    ctx = _ctx(
+        yes_ask=Decimal("0.85"),
+        yes_bid=Decimal("0.095"),
+        no_bid=Decimal("0.10"),
+        fair_yes=Decimal("0.02"),
+        bankroll=Decimal("5"),
+        yes_bid_depth=0,
+    )
+    sig = evaluate(ctx)
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == "yes_bid_depth_zero"
+
+
+def test_yes_bid_depth_none_low_bankroll_still_emits_below_min_size() -> None:
+    ctx = _ctx(
+        yes_ask=Decimal("0.85"),
+        yes_bid=Decimal("0.095"),
+        no_bid=Decimal("0.10"),
+        fair_yes=Decimal("0.02"),
+        bankroll=Decimal("0.10"),
+        yes_bid_depth=None,
+    )
+    sig = evaluate(ctx)
+    assert sig.action is TailsAction.SKIP
+    assert sig.reason == "below_min_size"
+
+
+def test_yes_bid_depth_none_leaves_kelly_uncapped() -> None:
+    common = dict(
+        yes_ask=Decimal("0.85"),
+        yes_bid=Decimal("0.095"),
+        no_bid=Decimal("0.10"),
+        fair_yes=Decimal("0.02"),
+        bankroll=Decimal("100000"),
+    )
+    baseline = evaluate(_ctx(**common))
+    with_none = evaluate(_ctx(**common, yes_bid_depth=None))
+    assert baseline.action is TailsAction.SELL_YES
+    assert with_none.action is TailsAction.SELL_YES
+    assert with_none.contracts == baseline.contracts

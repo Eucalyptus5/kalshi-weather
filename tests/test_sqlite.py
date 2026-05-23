@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import inspect as py_inspect
 import json
+import logging
+import re
+import shutil
 from datetime import date, datetime, timedelta
 from datetime import timezone as _timezone
 from decimal import Decimal
@@ -25,6 +29,7 @@ from bot.storage.sqlite import (
     ensure_baseline_stamped,
     make_engine,
     make_session_factory,
+    upgrade_schema,
 )
 
 
@@ -1035,3 +1040,405 @@ def test_pinned_broken_single_column_detector_silently_stamps_head_on_partial_dr
     head = script_dir.get_current_head()
     assert _broken_single_column_detector(engine, script_dir) == head
     engine.dispose()
+
+
+def _resolved_head(tmp_path: Path) -> str:
+    db_file = tmp_path / "_probe.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    head = ScriptDirectory.from_config(cfg).get_current_head()
+    return head
+
+
+def _snapshot_real_state_db() -> tuple[float, int] | None:
+    real_db = REPO_ROOT / "data" / "state.db"
+    if not real_db.exists():
+        return None
+    stat = real_db.stat()
+    return (stat.st_mtime, stat.st_size)
+
+
+def test_upgrade_schema_fresh_db_creates_all_tables(tmp_path):
+    pre_snapshot = _snapshot_real_state_db()
+    db_file = tmp_path / "state.db"
+    upgrade_schema(db_file)
+
+    engine = make_engine(db_file)
+    session_factory = make_session_factory(engine)
+    snap_at = datetime(2026, 5, 5, 18, 0, tzinfo=_timezone.utc)
+    with session_factory() as s:
+        s.add(
+            OrderbookSnapshot(
+                ticker="KXHIGHDEN-26MAY06-T70-75",
+                snapshot_at=snap_at,
+                yes_ask=Decimal("0.40"),
+                yes_bid=Decimal("0.38"),
+                no_ask=Decimal("0.62"),
+                no_bid=Decimal("0.60"),
+                yes_ask_depth=12,
+                yes_bid_depth=5,
+                no_ask_depth=7,
+                no_bid_depth=3,
+            )
+        )
+        s.commit()
+        got = s.scalars(select(OrderbookSnapshot)).one()
+    assert got.yes_bid_depth == 5
+    assert got.no_bid_depth == 3
+    engine.dispose()
+
+    post_snapshot = _snapshot_real_state_db()
+    assert pre_snapshot == post_snapshot
+
+
+def test_upgrade_schema_fresh_no_tables_walks_full_chain(tmp_path):
+    db_file = tmp_path / "state.db"
+    upgrade_schema(db_file)
+    expected_head = _resolved_head(tmp_path)
+
+    engine = make_engine(db_file)
+    tables = set(inspect(engine).get_table_names())
+    assert "alembic_version" in tables
+    with engine.connect() as conn:
+        version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    assert version == expected_head
+
+    snap_at = datetime(2026, 5, 5, 18, 0, tzinfo=_timezone.utc)
+    session_factory = make_session_factory(engine)
+    with session_factory() as s:
+        s.add(
+            OrderbookSnapshot(
+                ticker="KXHIGHDEN-26MAY06-T70-75",
+                snapshot_at=snap_at,
+                yes_ask=Decimal("0.40"),
+                yes_bid=Decimal("0.38"),
+                no_ask=Decimal("0.62"),
+                no_bid=Decimal("0.60"),
+                yes_ask_depth=12,
+                yes_bid_depth=5,
+                no_ask_depth=7,
+                no_bid_depth=3,
+            )
+        )
+        s.commit()
+    engine.dispose()
+
+
+def test_upgrade_schema_drifted_0001_schema_alembic_version_empty_walks_to_head(tmp_path):
+    db_file = tmp_path / "state.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    command.upgrade(cfg, "0001")
+
+    engine = make_engine(db_file)
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM alembic_version"))
+    engine.dispose()
+
+    upgrade_schema(db_file)
+    expected_head = _resolved_head(tmp_path)
+
+    engine = make_engine(db_file)
+    with engine.connect() as conn:
+        version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    assert version == expected_head
+
+    snap_at = datetime(2026, 5, 5, 18, 0, tzinfo=_timezone.utc)
+    session_factory = make_session_factory(engine)
+    with session_factory() as s:
+        s.add(
+            OrderbookSnapshot(
+                ticker="KXHIGHDEN-26MAY06-T70-75",
+                snapshot_at=snap_at,
+                yes_ask=Decimal("0.40"),
+                yes_bid=Decimal("0.38"),
+                no_ask=Decimal("0.62"),
+                no_bid=Decimal("0.60"),
+                yes_ask_depth=12,
+                yes_bid_depth=5,
+                no_ask_depth=7,
+                no_bid_depth=3,
+            )
+        )
+        s.commit()
+    engine.dispose()
+
+
+def test_upgrade_schema_stamped_below_head_advances_to_head(tmp_path):
+    db_file = tmp_path / "state.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    command.upgrade(cfg, "0001")
+
+    upgrade_schema(db_file)
+    expected_head = _resolved_head(tmp_path)
+
+    engine = make_engine(db_file)
+    with engine.connect() as conn:
+        version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    assert version == expected_head
+
+    cols = {c["name"] for c in inspect(engine).get_columns("orderbook_snapshots")}
+    assert {"yes_ask_depth", "yes_bid_depth", "no_ask_depth", "no_bid_depth"} <= cols
+    engine.dispose()
+
+
+def test_upgrade_schema_stamped_below_head_supports_depth_insert(tmp_path):
+    db_file = tmp_path / "state.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    command.upgrade(cfg, "0001")
+
+    upgrade_schema(db_file)
+
+    engine = make_engine(db_file)
+    session_factory = make_session_factory(engine)
+    snap_at = datetime(2026, 5, 5, 18, 0, tzinfo=_timezone.utc)
+    with session_factory() as s:
+        s.add(
+            OrderbookSnapshot(
+                ticker="KXHIGHDEN-26MAY06-T70-75",
+                snapshot_at=snap_at,
+                yes_ask=Decimal("0.40"),
+                yes_bid=Decimal("0.38"),
+                no_ask=Decimal("0.62"),
+                no_bid=Decimal("0.60"),
+                yes_ask_depth=5,
+                yes_bid_depth=5,
+                no_ask_depth=5,
+                no_bid_depth=5,
+            )
+        )
+        s.commit()
+    engine.dispose()
+
+
+def test_upgrade_schema_target_is_dynamic_not_hardcoded():
+    src = py_inspect.getsource(upgrade_schema)
+    assert "get_current_head()" in src
+    assert set(re.findall(r'"\d{4}"', src)) == {'"0001"'}
+
+
+def test_upgrade_schema_case_b_baseline_branch_uses_literal_0001():
+    src = py_inspect.getsource(upgrade_schema)
+    assert '"0001"' in src
+
+
+def test_upgrade_schema_case_b_head_branch_routes_create_all_materialized_db_to_head(tmp_path):
+    db_file = tmp_path / "state.db"
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+    engine.dispose()
+
+    upgrade_schema(db_file)
+    expected_head = _resolved_head(tmp_path)
+
+    engine = make_engine(db_file)
+    with engine.connect() as conn:
+        version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    assert version == expected_head
+
+    session_factory = make_session_factory(engine)
+    snap_at = datetime(2026, 5, 5, 18, 0, tzinfo=_timezone.utc)
+    with session_factory() as s:
+        s.add(
+            OrderbookSnapshot(
+                ticker="KXHIGHDEN-26MAY06-T70-75",
+                snapshot_at=snap_at,
+                yes_ask=Decimal("0.40"),
+                yes_bid=Decimal("0.38"),
+                no_ask=Decimal("0.62"),
+                no_bid=Decimal("0.60"),
+                yes_ask_depth=5,
+                yes_bid_depth=5,
+                no_ask_depth=5,
+                no_bid_depth=5,
+            )
+        )
+        s.commit()
+    engine.dispose()
+
+
+def test_upgrade_schema_case_c_create_all_materialized_db_stamped_below_head_routes_to_head_update(
+    tmp_path,
+):
+    db_file = tmp_path / "state.db"
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        conn.execute(
+            text("CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)")
+        )
+        conn.execute(text("INSERT INTO alembic_version (version_num) VALUES ('0001')"))
+    engine.dispose()
+
+    upgrade_schema(db_file)
+    expected_head = _resolved_head(tmp_path)
+
+    engine = make_engine(db_file)
+    with engine.connect() as conn:
+        version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+    assert version == expected_head
+
+    session_factory = make_session_factory(engine)
+    snap_at = datetime(2026, 5, 5, 18, 0, tzinfo=_timezone.utc)
+    with session_factory() as s:
+        s.add(
+            OrderbookSnapshot(
+                ticker="KXHIGHDEN-26MAY06-T70-75",
+                snapshot_at=snap_at,
+                yes_ask=Decimal("0.40"),
+                yes_bid=Decimal("0.38"),
+                no_ask=Decimal("0.62"),
+                no_bid=Decimal("0.60"),
+                yes_ask_depth=5,
+                yes_bid_depth=5,
+                no_ask_depth=5,
+                no_bid_depth=5,
+            )
+        )
+        s.commit()
+    engine.dispose()
+
+
+def test_upgrade_schema_case_b_drifted_schema_walks_to_head_columns(tmp_path):
+    db_file = tmp_path / "state.db"
+    cfg = _alembic_cfg(tmp_path, db_file)
+    command.upgrade(cfg, "0001")
+
+    engine = make_engine(db_file)
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM alembic_version"))
+    engine.dispose()
+
+    upgrade_schema(db_file)
+
+    engine = make_engine(db_file)
+    cols = {c["name"] for c in inspect(engine).get_columns("orderbook_snapshots")}
+    assert {"yes_ask_depth", "yes_bid_depth", "no_ask_depth", "no_bid_depth"} <= cols
+    engine.dispose()
+
+
+def test_upgrade_schema_uses_engine_begin_not_connect():
+    src = py_inspect.getsource(upgrade_schema)
+    assert "engine.begin()" in src
+    assert "engine.connect()" not in src
+
+
+def test_create_all_alone_does_not_repair_drifted_schema(tmp_path):
+    real_versions = REPO_ROOT / "alembic" / "versions"
+    real_listing_before = sorted(p.name for p in real_versions.iterdir())
+
+    alembic_clone = tmp_path / "alembic"
+    shutil.copytree(REPO_ROOT / "alembic", alembic_clone)
+    versions_dir = alembic_clone / "versions"
+
+    probe_cfg = Config()
+    probe_cfg.set_main_option("script_location", str(alembic_clone))
+    probe_cfg.set_main_option("sqlalchemy.url", f"sqlite:///{tmp_path / '_probe.db'}")
+    current_head = ScriptDirectory.from_config(probe_cfg).get_current_head()
+
+    drift_file = versions_dir / "9999_drift_test.py"
+    drift_file.write_text(
+        '"""drift test\n\n'
+        "Revision ID: 9999\n"
+        f"Revises: {current_head}\n"
+        "Create Date: 2026-05-28 13:00:00.000000\n\n"
+        '"""\n\n'
+        "from typing import Sequence, Union\n\n"
+        "from alembic import op\n"
+        "import sqlalchemy as sa\n\n\n"
+        'revision: str = "9999"\n'
+        f'down_revision: Union[str, Sequence[str], None] = "{current_head}"\n'
+        "branch_labels: Union[str, Sequence[str], None] = None\n"
+        "depends_on: Union[str, Sequence[str], None] = None\n\n\n"
+        "def upgrade() -> None:\n"
+        "    with op.batch_alter_table('gate_failures') as batch_op:\n"
+        "        batch_op.add_column(sa.Column('int_col', sa.Integer(), nullable=True))\n\n\n"
+        "def downgrade() -> None:\n"
+        "    with op.batch_alter_table('gate_failures') as batch_op:\n"
+        "        batch_op.drop_column('int_col')\n"
+    )
+
+    db_file = tmp_path / "state.db"
+    ini_path = tmp_path / "alembic.ini"
+    ini_path.write_text(
+        f"[alembic]\nscript_location = {alembic_clone}\nsqlalchemy.url = sqlite:///{db_file}\n"
+    )
+    drift_cfg = Config(str(ini_path))
+    command.upgrade(drift_cfg, current_head)
+
+    engine = make_engine(db_file)
+    Base.metadata.create_all(engine)
+    cols_before = {c["name"] for c in inspect(engine).get_columns("gate_failures")}
+    assert "int_col" not in cols_before
+    engine.dispose()
+
+    upgrade_schema(db_file, script_location=alembic_clone)
+
+    engine = make_engine(db_file)
+    cols_after = {c["name"] for c in inspect(engine).get_columns("gate_failures")}
+    assert "int_col" in cols_after
+    engine.dispose()
+
+    real_listing_after = sorted(p.name for p in real_versions.iterdir())
+    assert real_listing_before == real_listing_after
+    assert "9999_drift_test.py" not in real_listing_after
+
+
+def test_upgrade_schema_is_idempotent(tmp_path):
+    db_file = tmp_path / "state.db"
+    upgrade_schema(db_file)
+    upgrade_schema(db_file)
+
+    engine = make_engine(db_file)
+    session_factory = make_session_factory(engine)
+    snap_at = datetime(2026, 5, 5, 18, 0, tzinfo=_timezone.utc)
+    with session_factory() as s:
+        s.add(
+            OrderbookSnapshot(
+                ticker="KXHIGHDEN-26MAY06-T70-75",
+                snapshot_at=snap_at,
+                yes_ask=Decimal("0.40"),
+                yes_bid=Decimal("0.38"),
+                no_ask=Decimal("0.62"),
+                no_bid=Decimal("0.60"),
+                yes_ask_depth=5,
+                yes_bid_depth=5,
+                no_ask_depth=5,
+                no_bid_depth=5,
+            )
+        )
+        s.commit()
+    engine.dispose()
+
+
+def test_upgrade_schema_does_not_touch_real_data_state_db(tmp_path):
+    pre_snapshot = _snapshot_real_state_db()
+    db_file = tmp_path / "foo.db"
+    upgrade_schema(db_file)
+    post_snapshot = _snapshot_real_state_db()
+    assert pre_snapshot == post_snapshot
+    assert db_file.exists()
+    engine = make_engine(db_file)
+    tables = set(inspect(engine).get_table_names())
+    assert "alembic_version" in tables
+    engine.dispose()
+
+
+def test_upgrade_schema_does_not_mutate_root_logger(tmp_path, caplog):
+    root = logging.getLogger()
+    handlers_before = list(root.handlers)
+    level_before = root.level
+    propagate_before = root.propagate
+
+    db_file = tmp_path / "state.db"
+    upgrade_schema(db_file)
+
+    assert list(root.handlers) == handlers_before
+    assert root.level == level_before
+    assert root.propagate == propagate_before
+
+    test_logger = logging.getLogger("test_upgrade_schema_caplog_probe")
+    with caplog.at_level(logging.INFO, logger="test_upgrade_schema_caplog_probe"):
+        test_logger.info("probe message")
+    assert any("probe message" in r.getMessage() for r in caplog.records)

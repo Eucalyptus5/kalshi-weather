@@ -53,7 +53,6 @@ from bot.markets.parser import ParsedTicker, parse_ticker
 from bot.risk.gates import CAP_GATE_NAMES, GateContext, GateMode, evaluate as evaluate_gates
 from bot.storage.positions import open_exposures
 from bot.storage.sqlite import (
-    Base,
     DemoOrder as DemoOrderRow,
     Forecast,
     GateFailure,
@@ -63,6 +62,7 @@ from bot.storage.sqlite import (
     SimulatedPnl,
     make_engine,
     make_session_factory,
+    upgrade_schema,
 )
 from bot.strategy import edge as edge_strategy
 from bot.strategy import tails as tails_strategy
@@ -518,7 +518,6 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
         start_utc, end_utc = observation_window(cfg.timezone, parsed.event_date)
         is_same_day = start_utc <= now < end_utc
 
-        mid = (book.yes_ask + book.yes_bid) / Decimal("2")
         is_blacklisted = parsed.series in STRATEGY_BLACKLIST
 
         event_key = market.event_ticker
@@ -531,7 +530,6 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
             book=book,
             fair_yes=fair_yes,
             spread=spread,
-            mid=mid,
             is_same_day=is_same_day,
             is_blacklisted=is_blacklisted,
             is_tail=parsed.is_tail,
@@ -546,7 +544,6 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                 market=market,
                 fair_yes=fair_yes,
                 spread=spread,
-                mid=mid,
                 run_time=run_time,
                 now=now,
                 book=book,
@@ -718,7 +715,6 @@ def _build_intents(
     book: KalshiOrderbook,
     fair_yes: Decimal,
     spread: Decimal,
-    mid: Decimal,
     is_same_day: bool,
     is_blacklisted: bool,
     is_tail: bool,
@@ -742,6 +738,8 @@ def _build_intents(
             is_blacklisted=is_blacklisted,
             nbm_divergence=None,
             no_cost_per_contract=no_cost_per_contract,
+            no_bid_depth=book.no_bid_depth,
+            yes_bid_depth=book.yes_bid_depth,
         )
         edge_sig = edge_strategy.evaluate(edge_ctx, mode=mode)
         if edge_sig.action is edge_strategy.EdgeAction.BUY_YES:
@@ -782,6 +780,7 @@ def _build_intents(
             bankroll=ctx_bankroll,
             is_same_day=is_same_day,
             no_cost_per_contract=no_cost_per_contract,
+            yes_bid_depth=book.yes_bid_depth,
         )
         if is_demo:
             wired_no_cost = Decimal("1") - book.yes_bid
@@ -820,7 +819,6 @@ def _gate_ctx_for(
     market: KalshiMarket,
     fair_yes: Decimal,
     spread: Decimal,
-    mid: Decimal,
     run_time: datetime,
     now: datetime,
     book: KalshiOrderbook,
@@ -831,11 +829,14 @@ def _gate_ctx_for(
     app: "App | None" = None,
 ) -> GateContext:
     if intent.side is TradeSide.BUY_YES:
-        edge_dollars = fair_yes - mid
+        edge_dollars = fair_yes - book.yes_ask
+        price = book.yes_ask
+        depth_at_price = book.no_bid_depth
     else:
-        edge_dollars = mid - fair_yes
-    cost_per_contract = cost_per_contract_from_book(intent.side, book)
-    order_dollars = cost_per_contract * Decimal(intent.contracts)
+        edge_dollars = book.yes_bid - fair_yes
+        price = Decimal("1") - book.yes_bid
+        depth_at_price = book.yes_bid_depth
+    order_dollars = price * Decimal(intent.contracts)
     minutes_to_close = 99999
     if market.close_time is not None:
         delta = (market.close_time - now).total_seconds()
@@ -847,6 +848,9 @@ def _gate_ctx_for(
         model_age_hours=model_age_hours,
         ensemble_spread=spread,
         edge=edge_dollars,
+        price=price,
+        depth_at_price=depth_at_price,
+        contracts=intent.contracts,
         order_size_dollars=order_dollars,
         market_existing_dollars=market_existing_dollars,
         market_position_cap=market_position_cap(app),
@@ -1211,8 +1215,8 @@ def main() -> None:
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
 
+    upgrade_schema("data/state.db")
     engine = make_engine("data/state.db")
-    Base.metadata.create_all(engine)
     session_factory = make_session_factory(engine)
     meteo = OpenMeteoClient()
     kalshi = KalshiDemoClient(settings)

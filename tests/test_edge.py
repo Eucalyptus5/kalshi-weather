@@ -269,3 +269,76 @@ def test_edge_demo_mode_without_cost_basis_raises() -> None:
 def test_edge_paper_mode_without_cost_basis_accepted() -> None:
     sig = evaluate(_ctx(no_cost_per_contract=None), mode="paper")
     assert sig.action is EdgeAction.BUY_YES
+
+
+def test_edge_no_bid_depth_caps_buy_yes_contracts() -> None:
+    sig = evaluate(
+        _ctx(
+            yes_ask=Decimal("0.30"),
+            yes_bid=Decimal("0.28"),
+            fair_yes=Decimal("0.50"),
+            bankroll=Decimal("10000"),
+            no_bid_depth=5,
+        )
+    )
+    assert sig.action is EdgeAction.BUY_YES
+    assert sig.contracts == 5
+
+
+def test_edge_yes_bid_depth_caps_sell_yes_contracts() -> None:
+    sig = evaluate(
+        _ctx(
+            yes_ask=Decimal("0.32"),
+            yes_bid=Decimal("0.30"),
+            fair_yes=Decimal("0.20"),
+            bankroll=Decimal("10000"),
+            no_cost_per_contract=None,
+            yes_bid_depth=4,
+        )
+    )
+    assert sig.action is EdgeAction.SELL_YES
+    assert sig.contracts == 4
+
+
+def test_edge_depth_zero_emits_distinct_skip_reason() -> None:
+    sig = evaluate(
+        _ctx(
+            yes_ask=Decimal("0.30"),
+            yes_bid=Decimal("0.28"),
+            fair_yes=Decimal("0.50"),
+            no_bid_depth=0,
+        )
+    )
+    assert sig.action is EdgeAction.SKIP
+    assert sig.reason == "depth_zero_clamp"
+
+    tiny = evaluate(_ctx(bankroll=Decimal("1"), no_bid_depth=None))
+    assert tiny.action is EdgeAction.SKIP
+    assert tiny.reason == "below_min_size"
+
+
+def test_edge_depth_zero_sell_yes_emits_distinct_skip_reason() -> None:
+    sig = evaluate(
+        _ctx(
+            yes_ask=Decimal("0.32"),
+            yes_bid=Decimal("0.30"),
+            fair_yes=Decimal("0.20"),
+            no_cost_per_contract=None,
+            yes_bid_depth=0,
+        )
+    )
+    assert sig.action is EdgeAction.SKIP
+    assert sig.reason == "depth_zero_clamp"
+
+
+def test_edge_depth_none_leaves_kelly_uncapped() -> None:
+    baseline = evaluate(_ctx())
+    with_none = evaluate(_ctx(no_bid_depth=None, yes_bid_depth=None))
+    assert baseline.contracts == with_none.contracts
+    assert baseline.notional_dollars == with_none.notional_dollars
+
+
+def test_edge_depth_above_kelly_does_not_inflate_emission() -> None:
+    sig = evaluate(_ctx(no_bid_depth=10_000))
+    baseline = evaluate(_ctx())
+    assert sig.contracts == baseline.contracts

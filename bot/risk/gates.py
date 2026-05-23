@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
+from bot.execution.friction import required_edge
+
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +23,9 @@ class GateContext:
     model_age_hours: Decimal
     ensemble_spread: Decimal
     edge: Decimal
+    price: Decimal
+    depth_at_price: int
+    contracts: int
     order_size_dollars: Decimal
     market_existing_dollars: Decimal
     market_position_cap: Decimal
@@ -57,7 +62,6 @@ class GateParams:
     fair_max: Decimal = Decimal("0.99")
     model_max_age_hours: Decimal = Decimal("6")
     min_ensemble_spread: Decimal = Decimal("1.0")
-    min_edge: Decimal = Decimal("0.05")
     min_minutes_to_close: int = 10
 
 
@@ -71,7 +75,7 @@ GATE_NAMES: tuple[str, ...] = (
     "fair_value_sane",
     "model_fresh",
     "ensemble_spread_ok",
-    "edge_threshold",
+    "edge_after_friction",
     "within_market_cap",
     "within_event_cap",
     "within_series_cap",
@@ -93,6 +97,9 @@ CAP_GATE_NAMES: frozenset[str] = frozenset(
 )
 
 
+PAPER_BLOCKING_GATES: frozenset[str] = frozenset({"edge_threshold", "edge_after_friction"})
+
+
 def _ok(name: str) -> GateResult:
     return GateResult(name=name, passed=True, reason=None)
 
@@ -108,6 +115,12 @@ def _check_fair_value(fair_yes: Decimal | None, params: GateParams) -> GateResul
     if fair_yes < params.fair_min or fair_yes > params.fair_max:
         return _fail(name, f"fair_yes={fair_yes} outside [{params.fair_min}, {params.fair_max}]")
     return _ok(name)
+
+
+def friction_failure_subreason(depth_at_price: int) -> str:
+    if depth_at_price <= 0:
+        return "depth_zero_clamp"
+    return "fee_spread"
 
 
 def evaluate(
@@ -139,10 +152,12 @@ def evaluate(
             )
         )
 
-    if ctx.edge >= params.min_edge:
-        results.append(_ok("edge_threshold"))
+    floor = required_edge(ctx.price, ctx.depth_at_price, ctx.contracts)
+    if ctx.edge >= floor:
+        results.append(_ok("edge_after_friction"))
     else:
-        results.append(_fail("edge_threshold", f"edge={ctx.edge} < {params.min_edge}"))
+        subreason = friction_failure_subreason(ctx.depth_at_price)
+        results.append(_fail("edge_after_friction", f"edge={ctx.edge} < floor={floor}:{subreason}"))
 
     market_total = ctx.market_existing_dollars + ctx.order_size_dollars
     if market_total <= ctx.market_position_cap:
@@ -229,7 +244,10 @@ def evaluate(
             mode.value,
         )
 
-    overall_passed = True if mode is GateMode.PAPER else len(failures) == 0
+    if mode is GateMode.PAPER:
+        overall_passed = not any(f.name in PAPER_BLOCKING_GATES for f in failures)
+    else:
+        overall_passed = len(failures) == 0
     return RiskCheck(
         overall_passed=overall_passed,
         all_results=tuple(results),
