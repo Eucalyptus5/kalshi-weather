@@ -12,6 +12,12 @@ def cost_per_contract_from_book(side: TradeSide, book: KalshiOrderbook) -> Decim
     return book.no_ask
 
 
+def paper_collateral_per_contract(side: TradeSide, book: KalshiOrderbook) -> Decimal:
+    if side is TradeSide.BUY_YES:
+        return book.yes_ask
+    return Decimal("1") - book.yes_bid
+
+
 def cost_per_contract_from_market_legacy(side: TradeSide, market: KalshiMarket) -> Decimal:
     if side is TradeSide.BUY_YES:
         return market.yes_ask

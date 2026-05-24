@@ -5,6 +5,9 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
+from bot.execution.paper import TradeSide
+from bot.strategy.sizing import TAILS_ACTIVE_KELLY_FRAC, compute_stake_contracts
+
 
 class TailsAction(Enum):
     SELL_YES = "sell_yes"
@@ -21,8 +24,13 @@ class TailsContext:
     now: datetime
     bankroll: Decimal
     is_same_day: bool
+    ensemble_spread: Decimal
+    sigma_T_median: Decimal
+    event_budget_remaining: Decimal
+    market_budget_remaining: Decimal
+    depth_at_price: int
+    price_per_contract: Decimal
     no_cost_per_contract: Decimal | None = None
-    yes_bid_depth: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,8 +47,6 @@ FAIR_THRESHOLD: Decimal = Decimal("0.07")
 # the friction gate's real-fee-plus-real-half-tick boundary.
 YES_BID_FLOOR: Decimal = FAIR_THRESHOLD + Decimal("0.025")
 MIN_MINUTES_TO_CLOSE: int = 60
-DEFAULT_KELLY_FRACTION: Decimal = Decimal("0.15")
-DEFAULT_POSITION_CAP: Decimal = Decimal("50")
 
 
 def _skip(reason: str) -> TailsSignal:
@@ -52,14 +58,7 @@ def _skip(reason: str) -> TailsSignal:
     )
 
 
-def evaluate(
-    ctx: TailsContext,
-    *,
-    mode: str = "paper",
-    kelly_fraction: Decimal = DEFAULT_KELLY_FRACTION,
-    position_cap: Decimal = DEFAULT_POSITION_CAP,
-    contracts_cap: int | None = None,
-) -> TailsSignal:
+def evaluate(ctx: TailsContext, *, mode: str = "paper") -> TailsSignal:
     if mode == "demo" and ctx.no_cost_per_contract is None:
         raise RuntimeError(
             "demo mode requires book-derived cost basis; "
@@ -86,28 +85,29 @@ def evaluate(
     if edge <= Decimal("0"):
         return _skip("negative_edge")
 
-    if ctx.yes_bid_depth is not None and ctx.yes_bid_depth <= 0:
+    if ctx.depth_at_price <= 0:
         return _skip("yes_bid_depth_zero")
 
-    cost_per_contract = (
-        ctx.no_cost_per_contract if ctx.no_cost_per_contract is not None else ctx.no_bid
-    )
-    if cost_per_contract == Decimal("1"):
+    if ctx.price_per_contract == Decimal("1"):
         return _skip("cost_basis_unusable")
 
-    edge_ratio = edge / (Decimal("1") - cost_per_contract)
-    notional_target = kelly_fraction * ctx.bankroll * edge_ratio
-    notional = min(notional_target, position_cap)
-
-    contracts = int(notional / cost_per_contract)
-    if contracts_cap is not None:
-        contracts = min(contracts, contracts_cap)
-    if ctx.yes_bid_depth is not None and contracts > ctx.yes_bid_depth:
-        contracts = ctx.yes_bid_depth
+    contracts = compute_stake_contracts(
+        side=TradeSide.SELL_YES,
+        q=ctx.fair_yes,
+        p=ctx.yes_bid,
+        sigma_T=ctx.ensemble_spread,
+        sigma_T_median=ctx.sigma_T_median,
+        kelly_frac=TAILS_ACTIVE_KELLY_FRAC,
+        bankroll=ctx.bankroll,
+        event_budget_remaining=ctx.event_budget_remaining,
+        market_budget_remaining=ctx.market_budget_remaining,
+        depth_at_price=ctx.depth_at_price,
+        price_per_contract=ctx.price_per_contract,
+    )
     if contracts < 1:
         return _skip("below_min_size")
 
-    actual_notional = cost_per_contract * Decimal(contracts)
+    actual_notional = ctx.price_per_contract * Decimal(contracts)
     return TailsSignal(
         action=TailsAction.SELL_YES,
         contracts=contracts,

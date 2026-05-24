@@ -4,6 +4,9 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
+from bot.execution.paper import TradeSide
+from bot.strategy.sizing import EDGE_KELLY_FRAC, compute_stake_contracts
+
 
 class EdgeAction(Enum):
     BUY_YES = "buy_yes"
@@ -21,9 +24,12 @@ class EdgeContext:
     is_same_day: bool
     is_blacklisted: bool
     nbm_divergence: Decimal | None
+    sigma_T_median: Decimal
+    event_budget_remaining: Decimal
+    market_budget_remaining: Decimal
+    depth_at_price: int
+    price_per_contract: Decimal
     no_cost_per_contract: Decimal | None = None
-    no_bid_depth: int | None = None
-    yes_bid_depth: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,7 +44,6 @@ EDGE_THRESHOLD: Decimal = Decimal("0.08")
 DIRECTION_CUSHION: Decimal = Decimal("0.04")
 NBM_DIVERGENCE_LIMIT: Decimal = Decimal("5")
 DEFAULT_MIN_SPREAD: Decimal = Decimal("1.0")
-KELLY_MULTIPLIER: Decimal = Decimal("0.15")
 
 
 def _skip(reason: str) -> EdgeSignal:
@@ -55,7 +60,6 @@ def evaluate(
     *,
     mode: str = "paper",
     min_spread: Decimal = DEFAULT_MIN_SPREAD,
-    kelly_multiplier: Decimal = KELLY_MULTIPLIER,
 ) -> EdgeSignal:
     if mode == "demo" and ctx.no_cost_per_contract is None:
         raise RuntimeError(
@@ -76,34 +80,37 @@ def evaluate(
 
     if ctx.fair_yes > ctx.yes_ask + DIRECTION_CUSHION:
         action = EdgeAction.BUY_YES
-        cost_per_contract = ctx.yes_ask
-        kelly_fraction_full = (ctx.fair_yes - ctx.yes_ask) / (Decimal("1") - ctx.yes_ask)
+        side = TradeSide.BUY_YES
+        p = ctx.yes_ask
         reason = "trade_buy"
-        depth_cap = ctx.no_bid_depth
     elif ctx.fair_yes < ctx.yes_bid - DIRECTION_CUSHION:
         action = EdgeAction.SELL_YES
-        cost_per_contract = (
-            ctx.no_cost_per_contract
-            if ctx.no_cost_per_contract is not None
-            else Decimal("1") - ctx.yes_bid
-        )
-        kelly_fraction_full = (ctx.yes_bid - ctx.fair_yes) / ctx.yes_bid
+        side = TradeSide.SELL_YES
+        p = ctx.yes_bid
         reason = "trade_sell"
-        depth_cap = ctx.yes_bid_depth
     else:
         return _skip("no_direction")
 
-    if depth_cap is not None and depth_cap <= 0:
+    if ctx.depth_at_price <= 0:
         return _skip("depth_zero_clamp")
 
-    size_dollars = kelly_multiplier * kelly_fraction_full * ctx.bankroll
-    contracts = int(size_dollars / cost_per_contract)
-    if depth_cap is not None and contracts > depth_cap:
-        contracts = depth_cap
+    contracts = compute_stake_contracts(
+        side=side,
+        q=ctx.fair_yes,
+        p=p,
+        sigma_T=ctx.ensemble_spread,
+        sigma_T_median=ctx.sigma_T_median,
+        kelly_frac=EDGE_KELLY_FRAC,
+        bankroll=ctx.bankroll,
+        event_budget_remaining=ctx.event_budget_remaining,
+        market_budget_remaining=ctx.market_budget_remaining,
+        depth_at_price=ctx.depth_at_price,
+        price_per_contract=ctx.price_per_contract,
+    )
     if contracts < 1:
         return _skip("below_min_size")
 
-    actual_notional = cost_per_contract * Decimal(contracts)
+    actual_notional = ctx.price_per_contract * Decimal(contracts)
     return EdgeSignal(
         action=action,
         contracts=contracts,

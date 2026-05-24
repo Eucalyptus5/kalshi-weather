@@ -27,7 +27,10 @@ from bot.execution.demo_row_translator import (
     paper_trade_row_from_demo_order,
     paper_trade_row_values,
 )
-from bot.execution.gate_cost_basis import cost_per_contract_from_book
+from bot.execution.gate_cost_basis import (
+    cost_per_contract_from_book,
+    paper_collateral_per_contract,
+)
 from bot.execution.order_loop import place_orders_resilient
 from bot.execution.order_placer import DemoOrder, place_order_demo
 from bot.execution.order_reconciler import (
@@ -66,6 +69,7 @@ from bot.storage.sqlite import (
 )
 from bot.strategy import edge as edge_strategy
 from bot.strategy import tails as tails_strategy
+from bot.strategy.sizing import sigma_t_median_for_lead
 from bot.validation.reconcile import ACISClient, reconcile_trade
 
 logger = logging.getLogger(__name__)
@@ -485,6 +489,8 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
     pending_intents: list[tuple[TradeIntent, KalshiOrderbook, datetime]] = []
 
     for ticker, market in markets_snapshot:
+        if market.close_time is None:
+            continue
         book = orderbooks_snapshot.get(ticker)
         if book is None:
             continue
@@ -523,6 +529,20 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
         event_key = market.event_ticker
         series_key = parsed.series
 
+        sigma_T_median = sigma_t_median_for_lead(
+            int((market.close_time - now).total_seconds() / 3600)
+        )
+        event_budget_remaining = max(
+            Decimal("0"),
+            event_position_cap(app) - overlay_event.get(event_key, Decimal("0")),
+        )
+        market_budget_remaining = max(
+            Decimal("0"),
+            market_position_cap(app) - overlay_market.get(ticker, Decimal("0")),
+        )
+        buy_yes_depth = book.no_bid_depth
+        sell_yes_depth = book.yes_bid_depth
+
         for intent in _build_intents(
             app=app,
             ticker=ticker,
@@ -535,9 +555,17 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
             is_tail=parsed.is_tail,
             mode=app.settings.mode,
             now=now,
+            sigma_T_median=sigma_T_median,
+            event_budget_remaining=event_budget_remaining,
+            market_budget_remaining=market_budget_remaining,
+            buy_yes_depth=buy_yes_depth,
+            sell_yes_depth=sell_yes_depth,
         ):
             intents_seen_by_series[series_key] += 1
-            cost_per_contract = cost_per_contract_from_book(intent.side, book)
+            if app.settings.mode == "paper":
+                debit_basis = paper_collateral_per_contract(intent.side, book)
+            else:
+                debit_basis = cost_per_contract_from_book(intent.side, book)
 
             gate_ctx = _gate_ctx_for(
                 intent=intent,
@@ -551,6 +579,8 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                 event_existing_dollars=overlay_event.get(event_key, Decimal("0")),
                 series_existing_dollars=overlay_series.get(series_key, Decimal("0")),
                 aggregate_existing_dollars=cycle_aggregate_exposure,
+                buy_yes_depth=buy_yes_depth,
+                sell_yes_depth=sell_yes_depth,
                 app=app,
             )
             check = evaluate_gates(gate_ctx, gate_mode)
@@ -585,13 +615,13 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                     stale_skips_by_series[series_key] += 1
                     continue
                 paper_rows.append(_paper_trade_row(trade))
-                delta = cost_per_contract * Decimal(trade.contracts)
+                delta = debit_basis * Decimal(trade.contracts)
             else:
                 if ticker not in app.latest_markets:
                     continue
                 now_pre_post: datetime = now
                 pending_intents.append((intent, book, now_pre_post))
-                delta = cost_per_contract * Decimal(intent.contracts)
+                delta = debit_basis * Decimal(intent.contracts)
 
             overlay_market[ticker] = overlay_market.get(ticker, Decimal("0")) + delta
             overlay_event[event_key] = overlay_event.get(event_key, Decimal("0")) + delta
@@ -720,6 +750,11 @@ def _build_intents(
     is_tail: bool,
     mode: str,
     now: datetime,
+    sigma_T_median: Decimal,
+    event_budget_remaining: Decimal,
+    market_budget_remaining: Decimal,
+    buy_yes_depth: int,
+    sell_yes_depth: int,
 ) -> list[TradeIntent]:
     intents: list[TradeIntent] = []
     lead_time_hours = _compute_lead_time_hours(market, now)
@@ -728,6 +763,15 @@ def _build_intents(
     no_cost_per_contract = book.no_ask if is_demo else None
 
     if not is_tail:
+        if fair_yes > book.yes_ask + edge_strategy.DIRECTION_CUSHION:
+            edge_depth = buy_yes_depth
+            edge_price_per_contract = book.yes_ask
+        elif fair_yes < book.yes_bid - edge_strategy.DIRECTION_CUSHION:
+            edge_depth = sell_yes_depth
+            edge_price_per_contract = book.no_ask if is_demo else Decimal("1") - book.yes_bid
+        else:
+            edge_depth = buy_yes_depth
+            edge_price_per_contract = book.yes_ask
         edge_ctx = edge_strategy.EdgeContext(
             yes_ask=book.yes_ask,
             yes_bid=book.yes_bid,
@@ -737,9 +781,12 @@ def _build_intents(
             is_same_day=is_same_day,
             is_blacklisted=is_blacklisted,
             nbm_divergence=None,
+            sigma_T_median=sigma_T_median,
+            event_budget_remaining=event_budget_remaining,
+            market_budget_remaining=market_budget_remaining,
+            depth_at_price=edge_depth,
+            price_per_contract=edge_price_per_contract,
             no_cost_per_contract=no_cost_per_contract,
-            no_bid_depth=book.no_bid_depth,
-            yes_bid_depth=book.yes_bid_depth,
         )
         edge_sig = edge_strategy.evaluate(edge_ctx, mode=mode)
         if edge_sig.action is edge_strategy.EdgeAction.BUY_YES:
@@ -769,7 +816,8 @@ def _build_intents(
                 )
             )
 
-    if is_tail and not is_blacklisted and market.close_time is not None:
+    if is_tail and not is_blacklisted:
+        tails_price_per_contract = book.no_ask if is_demo else Decimal("1") - book.yes_bid
         tails_ctx = tails_strategy.TailsContext(
             yes_ask=book.yes_ask,
             yes_bid=book.yes_bid,
@@ -779,23 +827,15 @@ def _build_intents(
             now=now,
             bankroll=ctx_bankroll,
             is_same_day=is_same_day,
+            ensemble_spread=spread,
+            sigma_T_median=sigma_T_median,
+            event_budget_remaining=event_budget_remaining,
+            market_budget_remaining=market_budget_remaining,
+            depth_at_price=sell_yes_depth,
+            price_per_contract=tails_price_per_contract,
             no_cost_per_contract=no_cost_per_contract,
-            yes_bid_depth=book.yes_bid_depth,
         )
-        if is_demo:
-            wired_no_cost = Decimal("1") - book.yes_bid
-            if wired_no_cost > Decimal("0"):
-                cap = market_position_cap(app)
-                tails_sig = tails_strategy.evaluate(
-                    tails_ctx,
-                    mode=mode,
-                    position_cap=cap,
-                    contracts_cap=int(cap / wired_no_cost),
-                )
-            else:
-                tails_sig = tails_strategy.evaluate(tails_ctx, mode=mode)
-        else:
-            tails_sig = tails_strategy.evaluate(tails_ctx, mode=mode)
+        tails_sig = tails_strategy.evaluate(tails_ctx, mode=mode)
         if tails_sig.action is tails_strategy.TailsAction.SELL_YES:
             intents.append(
                 TradeIntent(
@@ -826,16 +866,18 @@ def _gate_ctx_for(
     event_existing_dollars: Decimal,
     series_existing_dollars: Decimal,
     aggregate_existing_dollars: Decimal,
+    buy_yes_depth: int,
+    sell_yes_depth: int,
     app: "App | None" = None,
 ) -> GateContext:
     if intent.side is TradeSide.BUY_YES:
         edge_dollars = fair_yes - book.yes_ask
         price = book.yes_ask
-        depth_at_price = book.no_bid_depth
+        depth_at_price = buy_yes_depth
     else:
         edge_dollars = book.yes_bid - fair_yes
         price = Decimal("1") - book.yes_bid
-        depth_at_price = book.yes_bid_depth
+        depth_at_price = sell_yes_depth
     order_dollars = price * Decimal(intent.contracts)
     minutes_to_close = 99999
     if market.close_time is not None:

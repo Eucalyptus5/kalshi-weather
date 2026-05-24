@@ -7,6 +7,7 @@ from decimal import Decimal
 from bot.execution.gate_cost_basis import (
     cost_per_contract_from_book,
     cost_per_contract_from_market_legacy,
+    paper_collateral_per_contract,
 )
 from bot.execution.paper import TradeSide
 from bot.kalshi_client import KalshiMarket, KalshiOrderbook
@@ -53,3 +54,34 @@ def test_legacy_buy_yes_uses_market_yes_ask() -> None:
 
 def test_legacy_sell_yes_uses_yes_bid_complement() -> None:
     assert cost_per_contract_from_market_legacy(TradeSide.SELL_YES, _market()) == Decimal("0.75")
+
+
+def test_paper_collateral_buy_yes_uses_yes_ask() -> None:
+    assert paper_collateral_per_contract(TradeSide.BUY_YES, _book()) == Decimal("0.85")
+
+
+def test_paper_collateral_sell_yes_uses_one_minus_yes_bid() -> None:
+    assert paper_collateral_per_contract(TradeSide.SELL_YES, _book()) == Decimal("0.80")
+
+
+def test_paper_collateral_diverges_from_book_no_ask_on_spread() -> None:
+    book = _book()
+    # demo basis (no_ask) and paper basis (1 - yes_bid) differ by the NO bid-ask spread
+    demo = cost_per_contract_from_book(TradeSide.SELL_YES, book)
+    paper = paper_collateral_per_contract(TradeSide.SELL_YES, book)
+    assert demo == Decimal("0.80")
+    assert paper == Decimal("0.80")
+    book2 = KalshiOrderbook(
+        ticker=book.ticker,
+        yes_ask=Decimal("0.85"),
+        yes_bid=Decimal("0.18"),
+        no_ask=Decimal("0.85"),
+        no_bid=Decimal("0.15"),
+        yes_ask_depth=10,
+        yes_bid_depth=10,
+        no_ask_depth=10,
+        no_bid_depth=10,
+        snapshot_at=book.snapshot_at,
+    )
+    assert cost_per_contract_from_book(TradeSide.SELL_YES, book2) == Decimal("0.85")
+    assert paper_collateral_per_contract(TradeSide.SELL_YES, book2) == Decimal("0.82")

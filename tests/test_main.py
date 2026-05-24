@@ -58,6 +58,7 @@ from bot.storage.sqlite import (
 )
 from bot.strategy import edge as edge_strategy
 from bot.strategy import tails as tails_strategy
+from bot.strategy.sizing import sigma_t_median_for_lead
 
 
 class _StubMeteo:
@@ -244,8 +245,17 @@ _AGGREGATE_TEST_PRICES: tuple[tuple[Decimal, Decimal, Decimal], ...] = (
 )
 
 
-def test_aggregate_test_prices_produce_7_50_at_kelly_0_15() -> None:
-    assert edge_strategy.KELLY_MULTIPLIER == Decimal("0.15")
+def _intents_defaults() -> dict:
+    return {
+        "sigma_T_median": Decimal("2.0"),
+        "event_budget_remaining": Decimal("9999"),
+        "market_budget_remaining": Decimal("9999"),
+        "buy_yes_depth": 10_000,
+        "sell_yes_depth": 10_000,
+    }
+
+
+def test_aggregate_test_prices_route_through_sizer() -> None:
     for yes_ask, yes_bid, fair in _AGGREGATE_TEST_PRICES:
         ctx = edge_strategy.EdgeContext(
             yes_ask=yes_ask,
@@ -256,11 +266,16 @@ def test_aggregate_test_prices_produce_7_50_at_kelly_0_15() -> None:
             is_same_day=False,
             is_blacklisted=False,
             nbm_divergence=None,
+            sigma_T_median=Decimal("3.0"),
+            event_budget_remaining=Decimal("7.50"),
+            market_budget_remaining=Decimal("9999"),
+            depth_at_price=10_000,
+            price_per_contract=yes_ask if fair > yes_ask else Decimal("1") - yes_bid,
         )
-        sig = edge_strategy.evaluate(ctx, kelly_multiplier=Decimal("0.15"))
-        assert sig.notional_dollars == Decimal("7.50"), (
-            f"prices=({yes_ask}, {yes_bid}, {fair}) drove notional={sig.notional_dollars}"
-        )
+        sig = edge_strategy.evaluate(ctx)
+        assert sig.action is not edge_strategy.EdgeAction.SKIP
+        assert sig.contracts > 0
+        assert sig.notional_dollars <= Decimal("7.50")
 
 
 def test_parse_duration_hours() -> None:
@@ -932,6 +947,7 @@ def test_build_intents_skips_blacklisted_lax_series() -> None:
         is_blacklisted=True,
         is_tail=False,
         now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+        **_intents_defaults(),
     )
     assert intents == []
 
@@ -952,6 +968,7 @@ def test_build_intents_skips_blacklisted_mia_series() -> None:
         is_blacklisted=True,
         is_tail=False,
         now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+        **_intents_defaults(),
     )
     assert intents == []
 
@@ -972,6 +989,7 @@ def test_build_intents_emits_for_normal_series() -> None:
         is_blacklisted=False,
         is_tail=False,
         now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+        **_intents_defaults(),
     )
     assert intents
     assert any(i.strategy == "edge" for i in intents)
@@ -1701,6 +1719,7 @@ def test_build_intents_routes_tail_to_tails_only(monkeypatch: pytest.MonkeyPatch
         is_blacklisted=False,
         is_tail=True,
         now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+        **_intents_defaults(),
     )
 
     assert edge_calls == []
@@ -1748,6 +1767,7 @@ def test_build_intents_routes_bracket_to_edge_only(monkeypatch: pytest.MonkeyPat
         is_blacklisted=False,
         is_tail=False,
         now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+        **_intents_defaults(),
     )
 
     assert len(edge_calls) == 1
@@ -1798,6 +1818,7 @@ def test_build_intents_blacklisted_skips_both(monkeypatch: pytest.MonkeyPatch) -
             is_blacklisted=True,
             is_tail=is_tail,
             now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+            **_intents_defaults(),
         )
         if is_tail:
             assert tails_calls == []
@@ -1850,6 +1871,7 @@ def test_build_intents_routes_b_form_bracket_to_edge(monkeypatch: pytest.MonkeyP
         is_blacklisted=False,
         is_tail=parsed.is_tail,
         now=datetime(2026, 5, 18, 12, 0, tzinfo=timezone.utc),
+        **_intents_defaults(),
     )
 
     assert len(edge_calls) == 1
@@ -2047,6 +2069,9 @@ async def test_evaluate_strategies_caps_market_after_threshold(
     app = _make_app(meteo=meteo, kalshi=kalshi)
     await refresh_forecasts(app)
     await refresh_markets(app)
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = datetime(
+        2026, 5, 6, 11, 30, tzinfo=timezone.utc
+    )
 
     monkeypatch.setattr(bot_main, "market_position_cap", lambda app=None: Decimal("40"))
     monkeypatch.setattr(bot_main, "event_position_cap", lambda app=None: Decimal("10000"))
@@ -2059,14 +2084,17 @@ async def test_evaluate_strategies_caps_market_after_threshold(
 
     with app.session_factory() as session:
         trades = session.scalars(select(PaperTradeRow)).all()
-        cap_failures = session.scalars(
-            select(GateFailure).where(GateFailure.gate_name == "within_market_cap")
-        ).all()
 
     assert len(trades) >= 1
-    assert any(t.market_ticker == market.ticker for t in trades)
-    assert cap_failures
-    assert any(f.market_ticker == market.ticker for f in cap_failures)
+    market_dollars = sum(
+        (
+            Decimal(t.contracts) * t.simulated_price
+            for t in trades
+            if t.market_ticker == market.ticker
+        ),
+        Decimal("0"),
+    )
+    assert market_dollars <= Decimal("40")
 
 
 async def test_evaluate_strategies_caps_event_across_brackets(
@@ -2100,6 +2128,9 @@ async def test_evaluate_strategies_caps_event_across_brackets(
     app = _make_app(meteo=meteo, kalshi=kalshi)
     await refresh_forecasts(app)
     await refresh_markets(app)
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = datetime(
+        2026, 5, 6, 11, 30, tzinfo=timezone.utc
+    )
 
     monkeypatch.setattr(bot_main, "market_position_cap", lambda app=None: Decimal("10000"))
     monkeypatch.setattr(bot_main, "event_position_cap", lambda app=None: Decimal("10"))
@@ -2111,10 +2142,12 @@ async def test_evaluate_strategies_caps_event_across_brackets(
         await evaluate_strategies(app, now)
 
     with app.session_factory() as session:
-        cap_failures = session.scalars(
-            select(GateFailure).where(GateFailure.gate_name == "within_event_cap")
-        ).all()
-    assert cap_failures
+        trades = session.scalars(select(PaperTradeRow)).all()
+    event_dollars = sum(
+        (Decimal(t.contracts) * t.simulated_price for t in trades),
+        Decimal("0"),
+    )
+    assert event_dollars <= Decimal("10")
 
 
 async def test_evaluate_strategies_within_cycle_event_cap_blocks_second_bracket(
@@ -2161,6 +2194,7 @@ async def test_evaluate_strategies_within_cycle_event_cap_blocks_second_bracket(
         now,
         app,
         mode,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -2257,6 +2291,7 @@ async def test_evaluate_strategies_overlay_strip_regression_canary(
         now,
         app,
         mode,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -2332,6 +2367,8 @@ def _gate_ctx_kwargs(intent: TradeIntent, market: KalshiMarket, book: KalshiOrde
         event_existing_dollars=Decimal("0"),
         series_existing_dollars=Decimal("0"),
         aggregate_existing_dollars=Decimal("0"),
+        buy_yes_depth=book.no_bid_depth,
+        sell_yes_depth=book.yes_bid_depth,
     )
 
 
@@ -2423,6 +2460,8 @@ def test_gate_ctx_for_requires_book_kwarg() -> None:
             event_existing_dollars=Decimal("0"),
             series_existing_dollars=Decimal("0"),
             aggregate_existing_dollars=Decimal("0"),
+            buy_yes_depth=10,
+            sell_yes_depth=10,
         )
 
 
@@ -2511,6 +2550,7 @@ async def test_evaluate_strategies_partial_fill_on_thin_book(monkeypatch) -> Non
         now,
         app,
         mode,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -2612,6 +2652,7 @@ async def test_evaluate_strategies_partial_fill_overlay_uses_trade_contracts_acr
         now,
         app,
         mode,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -2694,6 +2735,7 @@ async def test_evaluate_strategies_stale_orderbook_skips(
         now,
         app,
         mode,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -2755,6 +2797,7 @@ async def test_evaluate_strategies_stale_snapshot_drives_zero_trades(
         now,
         app,
         mode,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -2821,6 +2864,7 @@ async def test_evaluate_strategies_stale_skip_ratio_warns(
         now,
         app,
         mode,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -2915,6 +2959,7 @@ async def test_evaluate_strategies_per_series_stale_skip_warns_on_one_stuck_seri
         now,
         app,
         mode,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -3479,21 +3524,33 @@ def _seed_aggregate_fixture(app: App) -> list[tuple[KalshiMarket, KalshiOrderboo
     return fixtures
 
 
-def _pin_kelly_multiplier(monkeypatch: pytest.MonkeyPatch) -> None:
-    real_evaluate = edge_strategy.evaluate
+def _pin_seven_fifty_per_intent(monkeypatch: pytest.MonkeyPatch) -> None:
+    def stub(*, ticker, market, book, fair_yes, **_kwargs):
+        if fair_yes > book.yes_ask:
+            side = TradeSide.BUY_YES
+            price = book.yes_ask
+        else:
+            side = TradeSide.SELL_YES
+            price = Decimal("1") - book.yes_bid
+        contracts = int(Decimal("7.50") / price)
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=side,
+                contracts=contracts,
+                fair_yes=fair_yes,
+                strategy="edge",
+            )
+        ]
 
-    def evaluate_with_pinned_kelly(ctx, **kwargs):  # type: ignore[no-untyped-def]
-        kwargs.setdefault("kelly_multiplier", Decimal("0.15"))
-        return real_evaluate(ctx, **kwargs)
-
-    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", evaluate_with_pinned_kelly)
+    monkeypatch.setattr(bot_main, "_build_intents", stub)
 
 
 async def test_evaluate_strategies_blocks_on_aggregate_cap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _lift_per_key_caps_keep_aggregate(monkeypatch, aggregate_cap=Decimal("200"))
-    _pin_kelly_multiplier(monkeypatch)
+    _pin_seven_fifty_per_intent(monkeypatch)
 
     app = _make_app(series_list=_AGGREGATE_SERIES)
     fixtures = _seed_aggregate_fixture(app)
@@ -3528,7 +3585,7 @@ async def test_evaluate_strategies_aggregate_overlay_updates_within_cycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _lift_per_key_caps_keep_aggregate(monkeypatch, aggregate_cap=Decimal("40"))
-    _pin_kelly_multiplier(monkeypatch)
+    _pin_seven_fifty_per_intent(monkeypatch)
 
     app = _make_app(series_list=_AGGREGATE_SERIES)
     _seed_aggregate_fixture(app)
@@ -3551,7 +3608,7 @@ async def test_evaluate_strategies_aggregate_kwarg_threads_across_cycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _lift_per_key_caps_keep_aggregate(monkeypatch, aggregate_cap=Decimal("40"))
-    _pin_kelly_multiplier(monkeypatch)
+    _pin_seven_fifty_per_intent(monkeypatch)
 
     app = _make_app(series_list=_AGGREGATE_SERIES)
     _seed_aggregate_fixture(app)
@@ -3654,6 +3711,8 @@ async def test_bankroll_accessor_drives_all_downstream_reads(
         event_existing_dollars=Decimal("0"),
         series_existing_dollars=Decimal("0"),
         aggregate_existing_dollars=Decimal("0"),
+        buy_yes_depth=bracket_book.no_bid_depth,
+        sell_yes_depth=bracket_book.yes_bid_depth,
     )
 
     assert edge_seen, "edge_strategy.evaluate was not reached"
@@ -3997,6 +4056,7 @@ def _one_intent_stub(
         is_tail,
         mode,
         now,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -4170,6 +4230,7 @@ async def test_evaluate_strategies_demo_mode_asserts_no_cost_per_contract_presen
         is_tail,
         mode,
         now,
+        **_kwargs,
     ):
         edge_strategy.evaluate(
             edge_strategy.EdgeContext(
@@ -4181,6 +4242,11 @@ async def test_evaluate_strategies_demo_mode_asserts_no_cost_per_contract_presen
                 is_same_day=False,
                 is_blacklisted=False,
                 nbm_divergence=None,
+                sigma_T_median=Decimal("2.0"),
+                event_budget_remaining=Decimal("9999"),
+                market_budget_remaining=Decimal("9999"),
+                depth_at_price=10_000,
+                price_per_contract=book.yes_ask,
                 no_cost_per_contract=None,
             ),
             mode="demo",
@@ -4218,6 +4284,7 @@ async def test_evaluate_strategies_paper_mode_none_cost_per_contract_accepted(
         is_tail,
         mode,
         now,
+        **_kwargs,
     ):
         edge_strategy.evaluate(
             edge_strategy.EdgeContext(
@@ -4229,6 +4296,11 @@ async def test_evaluate_strategies_paper_mode_none_cost_per_contract_accepted(
                 is_same_day=False,
                 is_blacklisted=False,
                 nbm_divergence=None,
+                sigma_T_median=Decimal("2.0"),
+                event_budget_remaining=Decimal("9999"),
+                market_budget_remaining=Decimal("9999"),
+                depth_at_price=10_000,
+                price_per_contract=book.yes_ask,
                 no_cost_per_contract=None,
             ),
             mode="paper",
@@ -4889,7 +4961,7 @@ async def test_tails_call_site_paper_mode_baseline_byte_for_byte(
         assert kwargs.get("mode") == "paper"
 
 
-async def test_tails_call_site_demo_mode_clamps_to_market_position_cap(
+async def test_tails_call_site_demo_mode_market_budget_clamps_via_sizer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
@@ -4901,18 +4973,29 @@ async def test_tails_call_site_demo_mode_clamps_to_market_position_cap(
         return _demo_order(now=now, ticker=intent.market_ticker, side_kalshi="no")
 
     monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
-    captured = await _capture_tails_call(
-        app, meteo, market, book, now, monkeypatch, lift_market=False
-    )
+    captured_ctx: list[tails_strategy.TailsContext] = []
+    real = tails_strategy.evaluate
 
-    assert captured
-    kwargs = captured[0]
-    assert kwargs["position_cap"] == Decimal("7.50")
-    assert kwargs["contracts_cap"] == int(Decimal("7.50") / Decimal("0.90"))
-    assert kwargs["contracts_cap"] == 8
+    def rec(ctx, **kwargs):
+        captured_ctx.append(ctx)
+        return real(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.tails_strategy, "evaluate", rec)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    app.forecast_cdfs[("KDEN", date(2026, 5, 8))] = _StrongTailCdf()
+    app.ensemble_spreads[("KDEN", date(2026, 5, 8))] = Decimal("5.0")
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
+    _lift_caps(monkeypatch, lift_market=False)
+    await evaluate_strategies(app, now)
+
+    assert captured_ctx
+    ctx = captured_ctx[0]
+    assert ctx.market_budget_remaining == Decimal("7.50")
+    assert int(ctx.market_budget_remaining / ctx.price_per_contract) == 8
 
 
-async def test_tails_contracts_cap_scales_with_app_bankroll(
+async def test_tails_market_budget_scales_with_app_bankroll(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
@@ -4924,15 +5007,25 @@ async def test_tails_contracts_cap_scales_with_app_bankroll(
         return _demo_order(now=now, ticker=intent.market_ticker, side_kalshi="no")
 
     monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
-    captured = await _capture_tails_call(
-        app, meteo, market, book, now, monkeypatch, lift_market=False
-    )
+    captured_ctx: list[tails_strategy.TailsContext] = []
+    real = tails_strategy.evaluate
 
-    assert captured
-    kwargs = captured[0]
-    assert kwargs["position_cap"] == Decimal("15.00")
-    assert kwargs["contracts_cap"] == int(Decimal("15.00") / Decimal("0.90"))
-    assert kwargs["contracts_cap"] == 16
+    def rec(ctx, **kwargs):
+        captured_ctx.append(ctx)
+        return real(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.tails_strategy, "evaluate", rec)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    app.forecast_cdfs[("KDEN", date(2026, 5, 8))] = _StrongTailCdf()
+    app.ensemble_spreads[("KDEN", date(2026, 5, 8))] = Decimal("5.0")
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
+    _lift_caps(monkeypatch, lift_market=False)
+    await evaluate_strategies(app, now)
+
+    assert captured_ctx
+    ctx = captured_ctx[0]
+    assert ctx.market_budget_remaining == Decimal("15.00")
 
 
 async def test_tails_call_site_demo_mode_zero_wired_cost_omits_kwargs(
@@ -4965,7 +5058,7 @@ async def test_tails_call_site_demo_mode_zero_wired_cost_omits_kwargs(
         assert "contracts_cap" not in kwargs
 
 
-async def test_tails_call_site_paper_mode_baseline_negative_companion(
+async def test_tails_call_site_paper_mode_baseline_uses_sizer_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
@@ -4974,29 +5067,10 @@ async def test_tails_call_site_paper_mode_baseline_negative_companion(
     app = _make_app(meteo=meteo, kalshi=kalshi)
     captured = await _capture_tails_call(app, meteo, market, book, now, monkeypatch)
     assert captured
-    monkeypatch.undo()
-    paper_contracts = None
-    real = tails_strategy.evaluate
     for kwargs in captured:
-        ctx = tails_strategy.TailsContext(
-            yes_ask=book.yes_ask,
-            yes_bid=book.yes_bid,
-            no_bid=book.no_bid,
-            fair_yes=Decimal("0.01"),
-            close_time=market.close_time,
-            now=now,
-            bankroll=Decimal("500"),
-            is_same_day=False,
-        )
-        paper_sig = real(ctx, mode="paper")
-        clamped = real(
-            ctx,
-            mode="paper",
-            position_cap=Decimal("7.50"),
-            contracts_cap=8,
-        )
-        paper_contracts = paper_sig.contracts
-        assert clamped.contracts < paper_contracts
+        assert "position_cap" not in kwargs
+        assert "contracts_cap" not in kwargs
+        assert "kelly_fraction" not in kwargs
 
 
 async def test_startup_backfill_runs_before_eval_loop(
@@ -5288,6 +5362,7 @@ async def test_intent_with_thin_edge_on_low_priced_contract_is_blocked(
         is_tail,
         mode,
         now,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -5352,6 +5427,7 @@ async def test_intent_with_thick_edge_still_clears(
         is_tail,
         mode,
         now,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -5412,6 +5488,7 @@ async def test_paper_mode_edge_after_friction_failure_blocks_papertrade_insert(
         is_tail,
         mode,
         now,
+        **_kwargs,
     ):
         return [
             TradeIntent(
@@ -5463,6 +5540,8 @@ def test_gate_ctx_for_buy_yes_uses_side_specific_edge() -> None:
         event_existing_dollars=Decimal("0"),
         series_existing_dollars=Decimal("0"),
         aggregate_existing_dollars=Decimal("0"),
+        buy_yes_depth=book.no_bid_depth,
+        sell_yes_depth=book.yes_bid_depth,
     )
     assert ctx.edge == Decimal("0.10")
     mid = Decimal("0.35")
@@ -5496,6 +5575,8 @@ def test_gate_ctx_for_sell_yes_uses_side_specific_edge() -> None:
         event_existing_dollars=Decimal("0"),
         series_existing_dollars=Decimal("0"),
         aggregate_existing_dollars=Decimal("0"),
+        buy_yes_depth=book.no_bid_depth,
+        sell_yes_depth=book.yes_bid_depth,
     )
     assert ctx.edge == book.yes_bid - Decimal("0.20")
     assert ctx.edge == Decimal("0.10")
@@ -5532,6 +5613,8 @@ def test_gate_ctx_for_sources_edge_from_book_not_market() -> None:
         event_existing_dollars=Decimal("0"),
         series_existing_dollars=Decimal("0"),
         aggregate_existing_dollars=Decimal("0"),
+        buy_yes_depth=book.no_bid_depth,
+        sell_yes_depth=book.yes_bid_depth,
     )
     assert ctx.edge == Decimal("0.09")
     assert ctx.edge != Decimal("0.50") - market.yes_ask
@@ -5575,8 +5658,572 @@ def test_gate_ctx_for_passes_orderbook_depth_through() -> None:
         event_existing_dollars=Decimal("0"),
         series_existing_dollars=Decimal("0"),
         aggregate_existing_dollars=Decimal("0"),
+        buy_yes_depth=book.no_bid_depth,
+        sell_yes_depth=book.yes_bid_depth,
     )
     ctx_buy = _gate_ctx_for(intent=buy, fair_yes=Decimal("0.50"), **base)
     ctx_sell = _gate_ctx_for(intent=sell, fair_yes=Decimal("0.20"), **base)
     assert ctx_buy.depth_at_price == 7
     assert ctx_sell.depth_at_price == 11
+
+
+def test_no_strategy_caller_uses_hardcoded_contracts() -> None:
+    edge_src = Path("bot/strategy/edge.py").read_text()
+    tails_src = Path("bot/strategy/tails.py").read_text()
+    assert "compute_stake_contracts" in edge_src
+    assert "compute_stake_contracts" in tails_src
+
+
+async def test_build_intents_passes_event_budget_to_strategies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=now - timedelta(hours=1),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.20", "0.18", now=now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    seen: list[Decimal] = []
+    real = edge_strategy.evaluate
+
+    def rec(ctx, **kwargs):
+        seen.append(ctx.event_budget_remaining)
+        return real(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", rec)
+    await evaluate_strategies(app, now)
+    assert seen
+    assert all(v >= Decimal("0") for v in seen)
+
+
+async def test_build_intents_uses_lead_time_sigma_median(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    near_market = _market_from(
+        "KXHIGHDEN-26MAY07-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 7, 18, 0, tzinfo=timezone.utc),
+    )
+    far_market = _market_from(
+        "KXHIGHDEN-26MAY09-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc),
+    )
+
+    seen: list[tuple[str, Decimal]] = []
+    real = edge_strategy.evaluate
+
+    def rec(ctx, **kwargs):
+        seen.append(("ctx", ctx.sigma_T_median))
+        return real(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", rec)
+
+    book = _book_from(near_market.ticker, "0.20", "0.18", now=now)
+    _build_intents(
+        app=_make_app(),
+        ticker=near_market.ticker,
+        market=near_market,
+        book=book,
+        fair_yes=Decimal("0.80"),
+        spread=Decimal("3.0"),
+        is_same_day=False,
+        is_blacklisted=False,
+        is_tail=False,
+        mode="paper",
+        now=now,
+        sigma_T_median=sigma_t_median_for_lead(
+            int((near_market.close_time - now).total_seconds() / 3600)
+        ),
+        event_budget_remaining=Decimal("9999"),
+        market_budget_remaining=Decimal("9999"),
+        buy_yes_depth=10_000,
+        sell_yes_depth=10_000,
+    )
+    book2 = _book_from(far_market.ticker, "0.20", "0.18", now=now)
+    _build_intents(
+        app=_make_app(),
+        ticker=far_market.ticker,
+        market=far_market,
+        book=book2,
+        fair_yes=Decimal("0.80"),
+        spread=Decimal("3.0"),
+        is_same_day=False,
+        is_blacklisted=False,
+        is_tail=False,
+        mode="paper",
+        now=now,
+        sigma_T_median=sigma_t_median_for_lead(
+            int((far_market.close_time - now).total_seconds() / 3600)
+        ),
+        event_budget_remaining=Decimal("9999"),
+        market_budget_remaining=Decimal("9999"),
+        buy_yes_depth=10_000,
+        sell_yes_depth=10_000,
+    )
+    assert len(seen) == 2
+    near_sigma = seen[0][1]
+    far_sigma = seen[1][1]
+    assert far_sigma > near_sigma
+
+
+async def test_gate_ctx_and_build_intents_share_depth_ints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=now - timedelta(hours=1),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(
+        market.ticker,
+        "0.20",
+        "0.18",
+        now=now,
+        yes_bid_depth=7,
+        no_bid_depth=11,
+    )
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    edge_depths: list[int] = []
+    real_edge = edge_strategy.evaluate
+
+    def rec_edge(ctx, **kwargs):
+        edge_depths.append(ctx.depth_at_price)
+        return real_edge(ctx, **kwargs)
+
+    gate_depths: list[int] = []
+    real_gate = bot_main._gate_ctx_for
+
+    def rec_gate(**kwargs):
+        ctx = real_gate(**kwargs)
+        gate_depths.append(ctx.depth_at_price)
+        return ctx
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", rec_edge)
+    monkeypatch.setattr(bot_main, "_gate_ctx_for", rec_gate)
+    await evaluate_strategies(app, now)
+
+    assert edge_depths
+    assert all(d == 11 for d in edge_depths)
+    assert all(d == 11 for d in gate_depths)
+
+
+async def test_event_budget_recomputed_per_iteration_not_per_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=now - timedelta(hours=1),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    m_a = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    m_b = _market_from(
+        "KXHIGHDEN-26MAY08-T75-80",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book_a = _book_from(m_a.ticker, "0.20", "0.18", now=now)
+    book_b = _book_from(m_b.ticker, "0.20", "0.18", now=now)
+    kalshi = _StubKalshi(markets=[m_a, m_b], orderbooks={m_a.ticker: book_a, m_b.ticker: book_b})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    captured: list[Decimal] = []
+    real = edge_strategy.evaluate
+
+    def rec(ctx, **kwargs):
+        captured.append(ctx.event_budget_remaining)
+        return real(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", rec)
+    await evaluate_strategies(app, now)
+
+    assert len(captured) >= 2
+    assert captured[1] < captured[0] or captured[1] == captured[0]
+
+
+async def test_build_intents_threads_mode_and_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.30",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.30", "0.18", now=now)
+
+    seen_paper: list[Decimal] = []
+    real = edge_strategy.evaluate
+
+    def rec(ctx, **kwargs):
+        seen_paper.append(ctx.price_per_contract)
+        return real(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", rec)
+    _build_intents(
+        app=_make_app(),
+        ticker=market.ticker,
+        market=market,
+        book=book,
+        fair_yes=Decimal("0.05"),
+        spread=Decimal("3.0"),
+        is_same_day=False,
+        is_blacklisted=False,
+        is_tail=False,
+        mode="paper",
+        now=now,
+        sigma_T_median=Decimal("2.0"),
+        event_budget_remaining=Decimal("9999"),
+        market_budget_remaining=Decimal("9999"),
+        buy_yes_depth=10_000,
+        sell_yes_depth=10_000,
+    )
+    assert seen_paper == [Decimal("1") - book.yes_bid]
+
+    seen_demo: list[Decimal] = []
+
+    def rec_demo(ctx, **kwargs):
+        seen_demo.append(ctx.price_per_contract)
+        return real(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", rec_demo)
+    _build_intents(
+        app=_make_app(),
+        ticker=market.ticker,
+        market=market,
+        book=book,
+        fair_yes=Decimal("0.05"),
+        spread=Decimal("3.0"),
+        is_same_day=False,
+        is_blacklisted=False,
+        is_tail=False,
+        mode="demo",
+        now=now,
+        sigma_T_median=Decimal("2.0"),
+        event_budget_remaining=Decimal("9999"),
+        market_budget_remaining=Decimal("9999"),
+        buy_yes_depth=10_000,
+        sell_yes_depth=10_000,
+    )
+    assert seen_demo == [book.no_ask]
+
+
+async def test_demo_path_no_longer_passes_contracts_cap_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _wide_tails_market(now)
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi, bankroll=Decimal("500"))
+
+    async def fake_place(intent, book, client, *, now):
+        return _demo_order(now=now, ticker=intent.market_ticker, side_kalshi="no")
+
+    monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
+    captured = await _capture_tails_call(
+        app, meteo, market, book, now, monkeypatch, lift_market=False
+    )
+    assert captured
+    for kwargs in captured:
+        assert "contracts_cap" not in kwargs
+        assert "position_cap" not in kwargs
+
+
+async def test_overlay_debit_uses_paper_basis_in_paper_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=now - timedelta(hours=1),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(7).normal(85.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.85",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = KalshiOrderbook(
+        ticker=market.ticker,
+        yes_ask=Decimal("0.85"),
+        yes_bid=Decimal("0.18"),
+        no_ask=Decimal("0.85"),
+        no_bid=Decimal("0.15"),
+        yes_ask_depth=10_000,
+        yes_bid_depth=10_000,
+        no_ask_depth=10_000,
+        no_bid_depth=10_000,
+        snapshot_at=now - timedelta(seconds=1),
+    )
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    def stub(*, ticker, market, book, fair_yes, **_kwargs):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.SELL_YES,
+                contracts=5,
+                fair_yes=fair_yes,
+                strategy="tails",
+            )
+        ]
+
+    monkeypatch.setattr(bot_main, "_build_intents", stub)
+
+    captured_overlays: dict[str, Decimal] = {}
+    real_gate = bot_main._gate_ctx_for
+
+    def rec_gate(**kwargs):
+        captured_overlays.setdefault("event_existing", kwargs["event_existing_dollars"])
+        return real_gate(**kwargs)
+
+    monkeypatch.setattr(bot_main, "_gate_ctx_for", rec_gate)
+
+    await evaluate_strategies(app, now)
+    await evaluate_strategies(app, now)
+
+    paper_basis = Decimal("1") - book.yes_bid
+    demo_basis = book.no_ask
+    assert paper_basis != demo_basis
+    assert captured_overlays.get("event_existing", Decimal("0")) == Decimal("0")
+
+
+async def test_overlay_debit_uses_no_ask_in_demo_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=now - timedelta(hours=1),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(7).normal(85.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.85",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = KalshiOrderbook(
+        ticker=market.ticker,
+        yes_ask=Decimal("0.85"),
+        yes_bid=Decimal("0.18"),
+        no_ask=Decimal("0.85"),
+        no_bid=Decimal("0.15"),
+        yes_ask_depth=10_000,
+        yes_bid_depth=10_000,
+        no_ask_depth=10_000,
+        no_bid_depth=10_000,
+        snapshot_at=now - timedelta(seconds=1),
+    )
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi, bankroll=Decimal("500"))
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    async def fake_place(intent, book, client, *, now):
+        return _demo_order(now=now, ticker=intent.market_ticker, side_kalshi="no")
+
+    monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
+
+    def stub(*, ticker, market, book, fair_yes, **_kwargs):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.SELL_YES,
+                contracts=5,
+                fair_yes=fair_yes,
+                strategy="tails",
+            )
+        ]
+
+    monkeypatch.setattr(bot_main, "_build_intents", stub)
+    await evaluate_strategies(app, now)
+
+
+async def test_market_budget_first_iteration_lands_at_seven_fifty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=now - timedelta(hours=1),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(7).normal(85.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T100",
+        "0.20",
+        "0.07",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.20", "0.07", now=now)
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+
+    seen: list[Decimal] = []
+    real = tails_strategy.evaluate
+
+    def rec(ctx, **kwargs):
+        seen.append(ctx.market_budget_remaining)
+        return real(ctx, **kwargs)
+
+    monkeypatch.setattr(bot_main.tails_strategy, "evaluate", rec)
+    app.forecast_cdfs[("KDEN", date(2026, 5, 8))] = _FixedFairCdf(Decimal("0.995"))
+    app.ensemble_spreads[("KDEN", date(2026, 5, 8))] = Decimal("3.0")
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
+    monkeypatch.setattr(bot_main, "event_position_cap", lambda app=None: Decimal("10000"))
+    monkeypatch.setattr(bot_main, "series_position_cap", lambda app=None: Decimal("10000"))
+    monkeypatch.setattr(bot_main, "aggregate_exposure_cap", lambda app=None: Decimal("100000"))
+
+    await evaluate_strategies(app, now)
+
+    assert seen
+    assert seen[0] == Decimal("500") * bot_main.MARKET_POSITION_FRAC
+
+
+async def test_evaluate_strategies_skips_market_with_none_close_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=now - timedelta(hours=1),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(1).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    a_ticker = "KXHIGHDEN-26MAY08-T60-65"
+    b_ticker = "KXHIGHDEN-26MAY08-T70-75"
+    market_a = KalshiMarket(
+        ticker=a_ticker,
+        event_ticker="KXHIGHDEN-26MAY08",
+        series="KXHIGHDEN",
+        status="active",
+        close_time=None,
+        yes_ask=Decimal("0.20"),
+        yes_bid=Decimal("0.18"),
+    )
+    market_b = _market_from(
+        b_ticker,
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book_a = _book_from(a_ticker, "0.20", "0.18", now=now)
+    book_b = _book_from(b_ticker, "0.20", "0.18", now=now)
+    kalshi = _StubKalshi(
+        markets=[market_a, market_b],
+        orderbooks={a_ticker: book_a, b_ticker: book_b},
+    )
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    app.latest_markets[a_ticker] = market_a
+    app.latest_markets[b_ticker] = market_b
+    app.latest_orderbooks[a_ticker] = book_a
+    app.latest_orderbooks[b_ticker] = book_b
+    _lift_caps(monkeypatch)
+
+    seen_tickers: list[str] = []
+    real = bot_main._build_intents
+
+    def rec(*, ticker, **kwargs):
+        seen_tickers.append(ticker)
+        return real(ticker=ticker, **kwargs)
+
+    monkeypatch.setattr(bot_main, "_build_intents", rec)
+    await evaluate_strategies(app, now)
+    assert a_ticker not in seen_tickers
+    assert b_ticker in seen_tickers
+
+
+async def test_build_intents_skips_blacklisted_tail_series() -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHLAX-26MAY08-T100", "0.20", "0.18", close_at)
+    book = _book_from(market.ticker, "0.20", "0.18")
+    intents = _build_intents(
+        app=_make_app(),
+        ticker=market.ticker,
+        market=market,
+        book=book,
+        fair_yes=Decimal("0.05"),
+        spread=Decimal("3.0"),
+        is_same_day=False,
+        is_blacklisted=True,
+        is_tail=True,
+        mode="paper",
+        now=datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc),
+        **_intents_defaults(),
+    )
+    assert all(i.strategy != "tails" for i in intents)

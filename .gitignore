@@ -15,6 +15,7 @@ secrets/
 
 # data
 data/
+!tests/data/
 *.db
 *.db-journal
 *.sqlite
