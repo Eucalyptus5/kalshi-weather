@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect as py_inspect
 import logging
+import re as _re
 from datetime import datetime, timedelta
 from datetime import timezone as _timezone
 from decimal import Decimal
@@ -20,6 +21,7 @@ from bot.storage.sqlite import (
     make_session_factory,
 )
 from bot.validation.calibration import (
+    BSS_AGGREGATE_NA,
     CORRECTION_QUANTUM,
     EDGE_PRICE_EDGES,
     LEAD_TIME_NONE_BUCKET_IDX,
@@ -37,6 +39,7 @@ from bot.validation.calibration import (
     hours_until,
     refit_all,
 )
+from bot.validation.scoring import brier_score
 
 
 def _empty_maps() -> CalibrationMaps:
@@ -48,6 +51,7 @@ def _empty_maps() -> CalibrationMaps:
         holdout_bs_prev={},
         holdout_n_per_bucket={},
         climatological_rate_per_bucket={},
+        bss_aggregate_per_stratum={},
     )
 
 
@@ -64,6 +68,7 @@ def _maps_with(
         holdout_bs_prev={key: Decimal("0.06")},
         holdout_n_per_bucket={key: 500},
         climatological_rate_per_bucket={key: climatological_rate},
+        bss_aggregate_per_stratum={key[0]: Decimal("0.1")},
     )
 
 
@@ -898,3 +903,142 @@ def test_refit_all_emits_per_bucket_log_line(session, caplog: pytest.LogCaptureF
         "holdout_identity_pct=",
     ):
         assert token in line
+
+
+def test_refit_all_populates_bss_aggregate_per_stratum(session) -> None:
+    intended = _now() - timedelta(days=30)
+    close = intended + timedelta(hours=20)
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-AGG-T",
+        strategy="tails",
+        q_raw=Decimal("0.005"),
+        wins=60,
+        losses=240,
+        intended_at=intended,
+        close_time=close,
+    )
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-AGG-E",
+        strategy="edge",
+        q_raw=Decimal("0.07"),
+        wins=120,
+        losses=180,
+        intended_at=intended,
+        close_time=close,
+    )
+    maps = refit_all(session)
+    assert "tails" in maps.bss_aggregate_per_stratum
+    assert "edge" in maps.bss_aggregate_per_stratum
+    assert isinstance(maps.bss_aggregate_per_stratum["tails"], Decimal)
+    assert isinstance(maps.bss_aggregate_per_stratum["edge"], Decimal)
+
+
+def test_refit_all_bss_aggregate_is_na_when_stratum_has_no_fitted_buckets(session) -> None:
+    intended = _now() - timedelta(days=30)
+    close = intended + timedelta(hours=20)
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-NAONLY",
+        strategy="tails",
+        q_raw=Decimal("0.005"),
+        wins=60,
+        losses=240,
+        intended_at=intended,
+        close_time=close,
+    )
+    maps = refit_all(session)
+    assert "tails" in maps.bss_aggregate_per_stratum
+    assert maps.bss_aggregate_per_stratum["edge"] == BSS_AGGREGATE_NA
+
+
+def test_refit_all_holdout_bs_prev_is_identity_on_cold_start(session) -> None:
+    fit_intended = _now() - timedelta(days=30)
+    fit_close = fit_intended + timedelta(hours=20)
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-COLD",
+        strategy="tails",
+        q_raw=Decimal("0.005"),
+        wins=60,
+        losses=240,
+        intended_at=fit_intended,
+        close_time=fit_close,
+    )
+    holdout_intended = _now() - timedelta(days=3)
+    holdout_close = holdout_intended + timedelta(hours=20)
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26MAY25-COLD-HO",
+        strategy="tails",
+        q_raw=Decimal("0.005"),
+        wins=15,
+        losses=85,
+        intended_at=holdout_intended,
+        close_time=holdout_close,
+        settled_at=_now() - timedelta(hours=12),
+    )
+    cold = refit_all(session, prev_maps=None)
+    bucket = ("tails", 0, 1)
+    assert bucket in cold.maps
+    h_q = [Decimal("0.005")] * 100
+    h_y = [1] * 15 + [0] * 85
+    expected = brier_score(h_q, h_y)
+    assert cold.holdout_bs_prev[bucket] == expected
+
+
+def test_refit_all_holdout_identity_pct_reflects_floor_biting(
+    session, caplog: pytest.LogCaptureFixture
+) -> None:
+    fit_intended = _now() - timedelta(days=30)
+    fit_close = fit_intended + timedelta(hours=20)
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-FBLOW",
+        strategy="tails",
+        q_raw=Decimal("0.001"),
+        wins=0,
+        losses=400,
+        intended_at=fit_intended,
+        close_time=fit_close,
+    )
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-FBHIGH",
+        strategy="tails",
+        q_raw=Decimal("0.019"),
+        wins=60,
+        losses=40,
+        intended_at=fit_intended,
+        close_time=fit_close,
+    )
+    holdout_intended = _now() - timedelta(days=3)
+    holdout_close = holdout_intended + timedelta(hours=20)
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26MAY25-FB-HO",
+        strategy="tails",
+        q_raw=Decimal("0.001"),
+        wins=5,
+        losses=95,
+        intended_at=holdout_intended,
+        close_time=holdout_close,
+        settled_at=_now() - timedelta(hours=12),
+    )
+    with caplog.at_level(logging.INFO, logger="bot.validation.calibration"):
+        refit_all(session)
+    bucket_lines = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.getMessage().startswith("calibration_bucket ")
+        and "strategy=tails" in rec.getMessage()
+        and "price_idx=0" in rec.getMessage()
+        and "lead_idx=1" in rec.getMessage()
+    ]
+    assert bucket_lines, "expected at least one tails/price=0/lead=1 calibration_bucket log line"
+    line = bucket_lines[0]
+    match = _re.search(r"holdout_identity_pct=([0-9.]+)", line)
+    assert match is not None
+    holdout_identity_pct = Decimal(match.group(1))
+    assert holdout_identity_pct >= Decimal("70")

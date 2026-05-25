@@ -40,6 +40,9 @@ EDGE_PRICE_EDGES: tuple[Decimal, ...] = (
 LEAD_TIME_EDGES_HOURS: tuple[int, ...] = (12, 24, 48)
 
 
+BSS_AGGREGATE_NA: str = "NA"
+
+
 @dataclass(frozen=True, slots=True)
 class CalibrationMaps:
     maps: Mapping[tuple[str, int, int], IsotonicRegression]
@@ -49,6 +52,7 @@ class CalibrationMaps:
     holdout_bs_prev: Mapping[tuple[str, int, int], Decimal]
     holdout_n_per_bucket: Mapping[tuple[str, int, int], int]
     climatological_rate_per_bucket: Mapping[tuple[str, int, int], Decimal]
+    bss_aggregate_per_stratum: Mapping[str, Decimal | str]
 
 
 def _price_edges_for(strategy: str) -> tuple[Decimal, ...]:
@@ -227,6 +231,8 @@ def refit_all(session: Session, prev_maps: CalibrationMaps | None = None) -> Cal
     holdout_bs_new: dict[tuple[str, int, int], Decimal] = {}
     holdout_bs_prev: dict[tuple[str, int, int], Decimal] = {}
     climatological_rate_per_bucket: dict[tuple[str, int, int], Decimal] = {}
+    stratum_fit_preds: dict[str, list[float]] = {"tails": [], "edge": []}
+    stratum_fit_outcomes: dict[str, list[int]] = {"tails": [], "edge": []}
 
     for key, samples in fit_by_bucket.items():
         strategy, price_idx, lead_idx = key
@@ -262,6 +268,8 @@ def refit_all(session: Session, prev_maps: CalibrationMaps | None = None) -> Cal
             if clim > Decimal("0") and clim < Decimal("1")
             else Decimal("0")
         )
+        stratum_fit_preds[strategy].extend(fit_preds.tolist())
+        stratum_fit_outcomes[strategy].extend(outcomes_arr.tolist())
         fit_identity_pct = (
             Decimal(fit_identity) / Decimal(len(samples)) * Decimal("100")
         ).quantize(CORRECTION_QUANTUM)
@@ -307,6 +315,23 @@ def refit_all(session: Session, prev_maps: CalibrationMaps | None = None) -> Cal
             holdout_identity_pct,
         )
 
+    bss_aggregate_per_stratum: dict[str, Decimal | str] = {}
+    for stratum in ("tails", "edge"):
+        preds = stratum_fit_preds[stratum]
+        outcomes = stratum_fit_outcomes[stratum]
+        if not preds:
+            bss_aggregate_per_stratum[stratum] = BSS_AGGREGATE_NA
+            continue
+        clim_rate = Decimal(str(sum(outcomes) / len(outcomes))).quantize(CORRECTION_QUANTUM)
+        if clim_rate <= Decimal("0") or clim_rate >= Decimal("1"):
+            bss_aggregate_per_stratum[stratum] = BSS_AGGREGATE_NA
+            continue
+        bss_aggregate_per_stratum[stratum] = brier_skill_score(
+            [Decimal(str(p)) for p in preds],
+            outcomes,
+            clim_rate,
+        )
+
     return CalibrationMaps(
         maps=maps,
         fitted_at=now,
@@ -315,4 +340,5 @@ def refit_all(session: Session, prev_maps: CalibrationMaps | None = None) -> Cal
         holdout_bs_prev=holdout_bs_prev,
         holdout_n_per_bucket=holdout_n,
         climatological_rate_per_bucket=climatological_rate_per_bucket,
+        bss_aggregate_per_stratum=bss_aggregate_per_stratum,
     )

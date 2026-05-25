@@ -72,6 +72,7 @@ from bot.strategy import edge as edge_strategy
 from bot.strategy import tails as tails_strategy
 from bot.strategy.sizing import sigma_t_median_for_lead
 from bot.validation.calibration import (
+    BSS_AGGREGATE_NA,
     CalibrationMaps,
     bucket_for,
     format_gate_failure_reason,
@@ -301,6 +302,7 @@ def _empty_calibration_maps() -> CalibrationMaps:
         holdout_bs_prev={},
         holdout_n_per_bucket={},
         climatological_rate_per_bucket={},
+        bss_aggregate_per_stratum={},
     )
 
 
@@ -1210,12 +1212,17 @@ async def _calibration_refit_loop(app: App, stop: asyncio.Event) -> None:
                 if edge_keys
                 else Decimal("0")
             )
+            tails_bss_aggregate = new_maps.bss_aggregate_per_stratum.get("tails", BSS_AGGREGATE_NA)
+            edge_bss_aggregate = new_maps.bss_aggregate_per_stratum.get("edge", BSS_AGGREGATE_NA)
             logger.info(
                 "calibration_refit_complete n_buckets_fit=%d n_buckets_skipped=%d "
+                "tails_bss_aggregate=%s edge_bss_aggregate=%s "
                 "tails_holdout_bs_new=%s tails_holdout_bs_prev=%s "
                 "edge_holdout_bs_new=%s edge_holdout_bs_prev=%s",
                 n_fit,
                 n_skipped,
+                tails_bss_aggregate,
+                edge_bss_aggregate,
                 tails_bs_new,
                 tails_bs_prev,
                 edge_bs_new,

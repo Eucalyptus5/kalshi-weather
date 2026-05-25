@@ -6454,3 +6454,56 @@ async def test_calibration_refit_loop_continues_after_refit_raises(
         stop_after_two_iters(),
     )
     assert call_count["n"] >= 2
+
+
+async def test_calibration_refit_loop_logs_bss_aggregate_tokens(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from bot.main import _calibration_refit_loop
+    from bot.validation.calibration import BSS_AGGREGATE_NA, CalibrationMaps
+
+    app = _make_app()
+    fake_maps = CalibrationMaps(
+        maps={},
+        fitted_at=datetime(2026, 5, 6, 4, 0, tzinfo=timezone.utc),
+        n_samples_per_bucket={},
+        holdout_bs_new={},
+        holdout_bs_prev={},
+        holdout_n_per_bucket={},
+        climatological_rate_per_bucket={},
+        bss_aggregate_per_stratum={"tails": Decimal("0.123456"), "edge": Decimal("0.234567")},
+    )
+    call_count = {"n": 0}
+
+    def fake_refit(session, prev_maps=None):
+        call_count["n"] += 1
+        return fake_maps
+
+    monkeypatch.setattr(bot_main, "refit_all", fake_refit)
+    monkeypatch.setattr(bot_main, "_seconds_until_next_refit", lambda now: 0.001)
+
+    stop = asyncio.Event()
+
+    async def stop_after_one_iter() -> None:
+        while call_count["n"] < 1:
+            await asyncio.sleep(0.005)
+        await asyncio.sleep(0.01)
+        stop.set()
+
+    with caplog.at_level(logging.INFO, logger="bot.main"):
+        await asyncio.gather(
+            _calibration_refit_loop(app, stop),
+            stop_after_one_iter(),
+        )
+    complete_lines = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.getMessage().startswith("calibration_refit_complete ")
+    ]
+    assert complete_lines, "expected a calibration_refit_complete log line"
+    line = complete_lines[0]
+    assert "tails_bss_aggregate=0.123456" in line
+    assert "edge_bss_aggregate=0.234567" in line
+    assert "tails_holdout_bs_new=" in line
+    assert "edge_holdout_bs_new=" in line
+    assert BSS_AGGREGATE_NA not in line.split("tails_bss_aggregate=")[1].split(" ")[0]
