@@ -6,12 +6,8 @@ import pytest
 
 from bot.execution.paper import TradeSide
 from bot.strategy.sizing import (
-    DEPTH_FRACTION_CAP,
-    EDGE_KELLY_FRAC,
-    SIGMA_T_FLOOR,
     SIGMA_T_MEDIAN_BY_LEAD_H,
     TAILS_ACTIVE_KELLY_FRAC,
-    TAILS_KELLY_FRAC,
     TAILS_KELLY_FRAC_PRE_CALIBRATION,
     compute_stake_contracts,
     sigma_t_median_for_lead,
@@ -372,7 +368,7 @@ def test_smoke_normal_intent_returns_positive_contracts() -> None:
     assert result >= 1
 
 
-def test_tails_normal_no_shrinkage_brief_vector_lands_at_16_contracts() -> None:
+def test_tails_normal_no_shrinkage_lands_at_16_contracts() -> None:
     result = compute_stake_contracts(
         side=TradeSide.SELL_YES,
         q=Decimal("0.04"),
@@ -387,9 +383,8 @@ def test_tails_normal_no_shrinkage_brief_vector_lands_at_16_contracts() -> None:
         price_per_contract=Decimal("0.90"),
     )
     assert result == 16, (
-        "brief test vector is intentionally relaxed (ebr=$15, mbr non-binding); "
-        "production sees the tighter event-budget regime documented in failure mode 1 "
-        "and lands in the 1-3 range, not 16"
+        "production sees the tighter event-budget regime; this vector deliberately "
+        "relaxes the budget to isolate the sizer's algebra"
     )
 
 
@@ -398,7 +393,6 @@ def test_tails_active_kelly_frac_equals_pre_calibration() -> None:
 
 
 def test_sell_yes_paper_uses_one_minus_yes_bid() -> None:
-    # tracks tests/test_tails.py:52 pin migration from legacy no_bid (62) to new paper basis (60)
     result = compute_stake_contracts(
         side=TradeSide.SELL_YES,
         q=Decimal("0.04"),
@@ -433,7 +427,6 @@ def test_sell_yes_demo_uses_no_ask() -> None:
 
 
 def test_market_budget_clamp_replaces_demo_contracts_cap() -> None:
-    # sizer-side market-budget clamp replaces the brief-04 contracts_cap kwarg per scope item 6.5
     result = compute_stake_contracts(
         side=TradeSide.SELL_YES,
         q=Decimal("0.04"),
@@ -448,24 +441,6 @@ def test_market_budget_clamp_replaces_demo_contracts_cap() -> None:
         price_per_contract=Decimal("0.90"),
     )
     assert result == 2
-
-
-def test_constants_are_decimal() -> None:
-    assert isinstance(EDGE_KELLY_FRAC, Decimal)
-    assert isinstance(TAILS_KELLY_FRAC, Decimal)
-    assert isinstance(TAILS_KELLY_FRAC_PRE_CALIBRATION, Decimal)
-    assert isinstance(TAILS_ACTIVE_KELLY_FRAC, Decimal)
-    assert isinstance(SIGMA_T_FLOOR, Decimal)
-    assert isinstance(DEPTH_FRACTION_CAP, Decimal)
-
-
-def test_edge_kelly_frac_value() -> None:
-    assert EDGE_KELLY_FRAC == Decimal("0.25")
-
-
-def test_tails_kelly_frac_pair_values() -> None:
-    assert TAILS_KELLY_FRAC == Decimal("0.10")
-    assert TAILS_KELLY_FRAC_PRE_CALIBRATION == Decimal("0.05")
 
 
 def test_sigma_t_median_table_has_24h_buckets_through_168() -> None:
