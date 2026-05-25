@@ -5787,8 +5787,32 @@ async def test_build_intents_uses_lead_time_sigma_median(
     assert far_sigma > near_sigma
 
 
+@pytest.mark.parametrize(
+    "fair_yes, yes_ask, yes_bid, expected_depth, expected_action",
+    [
+        (
+            Decimal("0.45"),
+            "0.20",
+            "0.18",
+            11,
+            edge_strategy.EdgeAction.BUY_YES,
+        ),
+        (
+            Decimal("0.05"),
+            "0.85",
+            "0.80",
+            7,
+            edge_strategy.EdgeAction.SELL_YES,
+        ),
+    ],
+)
 async def test_gate_ctx_and_build_intents_share_depth_ints(
     monkeypatch: pytest.MonkeyPatch,
+    fair_yes: Decimal,
+    yes_ask: str,
+    yes_bid: str,
+    expected_depth: int,
+    expected_action: edge_strategy.EdgeAction,
 ) -> None:
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
     fc = StationForecast(
@@ -5802,14 +5826,14 @@ async def test_gate_ctx_and_build_intents_share_depth_ints(
     meteo = _StubMeteo(fc)
     market = _market_from(
         "KXHIGHDEN-26MAY08-T70-75",
-        "0.20",
-        "0.18",
+        yes_ask,
+        yes_bid,
         datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
     )
     book = _book_from(
         market.ticker,
-        "0.20",
-        "0.18",
+        yes_ask,
+        yes_bid,
         now=now,
         yes_bid_depth=7,
         no_bid_depth=11,
@@ -5818,14 +5842,18 @@ async def test_gate_ctx_and_build_intents_share_depth_ints(
     app = _make_app(meteo=meteo, kalshi=kalshi)
     await refresh_forecasts(app)
     await refresh_markets(app)
+    app.forecast_cdfs[("KDEN", date(2026, 5, 8))] = _FixedFairCdf(fair_yes)
     _lift_caps(monkeypatch)
 
     edge_depths: list[int] = []
+    edge_actions: list[edge_strategy.EdgeAction] = []
     real_edge = edge_strategy.evaluate
 
     def rec_edge(ctx, **kwargs):
         edge_depths.append(ctx.depth_at_price)
-        return real_edge(ctx, **kwargs)
+        sig = real_edge(ctx, **kwargs)
+        edge_actions.append(sig.action)
+        return sig
 
     gate_depths: list[int] = []
     real_gate = bot_main._gate_ctx_for
@@ -5839,9 +5867,9 @@ async def test_gate_ctx_and_build_intents_share_depth_ints(
     monkeypatch.setattr(bot_main, "_gate_ctx_for", rec_gate)
     await evaluate_strategies(app, now)
 
-    assert edge_depths
-    assert all(d == 11 for d in edge_depths)
-    assert all(d == 11 for d in gate_depths)
+    assert edge_actions == [expected_action]
+    assert edge_depths == [expected_depth]
+    assert gate_depths == [expected_depth]
 
 
 async def test_event_budget_recomputed_per_iteration_not_per_cycle(
@@ -5877,18 +5905,36 @@ async def test_event_budget_recomputed_per_iteration_not_per_cycle(
     await refresh_markets(app)
     _lift_caps(monkeypatch)
 
-    captured: list[Decimal] = []
-    real = edge_strategy.evaluate
+    contracts = 5
 
-    def rec(ctx, **kwargs):
-        captured.append(ctx.event_budget_remaining)
-        return real(ctx, **kwargs)
+    def stub(*, ticker, market, book, fair_yes, **_kwargs):
+        return [
+            TradeIntent(
+                market_ticker=ticker,
+                side=TradeSide.BUY_YES,
+                contracts=contracts,
+                fair_yes=fair_yes,
+                strategy="edge",
+            )
+        ]
 
-    monkeypatch.setattr(bot_main.edge_strategy, "evaluate", rec)
+    monkeypatch.setattr(bot_main, "_build_intents", stub)
+
+    seen_event_budget: list[Decimal] = []
+    real_gate = bot_main._gate_ctx_for
+
+    def rec_gate(**kwargs):
+        ctx = real_gate(**kwargs)
+        seen_event_budget.append(ctx.event_position_cap - kwargs["event_existing_dollars"])
+        return ctx
+
+    monkeypatch.setattr(bot_main, "_gate_ctx_for", rec_gate)
     await evaluate_strategies(app, now)
 
-    assert len(captured) >= 2
-    assert captured[1] < captured[0] or captured[1] == captured[0]
+    debit = book_a.yes_ask * Decimal(contracts)
+    assert len(seen_event_budget) == 2
+    assert seen_event_budget[1] == seen_event_budget[0] - debit
+    assert seen_event_budget[1] < seen_event_budget[0]
 
 
 async def test_build_intents_threads_mode_and_app(
@@ -5980,6 +6026,39 @@ async def test_demo_path_no_longer_passes_contracts_cap_kwarg(
         assert "position_cap" not in kwargs
 
 
+def _two_market_event_books(
+    now: datetime,
+) -> tuple[KalshiMarket, KalshiMarket, KalshiOrderbook, KalshiOrderbook]:
+    m_a = _market_from(
+        "KXHIGHDEN-26MAY08-T70-75",
+        "0.85",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    m_b = _market_from(
+        "KXHIGHDEN-26MAY08-T75-80",
+        "0.85",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+
+    def book(ticker: str) -> KalshiOrderbook:
+        return KalshiOrderbook(
+            ticker=ticker,
+            yes_ask=Decimal("0.85"),
+            yes_bid=Decimal("0.18"),
+            no_ask=Decimal("0.85"),
+            no_bid=Decimal("0.15"),
+            yes_ask_depth=10_000,
+            yes_bid_depth=10_000,
+            no_ask_depth=10_000,
+            no_bid_depth=10_000,
+            snapshot_at=now - timedelta(seconds=1),
+        )
+
+    return m_a, m_b, book(m_a.ticker), book(m_b.ticker)
+
+
 async def test_overlay_debit_uses_paper_basis_in_paper_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5993,36 +6072,21 @@ async def test_overlay_debit_uses_paper_basis_in_paper_mode(
         daily_highs={date(2026, 5, 8): np.random.default_rng(7).normal(85.0, 4.0, size=31)},
     )
     meteo = _StubMeteo(fc)
-    market = _market_from(
-        "KXHIGHDEN-26MAY08-T70-75",
-        "0.85",
-        "0.18",
-        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
-    )
-    book = KalshiOrderbook(
-        ticker=market.ticker,
-        yes_ask=Decimal("0.85"),
-        yes_bid=Decimal("0.18"),
-        no_ask=Decimal("0.85"),
-        no_bid=Decimal("0.15"),
-        yes_ask_depth=10_000,
-        yes_bid_depth=10_000,
-        no_ask_depth=10_000,
-        no_bid_depth=10_000,
-        snapshot_at=now - timedelta(seconds=1),
-    )
-    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    m_a, m_b, book_a, book_b = _two_market_event_books(now)
+    kalshi = _StubKalshi(markets=[m_a, m_b], orderbooks={m_a.ticker: book_a, m_b.ticker: book_b})
     app = _make_app(meteo=meteo, kalshi=kalshi)
     await refresh_forecasts(app)
     await refresh_markets(app)
     _lift_caps(monkeypatch)
+
+    contracts = 5
 
     def stub(*, ticker, market, book, fair_yes, **_kwargs):
         return [
             TradeIntent(
                 market_ticker=ticker,
                 side=TradeSide.SELL_YES,
-                contracts=5,
+                contracts=contracts,
                 fair_yes=fair_yes,
                 strategy="tails",
             )
@@ -6030,22 +6094,24 @@ async def test_overlay_debit_uses_paper_basis_in_paper_mode(
 
     monkeypatch.setattr(bot_main, "_build_intents", stub)
 
-    captured_overlays: dict[str, Decimal] = {}
+    event_existing_seen: list[Decimal] = []
     real_gate = bot_main._gate_ctx_for
 
     def rec_gate(**kwargs):
-        captured_overlays.setdefault("event_existing", kwargs["event_existing_dollars"])
+        event_existing_seen.append(kwargs["event_existing_dollars"])
         return real_gate(**kwargs)
 
     monkeypatch.setattr(bot_main, "_gate_ctx_for", rec_gate)
 
     await evaluate_strategies(app, now)
-    await evaluate_strategies(app, now)
 
-    paper_basis = Decimal("1") - book.yes_bid
-    demo_basis = book.no_ask
+    paper_basis = Decimal("1") - book_a.yes_bid
+    demo_basis = book_a.no_ask
     assert paper_basis != demo_basis
-    assert captured_overlays.get("event_existing", Decimal("0")) == Decimal("0")
+    assert len(event_existing_seen) == 2
+    assert event_existing_seen[0] == Decimal("0")
+    assert event_existing_seen[1] == paper_basis * Decimal(contracts)
+    assert event_existing_seen[1] != demo_basis * Decimal(contracts)
 
 
 async def test_overlay_debit_uses_no_ask_in_demo_mode(
@@ -6061,25 +6127,8 @@ async def test_overlay_debit_uses_no_ask_in_demo_mode(
         daily_highs={date(2026, 5, 8): np.random.default_rng(7).normal(85.0, 4.0, size=31)},
     )
     meteo = _StubMeteo(fc)
-    market = _market_from(
-        "KXHIGHDEN-26MAY08-T70-75",
-        "0.85",
-        "0.18",
-        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
-    )
-    book = KalshiOrderbook(
-        ticker=market.ticker,
-        yes_ask=Decimal("0.85"),
-        yes_bid=Decimal("0.18"),
-        no_ask=Decimal("0.85"),
-        no_bid=Decimal("0.15"),
-        yes_ask_depth=10_000,
-        yes_bid_depth=10_000,
-        no_ask_depth=10_000,
-        no_bid_depth=10_000,
-        snapshot_at=now - timedelta(seconds=1),
-    )
-    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    m_a, m_b, book_a, book_b = _two_market_event_books(now)
+    kalshi = _DemoKalshi(markets=[m_a, m_b], orderbooks={m_a.ticker: book_a, m_b.ticker: book_b})
     app = _make_demo_app(meteo=meteo, kalshi=kalshi, bankroll=Decimal("500"))
     await refresh_forecasts(app)
     await refresh_markets(app)
@@ -6090,19 +6139,39 @@ async def test_overlay_debit_uses_no_ask_in_demo_mode(
 
     monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
 
+    contracts = 5
+
     def stub(*, ticker, market, book, fair_yes, **_kwargs):
         return [
             TradeIntent(
                 market_ticker=ticker,
                 side=TradeSide.SELL_YES,
-                contracts=5,
+                contracts=contracts,
                 fair_yes=fair_yes,
                 strategy="tails",
             )
         ]
 
     monkeypatch.setattr(bot_main, "_build_intents", stub)
+
+    event_existing_seen: list[Decimal] = []
+    real_gate = bot_main._gate_ctx_for
+
+    def rec_gate(**kwargs):
+        event_existing_seen.append(kwargs["event_existing_dollars"])
+        return real_gate(**kwargs)
+
+    monkeypatch.setattr(bot_main, "_gate_ctx_for", rec_gate)
+
     await evaluate_strategies(app, now)
+
+    paper_basis = Decimal("1") - book_a.yes_bid
+    demo_basis = book_a.no_ask
+    assert paper_basis != demo_basis
+    assert len(event_existing_seen) == 2
+    assert event_existing_seen[0] == Decimal("0")
+    assert event_existing_seen[1] == demo_basis * Decimal(contracts)
+    assert event_existing_seen[1] != paper_basis * Decimal(contracts)
 
 
 async def test_market_budget_first_iteration_lands_at_seven_fifty(
