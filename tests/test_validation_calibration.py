@@ -324,16 +324,6 @@ def test_adaptive_min_samples_returns_floor_for_tails_bottom_bucket() -> None:
 
 
 def test_adaptive_min_samples_returns_sparse_for_very_low_upper_edge() -> None:
-    # synthetic check independent of edge set: a hypothetical 0.01 upper edge
-    # yields 0.01 * 300 = 3 < 4 -> sparse threshold.
-    # we exercise it via the formula's branch using a strategy with tiny upper edge.
-    # use tails layout artificially by temporarily monkeypatching edge set, or
-    # rely on _price_edges_for; cleanest is to call with a fabricated argument
-    # via the public adaptive_min_samples once we know its formula behaves on
-    # the live edge sets. With current edges (TAILS [0.02], EDGE [0.05,...]),
-    # the smallest computed upper_edge*MIN_FIT_SAMPLES is 0.02*300=6 (>=4)
-    # for tails and 0.05*300=15 for edge bottom -> all return MIN_FIT_SAMPLES.
-    # Lock the formula by checking the branch with a forced low upper-edge.
     from bot.validation import calibration as _cal
 
     saved = _cal.TAILS_PRICE_EDGES
@@ -532,9 +522,6 @@ def test_refit_all_skips_buckets_below_threshold(session) -> None:
     maps = refit_all(session)
     keys = list(maps.maps.keys())
     assert ("tails", 0, 1) in keys
-    # 100 sample bucket would land in same bucket; both should aggregate.
-    # Re-design: separate via lead_idx by changing close_time below.
-    # Just assert at least one bucket present, the 500 one.
 
 
 def test_refit_all_drops_bucket_with_too_few_positives(session) -> None:
