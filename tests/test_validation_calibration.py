@@ -377,6 +377,7 @@ def _seed(
     close_time: datetime | None,
     settled_at: datetime | None = None,
     fair_at_entry: Decimal | None = None,
+    side: str = "buy_yes",
 ) -> int:
     market = session.scalar(select(Market).where(Market.ticker == ticker))
     if market is None:
@@ -397,7 +398,7 @@ def _seed(
     row = PaperTradeRow(
         intended_at=intended_at,
         market_ticker=ticker,
-        side="buy_yes",
+        side=side,
         contracts=1,
         simulated_price=Decimal("0.05"),
         fee_dollars=Decimal("0.01"),
@@ -430,6 +431,7 @@ def _seed_bulk(
     intended_at: datetime,
     close_time: datetime | None,
     settled_at: datetime | None = None,
+    side: str = "buy_yes",
 ) -> None:
     settled_default = settled_at if settled_at is not None else intended_at + timedelta(hours=24)
     if close_time is not None:
@@ -475,7 +477,7 @@ def _seed_bulk(
         row = PaperTradeRow(
             intended_at=intended_at,
             market_ticker=ticker,
-            side="buy_yes",
+            side=side,
             contracts=1,
             simulated_price=Decimal("0.05"),
             fee_dollars=Decimal("0.01"),
@@ -1029,3 +1031,96 @@ def test_refit_all_holdout_identity_pct_reflects_floor_biting(
     assert match is not None
     holdout_identity_pct = Decimal(match.group(1))
     assert holdout_identity_pct >= Decimal("70")
+
+
+def test_refit_all_treats_sell_yes_outcome_as_inverted_yes_settled(session) -> None:
+    intended = _now() - timedelta(days=30)
+    close = intended + timedelta(hours=20)
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-SY-FILL",
+        strategy="tails",
+        q_raw=Decimal("0.005"),
+        wins=50,
+        losses=0,
+        intended_at=intended,
+        close_time=close,
+        side="buy_yes",
+    )
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-SY-MAIN",
+        strategy="tails",
+        q_raw=Decimal("0.005"),
+        wins=450,
+        losses=0,
+        intended_at=intended,
+        close_time=close,
+        side="sell_yes",
+    )
+    maps = refit_all(session)
+    bucket = ("tails", 0, 1)
+    assert bucket in maps.climatological_rate_per_bucket
+    assert maps.climatological_rate_per_bucket[bucket] == Decimal("0.1").quantize(
+        CORRECTION_QUANTUM
+    )
+
+
+def test_refit_all_mixed_sides_in_same_bucket_compute_correct_yes_rate(session) -> None:
+    intended = _now() - timedelta(days=30)
+    close = intended + timedelta(hours=20)
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-MIX-A",
+        strategy="tails",
+        q_raw=Decimal("0.005"),
+        wins=120,
+        losses=0,
+        intended_at=intended,
+        close_time=close,
+        side="buy_yes",
+    )
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-MIX-B",
+        strategy="tails",
+        q_raw=Decimal("0.005"),
+        wins=0,
+        losses=180,
+        intended_at=intended,
+        close_time=close,
+        side="sell_yes",
+    )
+    maps = refit_all(session)
+    bucket = ("tails", 0, 1)
+    assert maps.climatological_rate_per_bucket[bucket] == Decimal("1").quantize(CORRECTION_QUANTUM)
+
+
+def test_refit_all_mixed_sides_all_no_resolved_drops_bucket(session) -> None:
+    intended = _now() - timedelta(days=30)
+    close = intended + timedelta(hours=20)
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-MIX-C",
+        strategy="tails",
+        q_raw=Decimal("0.005"),
+        wins=0,
+        losses=120,
+        intended_at=intended,
+        close_time=close,
+        side="buy_yes",
+    )
+    _seed_bulk(
+        session,
+        ticker_prefix="KXHIGHDEN-26APR28-MIX-D",
+        strategy="tails",
+        q_raw=Decimal("0.005"),
+        wins=180,
+        losses=0,
+        intended_at=intended,
+        close_time=close,
+        side="sell_yes",
+    )
+    maps = refit_all(session)
+    bucket = ("tails", 0, 1)
+    assert bucket not in maps.maps

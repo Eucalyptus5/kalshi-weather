@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from bot.risk.gates import GateParams
 from bot.storage.sqlite import Market, PaperTradeRow, SimulatedPnl
+from bot.validation.reconcile import yes_settled_from_outcome
 from bot.validation.scoring import brier_score
 
 
@@ -203,6 +204,7 @@ def refit_all(session: Session, prev_maps: CalibrationMaps | None = None) -> Cal
             PaperTradeRow.intended_at,
             Market.close_time,
             PaperTradeRow.strategy,
+            PaperTradeRow.side,
         )
         .join(SimulatedPnl, SimulatedPnl.paper_trade_id == PaperTradeRow.id)
         .join(Market, Market.ticker == PaperTradeRow.market_ticker, isouter=True)
@@ -212,14 +214,14 @@ def refit_all(session: Session, prev_maps: CalibrationMaps | None = None) -> Cal
 
     fit_by_bucket: dict[tuple[str, int, int], list[tuple[Decimal, int]]] = {}
     holdout_by_bucket: dict[tuple[str, int, int], list[tuple[Decimal, int]]] = {}
-    for q_raw, outcome, intended_at, close_time, strategy in rows:
+    for q_raw, outcome, intended_at, close_time, strategy, side in rows:
         if q_raw is None:
             continue
         lead = hours_until(close_time, intended_at)
         key = bucket_for(strategy, q_raw, lead)
         if key[2] == LEAD_TIME_NONE_BUCKET_IDX:
             continue
-        outcome_int = 1 if outcome == "won" else 0
+        outcome_int = 1 if yes_settled_from_outcome(outcome, side) else 0
         if intended_at < holdout_start:
             fit_by_bucket.setdefault(key, []).append((q_raw, outcome_int))
         else:

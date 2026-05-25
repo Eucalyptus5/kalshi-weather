@@ -20,6 +20,7 @@ from bot.validation.reconcile import (
     reconcile_trade,
     settle_bracket,
     settle_tail,
+    yes_settled_from_outcome,
 )
 
 
@@ -324,3 +325,34 @@ def test_reconcile_trade_reads_only_documented_papertrade_attributes() -> None:
             if node.value.id == "trade":
                 accessed.add(node.attr)
     assert accessed == {"side", "simulated_price", "contracts", "fee_dollars"}
+
+
+def test_yes_settled_from_outcome_buy_yes_won_means_yes_resolved() -> None:
+    assert yes_settled_from_outcome("won", TradeSide.BUY_YES) is True
+    assert yes_settled_from_outcome("won", "buy_yes") is True
+
+
+def test_yes_settled_from_outcome_buy_yes_lost_means_no() -> None:
+    assert yes_settled_from_outcome("lost", TradeSide.BUY_YES) is False
+    assert yes_settled_from_outcome("lost", "buy_yes") is False
+
+
+def test_yes_settled_from_outcome_sell_yes_won_means_no_resolved() -> None:
+    assert yes_settled_from_outcome("won", TradeSide.SELL_YES) is False
+    assert yes_settled_from_outcome("won", "sell_yes") is False
+
+
+def test_yes_settled_from_outcome_sell_yes_lost_means_yes_resolved() -> None:
+    assert yes_settled_from_outcome("lost", TradeSide.SELL_YES) is True
+    assert yes_settled_from_outcome("lost", "sell_yes") is True
+
+
+def test_reconcile_trade_won_matches_yes_settled_from_outcome_helper() -> None:
+    parsed = parse_ticker("KXHIGHDEN-26APR28-T70.5-72.5")
+    for side in (TradeSide.BUY_YES, TradeSide.SELL_YES):
+        for observed in (Decimal("71"), Decimal("73")):
+            trade = _make_trade(side, Decimal("0.40"), 10, Decimal("0.05"))
+            out = reconcile_trade(trade, parsed, observed)
+            outcome = "won" if out.won else "lost"
+            assert yes_settled_from_outcome(outcome, side) is out.yes_settled
+            assert yes_settled_from_outcome(outcome, side.value) is out.yes_settled

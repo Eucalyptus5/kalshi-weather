@@ -86,6 +86,11 @@ def settle_tail(parsed: ParsedTicker, observed_high: Decimal) -> bool:
     return observed_high >= strike
 
 
+def yes_settled_from_outcome(outcome: str, side: TradeSide | str) -> bool:
+    side_is_buy_yes = side is TradeSide.BUY_YES or side == TradeSide.BUY_YES.value
+    return (outcome == "won") if side_is_buy_yes else (outcome == "lost")
+
+
 def reconcile_trade(
     trade: PaperTrade,
     parsed: ParsedTicker,
@@ -96,10 +101,7 @@ def reconcile_trade(
     else:
         yes_settled = settle_tail(parsed, observed_high)
 
-    if trade.side is TradeSide.BUY_YES:
-        won = yes_settled
-    else:
-        won = not yes_settled
+    won = yes_settled == (trade.side is TradeSide.BUY_YES)
 
     realized = realized_pnl_for_trade(
         trade.side,
