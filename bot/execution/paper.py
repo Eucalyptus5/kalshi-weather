@@ -47,6 +47,7 @@ class TradeIntent:
     contracts: int
     fair_yes: Decimal
     strategy: str
+    q_raw: Decimal
     ensemble_spread_sigma_t: Decimal | None = None
     lead_time_hours: Decimal | None = None
     nbm_divergence: Decimal | None = None
@@ -62,6 +63,7 @@ class PaperTrade:
     fee_dollars: Decimal
     fair_at_entry: Decimal
     strategy: str
+    q_raw: Decimal
     attempted_contracts: int = 0
     ensemble_spread_sigma_t: Decimal | None = None
     lead_time_hours: Decimal | None = None
@@ -112,6 +114,7 @@ def simulate_taker_fill(intent: TradeIntent, book: Orderbook, now: datetime) -> 
         fee_dollars=fee_dollars,
         fair_at_entry=intent.fair_yes,
         strategy=intent.strategy,
+        q_raw=intent.q_raw,
         attempted_contracts=intent.contracts,
         ensemble_spread_sigma_t=intent.ensemble_spread_sigma_t,
         lead_time_hours=intent.lead_time_hours,

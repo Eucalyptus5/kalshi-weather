@@ -109,6 +109,7 @@ def _seed_row(session, **overrides) -> DemoOrderRow:
         filled_contracts=0,
         requested_yes_price_dollars=Decimal("0.58"),
         fair_at_entry=Decimal("0.62"),
+        q_raw=Decimal("0.62"),
         intended_at=_now(),
         avg_fill_price=None,
         fee_dollars=None,
@@ -410,6 +411,7 @@ def test_stitch_natural_key_order_case1_no_holder_overwrites_in_place(session):
         strategy="edge",
         side="yes",
         fair_at_entry=Decimal("0.62"),
+        q_raw=Decimal("0.62"),
         intended_at=_now(),
         requested_yes_price_dollars=Decimal("0.58"),
     )
@@ -476,6 +478,7 @@ def test_stitch_case2_flushes_delete_before_update_no_integrity_error(session):
         strategy="edge",
         side="yes",
         fair_at_entry=Decimal("0.62"),
+        q_raw=Decimal("0.62"),
         intended_at=_now(),
         requested_yes_price_dollars=Decimal("0.58"),
     )
@@ -572,6 +575,7 @@ def test_stitch_natural_key_order_case3_idempotent_when_holder_has_same_exchange
         strategy="edge",
         side="yes",
         fair_at_entry=Decimal("0.99"),
+        q_raw=Decimal("0.99"),
         intended_at=_now(),
         requested_yes_price_dollars=Decimal("0.58"),
     )
@@ -628,6 +632,7 @@ def test_stitch_natural_key_order_case4_raises_on_different_exchange_id(session)
             strategy="edge",
             side="yes",
             fair_at_entry=Decimal("0.62"),
+            q_raw=Decimal("0.62"),
             intended_at=_now(),
             requested_yes_price_dollars=Decimal("0.58"),
         )
@@ -699,6 +704,7 @@ def test_stitch_natural_key_order_raises_on_missing_exchange_id(session):
             strategy="edge",
             side="yes",
             fair_at_entry=Decimal("0.62"),
+            q_raw=Decimal("0.62"),
             intended_at=_now(),
             requested_yes_price_dollars=Decimal("0.58"),
         )
@@ -752,6 +758,7 @@ def test_late_fill_then_stitch_materializes_paper_trade_row(session):
         strategy="edge",
         side="yes",
         fair_at_entry=Decimal("0.62"),
+        q_raw=Decimal("0.62"),
         intended_at=_now(),
         requested_yes_price_dollars=Decimal("0.58"),
     )
@@ -853,6 +860,7 @@ def test_stitch_case3_post_insert_paper_trade_is_idempotent_against_existing_row
             simulated_price=Decimal("0.205"),
             fee_dollars=Decimal("0.07"),
             fair_at_entry=Decimal("0.62"),
+            q_raw=Decimal("0.62"),
             strategy="edge",
             demo_order_client_id="kw-edge-yes-T1",
         )
@@ -866,6 +874,7 @@ def test_stitch_case3_post_insert_paper_trade_is_idempotent_against_existing_row
         strategy="edge",
         side="yes",
         fair_at_entry=Decimal("0.77"),
+        q_raw=Decimal("0.77"),
         intended_at=_now(),
         requested_yes_price_dollars=Decimal("0.58"),
     )
@@ -909,6 +918,7 @@ def test_naive_session_add_in_stitch_raises_integrity_error_on_duplicate_cid(ses
             simulated_price=Decimal("0.205"),
             fee_dollars=Decimal("0.07"),
             fair_at_entry=Decimal("0.62"),
+            q_raw=Decimal("0.62"),
             strategy="edge",
             demo_order_client_id="kw-edge-yes-T1",
         )
@@ -924,9 +934,126 @@ def test_naive_session_add_in_stitch_raises_integrity_error_on_duplicate_cid(ses
             simulated_price=Decimal("0.205"),
             fee_dollars=Decimal("0.07"),
             fair_at_entry=Decimal("0.62"),
+            q_raw=Decimal("0.62"),
             strategy="edge",
             demo_order_client_id="kw-edge-yes-T1",
         )
     )
     with pytest.raises(IntegrityError):
         session.flush()
+
+
+def test_stitch_natural_key_order_writes_q_raw(session):
+    _seed_row(
+        session,
+        client_order_id="kw-backfill-EX300",
+        exchange_order_id="EX300",
+        strategy=None,
+        fair_at_entry=None,
+        q_raw=None,
+        intended_at=None,
+        requested_yes_price_dollars=None,
+        status="executed",
+        filled_contracts=10,
+        avg_fill_price=Decimal("0.205"),
+        fee_dollars=Decimal("0.07"),
+    )
+    stitch_natural_key_order(
+        session,
+        exchange_order_id="EX300",
+        client_order_id="kw-edge-yes-Q1",
+        strategy="edge",
+        side="yes",
+        fair_at_entry=Decimal("0.62"),
+        q_raw=Decimal("0.005"),
+        intended_at=_now(),
+        requested_yes_price_dollars=Decimal("0.58"),
+    )
+    session.commit()
+    row = session.scalars(
+        select(DemoOrderRow).where(DemoOrderRow.exchange_order_id == "EX300")
+    ).one()
+    assert row.q_raw == Decimal("0.005")
+
+
+def test_stitch_natural_key_order_writes_q_raw_holder_branch(session):
+    session.add(
+        DemoOrderRow(
+            client_order_id="kw-backfill-EX301",
+            exchange_order_id="EX301",
+            market_ticker="KXHIGHDEN-26MAY22-T70",
+            strategy=None,
+            side="yes",
+            requested_contracts=10,
+            filled_contracts=10,
+            requested_yes_price_dollars=None,
+            fair_at_entry=None,
+            q_raw=None,
+            intended_at=None,
+            avg_fill_price=Decimal("0.205"),
+            fee_dollars=Decimal("0.07"),
+            status="executed",
+            placed_at=_now(),
+            last_status_at=_now(),
+        )
+    )
+    session.add(
+        DemoOrderRow(
+            client_order_id="kw-edge-yes-Q2",
+            exchange_order_id=None,
+            market_ticker="KXHIGHDEN-26MAY22-T70",
+            strategy=None,
+            side="yes",
+            requested_contracts=10,
+            filled_contracts=0,
+            requested_yes_price_dollars=None,
+            fair_at_entry=None,
+            q_raw=None,
+            intended_at=None,
+            avg_fill_price=None,
+            fee_dollars=None,
+            status="resting",
+            placed_at=_now(),
+            last_status_at=_now(),
+        )
+    )
+    session.commit()
+    stitch_natural_key_order(
+        session,
+        exchange_order_id="EX301",
+        client_order_id="kw-edge-yes-Q2",
+        strategy="edge",
+        side="yes",
+        fair_at_entry=Decimal("0.62"),
+        q_raw=Decimal("0.005"),
+        intended_at=_now(),
+        requested_yes_price_dollars=Decimal("0.58"),
+    )
+    session.commit()
+    rows = session.scalars(select(DemoOrderRow)).all()
+    assert len(rows) == 1
+    assert rows[0].q_raw == Decimal("0.005")
+    assert rows[0].client_order_id == "kw-edge-yes-Q2"
+
+
+def test_upsert_exchange_record_orphan_row_has_null_q_raw(session):
+    record = DemoOrder(
+        client_order_id="kw-edge-yes-ORPHAN",
+        exchange_order_id="EX-ORPHAN",
+        ticker="KXHIGHDEN-26MAY22-T70",
+        side_kalshi="yes",
+        requested_contracts=10,
+        filled_contracts=10,
+        requested_yes_price_dollars=None,
+        avg_yes_fill_price_dollars=Decimal("0.205"),
+        fee_dollars=Decimal("0.07"),
+        status="executed",
+        placed_at=_now(),
+    )
+    upsert_exchange_record(session, record)
+    session.commit()
+    row = session.scalars(
+        select(DemoOrderRow).where(DemoOrderRow.exchange_order_id == "EX-ORPHAN")
+    ).one()
+    assert row.q_raw is None
+    assert row.fair_at_entry is None

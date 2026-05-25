@@ -72,6 +72,7 @@ def _intent(*, strategy: str = "edge", fair_yes: Decimal = Decimal("0.62")) -> T
         side=TradeSide.BUY_YES,
         contracts=10,
         fair_yes=fair_yes,
+        q_raw=fair_yes,
         strategy=strategy,
     )
 
@@ -87,6 +88,7 @@ def _demo_row(**overrides) -> DemoOrderRow:
         filled_contracts=10,
         requested_yes_price_dollars=Decimal("0.20"),
         fair_at_entry=Decimal("0.18"),
+        q_raw=Decimal("0.18"),
         intended_at=_now(),
         avg_fill_price=Decimal("0.80"),
         fee_dollars=Decimal("0.05"),
@@ -214,6 +216,7 @@ def test_placer_side_translator_sell_yes_rebases_to_yes_frame():
         side=TradeSide.SELL_YES,
         contracts=10,
         fair_yes=Decimal("0.18"),
+        q_raw=Decimal("0.18"),
         strategy="tails",
     )
     row = paper_trade_row_from_demo_order(order, intent, intended_at=_now())
@@ -240,6 +243,7 @@ def test_demo_order_values_projects_intent_carry_columns(session):
         side=TradeSide.SELL_YES,
         contracts=10,
         fair_yes=Decimal("0.18"),
+        q_raw=Decimal("0.18"),
         strategy="tails",
     )
     now_pre_post = _now()
@@ -285,6 +289,7 @@ def test_paper_trade_row_values_excludes_id_and_created_at():
         simulated_price=Decimal("0.205000"),
         fee_dollars=Decimal("0.070000"),
         fair_at_entry=Decimal("0.620000"),
+        q_raw=Decimal("0.620000"),
         strategy="edge",
         attempted_contracts=10,
         ensemble_spread_sigma_t=None,
@@ -309,6 +314,7 @@ def test_paper_trade_row_has_no_to_dict_method():
         simulated_price=Decimal("0.40"),
         fee_dollars=Decimal("0.01"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     with pytest.raises(AttributeError):
@@ -324,6 +330,7 @@ def test_paper_trade_row_values_round_trips_through_sqlite_insert(session):
         simulated_price=Decimal("0.205000"),
         fee_dollars=Decimal("0.070000"),
         fair_at_entry=Decimal("0.620000"),
+        q_raw=Decimal("0.620000"),
         strategy="edge",
         demo_order_client_id="kw-edge-yes-X",
     )
@@ -335,3 +342,49 @@ def test_paper_trade_row_values_round_trips_through_sqlite_insert(session):
     assert got.created_at is not None
     assert got.simulated_price == Decimal("0.205000")
     assert got.demo_order_client_id == "kw-edge-yes-X"
+
+
+def test_paper_trade_row_from_demo_order_plumbs_q_raw():
+    order = _demo_order(status="executed", filled_contracts=10, avg=Decimal("0.205"))
+    intent = TradeIntent(
+        market_ticker="KXHIGHDEN-26MAY22-T70",
+        side=TradeSide.BUY_YES,
+        contracts=10,
+        fair_yes=Decimal("0.62"),
+        q_raw=Decimal("0.005"),
+        strategy="edge",
+    )
+    row = paper_trade_row_from_demo_order(order, intent, intended_at=_now())
+    assert row is not None
+    assert row.q_raw == Decimal("0.005")
+    assert row.fair_at_entry == Decimal("0.62")
+
+
+def test_paper_trade_row_from_demo_row_plumbs_q_raw():
+    row = _paper_trade_row_from_demo_row(
+        _demo_row(fair_at_entry=Decimal("0.18"), q_raw=Decimal("0.005")), _now()
+    )
+    assert row is not None
+    assert row.q_raw == Decimal("0.005")
+    assert row.fair_at_entry == Decimal("0.18")
+
+
+def test_translator_skips_demo_row_when_q_raw_is_none():
+    assert (
+        _paper_trade_row_from_demo_row(_demo_row(q_raw=None, fair_at_entry=Decimal("0.05")), _now())
+        is None
+    )
+
+
+def test_demo_order_values_includes_q_raw():
+    intent = TradeIntent(
+        market_ticker="KXHIGHDEN-26MAY22-T70",
+        side=TradeSide.SELL_YES,
+        contracts=10,
+        fair_yes=Decimal("0.18"),
+        q_raw=Decimal("0.005"),
+        strategy="tails",
+    )
+    order = _demo_order(side_kalshi="no", filled_contracts=0, avg=None)
+    values = _demo_order_values(order, intent, _now())
+    assert values["q_raw"] == Decimal("0.005")

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import random
 import re
 import signal
 import sys
@@ -70,6 +71,13 @@ from bot.storage.sqlite import (
 from bot.strategy import edge as edge_strategy
 from bot.strategy import tails as tails_strategy
 from bot.strategy.sizing import sigma_t_median_for_lead
+from bot.validation.calibration import (
+    CalibrationMaps,
+    bucket_for,
+    format_gate_failure_reason,
+    hours_until,
+    refit_all,
+)
 from bot.validation.reconcile import ACISClient, reconcile_trade
 
 logger = logging.getLogger(__name__)
@@ -122,6 +130,9 @@ _SETTLEMENT_GRACE_DAYS: int = 1
 GFS_CYCLES_HOURS: tuple[int, ...] = (0, 6, 12, 18)
 GFS_CYCLE_OFFSET_MINUTES = 30
 FORECAST_RETRY_INTERVAL_SECONDS: float = 60.0
+CALIBRATION_REFIT_JITTER_SECONDS: int = 300
+CALIBRATION_REFIT_TARGET_HOUR_UTC: int = 4
+CALIBRATION_REFIT_TOTAL_BUCKETS: int = 24
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +292,18 @@ assert len(STATIONS) == 20
 STRATEGY_BLACKLIST: frozenset[str] = frozenset({"KXHIGHLAX", "KXHIGHMIA"})
 
 
+def _empty_calibration_maps() -> CalibrationMaps:
+    return CalibrationMaps(
+        maps={},
+        fitted_at=datetime.now(tz=_timezone.utc),
+        n_samples_per_bucket={},
+        holdout_bs_new={},
+        holdout_bs_prev={},
+        holdout_n_per_bucket={},
+        climatological_rate_per_bucket={},
+    )
+
+
 @dataclass
 class App:
     settings: Settings
@@ -298,6 +321,14 @@ class App:
     forecast_run_times: dict[tuple[str, date], datetime] = field(default_factory=dict)
     latest_markets: dict[str, KalshiMarket] = field(default_factory=dict)
     latest_orderbooks: dict[str, KalshiOrderbook] = field(default_factory=dict)
+    calibration_maps: CalibrationMaps = field(default_factory=_empty_calibration_maps)
+
+    def __post_init__(self) -> None:
+        logger.info(
+            "calibration_maps_loaded n_buckets_fit=%d n_buckets_skipped=%d reason=cold_start",
+            0,
+            CALIBRATION_REFIT_TOTAL_BUCKETS,
+        )
 
     async def aclose(self) -> None:
         await self.meteo.aclose()
@@ -584,12 +615,21 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                 app=app,
             )
             check = evaluate_gates(gate_ctx, gate_mode)
+            bucket_key = bucket_for(
+                intent.strategy, intent.q_raw, hours_until(market.close_time, now)
+            )
             for failure in check.failures:
+                reason = format_gate_failure_reason(
+                    failure.reason or "",
+                    q_raw=intent.q_raw,
+                    fair_yes=intent.fair_yes,
+                    bucket_key=bucket_key,
+                )
                 gate_failures.append(
                     GateFailure(
                         evaluated_at=now,
                         gate_name=failure.name,
-                        reason=failure.reason or "",
+                        reason=reason,
                         mode=gate_mode.value,
                         market_ticker=ticker,
                     )
@@ -699,6 +739,7 @@ async def _commit_phase2(
                                     strategy=values["strategy"],  # type: ignore[arg-type]
                                     side=values["side"],  # type: ignore[arg-type]
                                     fair_at_entry=values["fair_at_entry"],  # type: ignore[arg-type]
+                                    q_raw=values["q_raw"],  # type: ignore[arg-type]
                                     intended_at=values["intended_at"],  # type: ignore[arg-type]
                                     requested_yes_price_dollars=values[  # type: ignore[arg-type]
                                         "requested_yes_price_dollars"
@@ -796,6 +837,7 @@ def _build_intents(
                     side=TradeSide.BUY_YES,
                     contracts=edge_sig.contracts,
                     fair_yes=fair_yes,
+                    q_raw=fair_yes,
                     strategy="edge",
                     ensemble_spread_sigma_t=spread,
                     lead_time_hours=lead_time_hours,
@@ -809,6 +851,7 @@ def _build_intents(
                     side=TradeSide.SELL_YES,
                     contracts=edge_sig.contracts,
                     fair_yes=fair_yes,
+                    q_raw=fair_yes,
                     strategy="edge",
                     ensemble_spread_sigma_t=spread,
                     lead_time_hours=lead_time_hours,
@@ -843,6 +886,7 @@ def _build_intents(
                     side=TradeSide.SELL_YES,
                     contracts=tails_sig.contracts,
                     fair_yes=fair_yes,
+                    q_raw=fair_yes,
                     strategy="tails",
                     ensemble_spread_sigma_t=spread,
                     lead_time_hours=lead_time_hours,
@@ -919,6 +963,7 @@ def _paper_trade_row(trade: PaperTrade) -> PaperTradeRow:
         simulated_price=trade.simulated_price,
         fee_dollars=trade.fee_dollars,
         fair_at_entry=trade.fair_at_entry,
+        q_raw=trade.q_raw,
         strategy=trade.strategy,
         attempted_contracts=trade.attempted_contracts,
         ensemble_spread_sigma_t=trade.ensemble_spread_sigma_t,
@@ -1068,6 +1113,7 @@ async def reconcile_settled_trades(app: App, now: datetime) -> int:
                     simulated_price=row.simulated_price,
                     fee_dollars=row.fee_dollars,
                     fair_at_entry=row.fair_at_entry,
+                    q_raw=row.q_raw,
                     strategy=row.strategy,
                 )
                 recon = reconcile_trade(paper_trade_value, parsed, observed)
@@ -1114,6 +1160,69 @@ async def _on_demand_reconcile(app: App) -> None:
             logger.info("reconcile_on_demand reconciled=%d", reconciled)
         except Exception:
             logger.exception("reconcile_on_demand_failed")
+
+
+def _seconds_until_next_refit(now: datetime) -> float:
+    target = now.replace(hour=CALIBRATION_REFIT_TARGET_HOUR_UTC, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target = target + timedelta(days=1)
+    base = (target - now).total_seconds()
+    jitter = random.uniform(-CALIBRATION_REFIT_JITTER_SECONDS, CALIBRATION_REFIT_JITTER_SECONDS)
+    return max(1.0, base + jitter)
+
+
+async def _calibration_refit_loop(app: App, stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(
+                stop.wait(), timeout=_seconds_until_next_refit(datetime.now(tz=_timezone.utc))
+            )
+        except asyncio.TimeoutError:
+            pass
+        if stop.is_set():
+            return
+        try:
+            async with app.db_lock:
+                with app.session_factory() as session:
+                    new_maps = refit_all(session, prev_maps=app.calibration_maps)
+            app.calibration_maps = new_maps
+            n_fit = len(new_maps.maps)
+            n_skipped = CALIBRATION_REFIT_TOTAL_BUCKETS - n_fit
+            tails_keys = [k for k in new_maps.maps if k[0] == "tails"]
+            edge_keys = [k for k in new_maps.maps if k[0] == "edge"]
+            tails_bs_new = (
+                sum(new_maps.holdout_bs_new[k] for k in tails_keys) / Decimal(len(tails_keys))
+                if tails_keys
+                else Decimal("0")
+            )
+            tails_bs_prev = (
+                sum(new_maps.holdout_bs_prev[k] for k in tails_keys) / Decimal(len(tails_keys))
+                if tails_keys
+                else Decimal("0")
+            )
+            edge_bs_new = (
+                sum(new_maps.holdout_bs_new[k] for k in edge_keys) / Decimal(len(edge_keys))
+                if edge_keys
+                else Decimal("0")
+            )
+            edge_bs_prev = (
+                sum(new_maps.holdout_bs_prev[k] for k in edge_keys) / Decimal(len(edge_keys))
+                if edge_keys
+                else Decimal("0")
+            )
+            logger.info(
+                "calibration_refit_complete n_buckets_fit=%d n_buckets_skipped=%d "
+                "tails_holdout_bs_new=%s tails_holdout_bs_prev=%s "
+                "edge_holdout_bs_new=%s edge_holdout_bs_prev=%s",
+                n_fit,
+                n_skipped,
+                tails_bs_new,
+                tails_bs_prev,
+                edge_bs_new,
+                edge_bs_prev,
+            )
+        except Exception:
+            logger.exception("loop_iteration_failed name=calibration_loop")
 
 
 async def _forecast_loop(app: App, stop: asyncio.Event) -> None:
@@ -1165,6 +1274,7 @@ async def run(app: App, duration: timedelta) -> None:
         asyncio.create_task(_eval_loop(app, stop), name="eval_loop"),
         asyncio.create_task(_settlement_loop(app, stop), name="settlement_loop"),
         asyncio.create_task(_order_reconcile_loop(app, stop), name="order_reconcile_loop"),
+        asyncio.create_task(_calibration_refit_loop(app, stop), name="calibration_loop"),
     ]
 
     try:

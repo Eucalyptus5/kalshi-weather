@@ -135,6 +135,7 @@ def stitch_natural_key_order(
     strategy: str,
     side: str,
     fair_at_entry: Decimal,
+    q_raw: Decimal,
     intended_at: datetime,
     requested_yes_price_dollars: Decimal,
 ) -> None:
@@ -153,6 +154,7 @@ def stitch_natural_key_order(
         matched.strategy = strategy
         matched.side = side
         matched.fair_at_entry = fair_at_entry
+        matched.q_raw = q_raw
         matched.intended_at = intended_at
         matched.requested_yes_price_dollars = requested_yes_price_dollars
         survivor = matched
@@ -174,6 +176,7 @@ def stitch_natural_key_order(
         holder.strategy = strategy
         holder.side = side
         holder.fair_at_entry = fair_at_entry
+        holder.q_raw = q_raw
         holder.intended_at = intended_at
         holder.requested_yes_price_dollars = requested_yes_price_dollars
         survivor = holder

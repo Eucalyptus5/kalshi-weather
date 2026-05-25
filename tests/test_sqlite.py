@@ -192,6 +192,7 @@ def test_paper_trade_round_trip(session):
         simulated_price=Decimal("0.40"),
         fee_dollars=Decimal("0.011200"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="density_v1",
     )
     session.add(row)
@@ -218,6 +219,7 @@ def test_simulated_pnl_fk_and_cascade(session):
         simulated_price=Decimal("0.45"),
         fee_dollars=Decimal("0.005000"),
         fair_at_entry=Decimal("0.55"),
+        q_raw=Decimal("0.55"),
         strategy="density_v1",
     )
     session.add(trade)
@@ -408,6 +410,7 @@ def test_paper_trade_persists_sigma_t(session):
         simulated_price=Decimal("0.40"),
         fee_dollars=Decimal("0.05"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
         ensemble_spread_sigma_t=Decimal("2.500000"),
     )
@@ -428,6 +431,7 @@ def test_paper_trade_persists_attempted_contracts(session):
         simulated_price=Decimal("0.99"),
         fee_dollars=Decimal("0.01"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
         attempted_contracts=7194,
     )
@@ -449,6 +453,7 @@ def test_paper_trade_lead_time_hours_persists(session):
         simulated_price=Decimal("0.40"),
         fee_dollars=Decimal("0.05"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
         lead_time_hours=Decimal("36.5000"),
     )
@@ -469,6 +474,7 @@ def test_paper_trade_nbm_divergence_nullable(session):
         simulated_price=Decimal("0.40"),
         fee_dollars=Decimal("0.05"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
         nbm_divergence=None,
     )
@@ -489,6 +495,7 @@ def test_paper_trade_lead_time_hours_nullable(session):
         simulated_price=Decimal("0.40"),
         fee_dollars=Decimal("0.05"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
         lead_time_hours=None,
     )
@@ -665,6 +672,7 @@ def test_paper_trade_demo_link_round_trip(session):
         simulated_price=Decimal("0.205000"),
         fee_dollars=Decimal("0.070000"),
         fair_at_entry=Decimal("0.620000"),
+        q_raw=Decimal("0.620000"),
         strategy="edge",
         demo_order_client_id="kw-edge-yes-KXHIGHDEN-26MAY22-T70-2026-05-22",
     )
@@ -687,6 +695,7 @@ def test_paper_trade_demo_link_allows_multiple_nulls(session):
                 simulated_price=Decimal("0.40"),
                 fee_dollars=Decimal("0.01"),
                 fair_at_entry=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 strategy="edge",
                 demo_order_client_id=None,
             )
@@ -772,7 +781,7 @@ def test_migrate_script_stamps_head_on_head_shape_db(tmp_path):
     cfg = _alembic_cfg(tmp_path, db_file)
     script_dir = ScriptDirectory.from_config(cfg)
     baseline = _detect_baseline(engine, script_dir)
-    assert baseline == "0003"
+    assert baseline == "0004"
     ensure_baseline_stamped(engine, baseline)
     with engine.connect() as connection:
         cfg.attributes["connection"] = connection
@@ -780,7 +789,7 @@ def test_migrate_script_stamps_head_on_head_shape_db(tmp_path):
 
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0003"
+    assert version == "0004"
     engine.dispose()
 
 
@@ -801,7 +810,7 @@ def test_migrate_script_stamps_0001_on_baseline_shape_db(tmp_path):
 
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0003"
+    assert version == "0004"
     engine.dispose()
 
 
@@ -863,16 +872,19 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     (versions / "0003_demo_orders.py").write_text(
         (REPO_ROOT / "alembic" / "versions" / "0003_demo_orders.py").read_text()
     )
-    (versions / "0004_decoy.py").write_text(
-        '"""decoy 0004 for forward-compat test\n\n'
-        "Revision ID: 0004\n"
-        "Revises: 0003\n"
-        "Create Date: 2026-05-28 13:00:00.000000\n\n"
+    (versions / "0004_paper_trades_q_raw.py").write_text(
+        (REPO_ROOT / "alembic" / "versions" / "0004_paper_trades_q_raw.py").read_text()
+    )
+    (versions / "0005_decoy.py").write_text(
+        '"""decoy 0005 for forward-compat test\n\n'
+        "Revision ID: 0005\n"
+        "Revises: 0004\n"
+        "Create Date: 2026-05-29 13:00:00.000000\n\n"
         '"""\n\n'
         "from typing import Sequence, Union\n\n"
         "from alembic import op  # noqa: F401\n\n\n"
-        'revision: str = "0004"\n'
-        'down_revision: Union[str, Sequence[str], None] = "0003"\n'
+        'revision: str = "0005"\n'
+        'down_revision: Union[str, Sequence[str], None] = "0004"\n'
         "branch_labels: Union[str, Sequence[str], None] = None\n"
         "depends_on: Union[str, Sequence[str], None] = None\n\n\n"
         "def upgrade() -> None:\n"
@@ -891,8 +903,8 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     engine = make_engine(db_file)
     Base.metadata.create_all(engine)
     script_dir = ScriptDirectory.from_config(cfg)
-    assert script_dir.get_current_head() == "0004"
-    assert _detect_baseline(engine, script_dir) == "0003"
+    assert script_dir.get_current_head() == "0005"
+    assert _detect_baseline(engine, script_dir) == "0004"
     engine.dispose()
 
 

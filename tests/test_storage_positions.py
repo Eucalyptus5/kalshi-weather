@@ -41,6 +41,7 @@ def _insert_trade(
             simulated_price=simulated_price,
             fee_dollars=Decimal("0.05"),
             fair_at_entry=Decimal("0.50"),
+            q_raw=Decimal("0.50"),
             strategy="edge",
         )
         session.add(row)

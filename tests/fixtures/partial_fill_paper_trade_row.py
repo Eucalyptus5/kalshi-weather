@@ -21,6 +21,7 @@ def make_partial_fill_row() -> PaperTradeRow:
         simulated_price=Decimal("0.99"),
         fee_dollars=taker_fee(1, Decimal("0.99")),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
         attempted_contracts=7194,
     )
@@ -32,6 +33,7 @@ def make_partial_fill_intent_and_trade() -> tuple[TradeIntent, PaperTrade, Order
         side=TradeSide.SELL_YES,
         contracts=7194,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     book = Orderbook(
@@ -49,6 +51,7 @@ def make_partial_fill_intent_and_trade() -> tuple[TradeIntent, PaperTrade, Order
         simulated_price=Decimal("0.99"),
         fee_dollars=taker_fee(1, Decimal("0.99")),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
         attempted_contracts=7194,
     )

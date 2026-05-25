@@ -63,6 +63,7 @@ def _intent(
         side=side,
         contracts=contracts,
         fair_yes=fair_yes,
+        q_raw=fair_yes,
         strategy=strategy,
     )
 

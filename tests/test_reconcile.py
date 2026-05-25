@@ -46,6 +46,7 @@ def _make_trade(
         simulated_price=price,
         fee_dollars=fee,
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="t",
     )
 
@@ -307,6 +308,7 @@ def test_b_form_bracket_semantic_pending_defect_c() -> None:
         simulated_price=Decimal("0.85"),
         fee_dollars=Decimal("0.04"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="t",
     )
     out = reconcile_trade(trade, parsed, Decimal("48"))

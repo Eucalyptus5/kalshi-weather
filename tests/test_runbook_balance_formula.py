@@ -69,6 +69,7 @@ def _seed_natural_key_trade(session, *, cid: str, realized: Decimal) -> None:
         simulated_price=Decimal("0.205"),
         fee_dollars=Decimal("0.07"),
         fair_at_entry=Decimal("0.62"),
+        q_raw=Decimal("0.62"),
         strategy="edge",
         demo_order_client_id=cid,
     )

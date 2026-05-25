@@ -34,6 +34,7 @@ def paper_trade_row_from_demo_order(
         simulated_price=yes_frame_price(order.side_kalshi, order.avg_yes_fill_price_dollars),
         fee_dollars=order.fee_dollars,
         fair_at_entry=intent.fair_yes,
+        q_raw=intent.q_raw,
         strategy=intent.strategy,
         attempted_contracts=order.filled_contracts,
         ensemble_spread_sigma_t=None,
@@ -53,6 +54,7 @@ def _paper_trade_row_from_demo_row(demo_row: DemoOrderRow, now: datetime) -> Pap
         or demo_row.fair_at_entry is None
         or demo_row.intended_at is None
         or demo_row.requested_yes_price_dollars is None
+        or demo_row.q_raw is None
     ):
         return None
     fee = demo_row.fee_dollars if demo_row.fee_dollars is not None else Decimal("0")
@@ -64,6 +66,7 @@ def _paper_trade_row_from_demo_row(demo_row: DemoOrderRow, now: datetime) -> Pap
         simulated_price=yes_frame_price(demo_row.side, demo_row.avg_fill_price),
         fee_dollars=fee,
         fair_at_entry=demo_row.fair_at_entry,
+        q_raw=demo_row.q_raw,
         strategy=demo_row.strategy,
         attempted_contracts=demo_row.filled_contracts,
         ensemble_spread_sigma_t=None,
@@ -94,6 +97,7 @@ def _demo_order_values(
         "filled_contracts": order.filled_contracts,
         "requested_yes_price_dollars": order.requested_yes_price_dollars,
         "fair_at_entry": intent.fair_yes,
+        "q_raw": intent.q_raw,
         "intended_at": now_pre_post,
         "avg_fill_price": order.avg_yes_fill_price_dollars,
         "fee_dollars": order.fee_dollars,

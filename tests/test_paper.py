@@ -29,6 +29,7 @@ def _intent(**overrides: object) -> TradeIntent:
         "side": TradeSide.BUY_YES,
         "contracts": 10,
         "fair_yes": Decimal("0.50"),
+        "q_raw": Decimal("0.50"),
         "strategy": "edge",
         "ensemble_spread_sigma_t": None,
         "lead_time_hours": None,
@@ -302,12 +303,61 @@ def test_papertrade_constructs_with_legacy_call_site_args() -> None:
         simulated_price=Decimal("0.40"),
         fee_dollars=Decimal("0.05"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     assert trade.attempted_contracts == 0
     assert trade.ensemble_spread_sigma_t is None
     assert trade.lead_time_hours is None
     assert trade.nbm_divergence is None
+
+
+def test_trade_intent_q_raw_is_required() -> None:
+    intent_kwargs = dict(
+        market_ticker="KXHIGHDEN-26MAY05-T80",
+        side=TradeSide.BUY_YES,
+        contracts=10,
+        fair_yes=Decimal("0.50"),
+        strategy="edge",
+    )
+    with pytest.raises(TypeError):
+        TradeIntent(**intent_kwargs)  # type: ignore[arg-type]
+    trade_kwargs = dict(
+        intended_at=_now(),
+        market_ticker="KXHIGHDEN-26MAY05-T80",
+        side=TradeSide.BUY_YES,
+        contracts=10,
+        simulated_price=Decimal("0.40"),
+        fee_dollars=Decimal("0.05"),
+        fair_at_entry=Decimal("0.50"),
+        strategy="edge",
+    )
+    with pytest.raises(TypeError):
+        PaperTrade(**trade_kwargs)  # type: ignore[arg-type]
+
+
+def test_trade_intent_q_raw_field_position_imports_cleanly() -> None:
+    from dataclasses import MISSING, fields
+
+    from bot.execution.paper import PaperTrade as _PT
+    from bot.execution.paper import TradeIntent as _TI
+
+    ti_fields = fields(_TI)
+    pt_fields = fields(_PT)
+    ti_q_idx = next(i for i, f in enumerate(ti_fields) if f.name == "q_raw")
+    pt_q_idx = next(i for i, f in enumerate(pt_fields) if f.name == "q_raw")
+    for f in ti_fields[:ti_q_idx]:
+        assert f.default is MISSING and f.default_factory is MISSING
+    for f in pt_fields[:pt_q_idx]:
+        assert f.default is MISSING and f.default_factory is MISSING
+
+
+def test_trade_intent_q_raw_carries_through_simulate() -> None:
+    intent = _intent(fair_yes=Decimal("0.05"), q_raw=Decimal("0.005"))
+    trade = simulate_taker_fill(intent, _book(), _now())
+    assert trade is not None
+    assert trade.q_raw == Decimal("0.005")
+    assert trade.fair_at_entry == Decimal("0.05")
 
 
 def test_log_stale_skip_ratio_aggregate_above_threshold_warns(

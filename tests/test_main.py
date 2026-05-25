@@ -1156,6 +1156,7 @@ def _insert_paper_trade(
             simulated_price=simulated_price,
             fee_dollars=fee_dollars,
             fair_at_entry=fair_at_entry,
+            q_raw=fair_at_entry,
             strategy=strategy,
         )
         session.add(row)
@@ -2202,6 +2203,7 @@ async def test_evaluate_strategies_within_cycle_event_cap_blocks_second_bracket(
                 side=TradeSide.BUY_YES,
                 contracts=10,
                 fair_yes=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 strategy="edge",
             )
         ]
@@ -2299,6 +2301,7 @@ async def test_evaluate_strategies_overlay_strip_regression_canary(
                 side=TradeSide.BUY_YES,
                 contracts=10,
                 fair_yes=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 strategy="edge",
             )
         ]
@@ -2386,6 +2389,7 @@ def test_gate_ctx_for_sell_yes_uses_book_no_ask_on_wide_book() -> None:
         side=TradeSide.SELL_YES,
         contracts=10,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     ctx = _gate_ctx_for(**_gate_ctx_kwargs(intent, market, book))
@@ -2409,6 +2413,7 @@ def test_gate_ctx_for_sell_yes_book_no_ask_diverges_from_market_complement_when_
         side=TradeSide.SELL_YES,
         contracts=10,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     ctx = _gate_ctx_for(**_gate_ctx_kwargs(intent, market, book))
@@ -2428,6 +2433,7 @@ def test_gate_ctx_for_buy_yes_uses_book_yes_ask() -> None:
         side=TradeSide.BUY_YES,
         contracts=10,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     ctx = _gate_ctx_for(**_gate_ctx_kwargs(intent, market, book))
@@ -2446,6 +2452,7 @@ def test_gate_ctx_for_requires_book_kwarg() -> None:
         side=TradeSide.BUY_YES,
         contracts=10,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     with pytest.raises(TypeError):
@@ -2478,6 +2485,7 @@ def test_gate_ctx_for_caps_scale_with_demo_app_bankroll() -> None:
         side=TradeSide.BUY_YES,
         contracts=10,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     app = _make_demo_app(bankroll=Decimal("1000"))
@@ -2503,6 +2511,7 @@ def test_gate_ctx_for_caps_match_legacy_constants_without_app() -> None:
         side=TradeSide.BUY_YES,
         contracts=10,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     ctx = _gate_ctx_for(**_gate_ctx_kwargs(intent, market, book))
@@ -2558,6 +2567,7 @@ async def test_evaluate_strategies_partial_fill_on_thin_book(monkeypatch) -> Non
                 side=TradeSide.SELL_YES,
                 contracts=7194,
                 fair_yes=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 strategy="edge",
             )
         ]
@@ -2660,6 +2670,7 @@ async def test_evaluate_strategies_partial_fill_overlay_uses_trade_contracts_acr
                 side=TradeSide.SELL_YES,
                 contracts=7194,
                 fair_yes=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 strategy="edge",
             )
         ]
@@ -2743,6 +2754,7 @@ async def test_evaluate_strategies_stale_orderbook_skips(
                 side=TradeSide.BUY_YES,
                 contracts=10,
                 fair_yes=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 strategy="edge",
             )
         ]
@@ -2805,6 +2817,7 @@ async def test_evaluate_strategies_stale_snapshot_drives_zero_trades(
                 side=TradeSide.BUY_YES,
                 contracts=10,
                 fair_yes=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 strategy="edge",
             )
         ]
@@ -2872,6 +2885,7 @@ async def test_evaluate_strategies_stale_skip_ratio_warns(
                 side=TradeSide.BUY_YES,
                 contracts=10,
                 fair_yes=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 strategy="edge",
             )
         ]
@@ -2967,6 +2981,7 @@ async def test_evaluate_strategies_per_series_stale_skip_warns_on_one_stuck_seri
                 side=TradeSide.BUY_YES,
                 contracts=10,
                 fair_yes=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 strategy="edge",
             )
         ]
@@ -3036,6 +3051,7 @@ def test_paper_trade_row_persists_attempted_contracts_from_intent() -> None:
         simulated_price=Decimal("0.99"),
         fee_dollars=Decimal("0.01"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
         attempted_contracts=7194,
     )
@@ -3539,6 +3555,7 @@ def _pin_seven_fifty_per_intent(monkeypatch: pytest.MonkeyPatch) -> None:
                 side=side,
                 contracts=contracts,
                 fair_yes=fair_yes,
+                q_raw=fair_yes,
                 strategy="edge",
             )
         ]
@@ -3697,6 +3714,7 @@ async def test_bankroll_accessor_drives_all_downstream_reads(
         side=TradeSide.BUY_YES,
         contracts=10,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     direct_ctx = _gate_ctx_for(
@@ -4064,6 +4082,7 @@ def _one_intent_stub(
                 side=side,
                 contracts=contracts,
                 fair_yes=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 strategy=strategy,
             )
         ]
@@ -4544,6 +4563,7 @@ def _demo_values(now: datetime, **overrides) -> dict:
         side=TradeSide.BUY_YES,
         contracts=5,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     order = _demo_order(
@@ -4717,6 +4737,7 @@ async def test_phase2_paper_rows_upsert_survives_duplicate_demo_order_client_id(
                 simulated_price=Decimal("0.20"),
                 fee_dollars=Decimal("0.01"),
                 fair_at_entry=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 strategy="edge",
                 demo_order_client_id=cid,
             )
@@ -4731,6 +4752,7 @@ async def test_phase2_paper_rows_upsert_survives_duplicate_demo_order_client_id(
         simulated_price=Decimal("0.20"),
         fee_dollars=Decimal("0.01"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
         demo_order_client_id=cid,
     )
@@ -4742,6 +4764,7 @@ async def test_phase2_paper_rows_upsert_survives_duplicate_demo_order_client_id(
         simulated_price=Decimal("0.20"),
         fee_dollars=Decimal("0.01"),
         fair_at_entry=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
         demo_order_client_id=None,
     )
@@ -4807,6 +4830,7 @@ async def test_phase2_late_fill_via_reconciler_inserts_paper_row() -> None:
                 filled_contracts=0,
                 requested_yes_price_dollars=Decimal("0.20"),
                 fair_at_entry=Decimal("0.50"),
+                q_raw=Decimal("0.50"),
                 intended_at=now,
                 status="resting",
                 placed_at=now,
@@ -5370,6 +5394,7 @@ async def test_intent_with_thin_edge_on_low_priced_contract_is_blocked(
                 side=TradeSide.BUY_YES,
                 contracts=1,
                 fair_yes=fair_yes,
+                q_raw=fair_yes,
                 strategy="edge",
             )
         ]
@@ -5435,6 +5460,7 @@ async def test_intent_with_thick_edge_still_clears(
                 side=TradeSide.BUY_YES,
                 contracts=1,
                 fair_yes=fair_yes,
+                q_raw=fair_yes,
                 strategy="edge",
             )
         ]
@@ -5496,6 +5522,7 @@ async def test_paper_mode_edge_after_friction_failure_blocks_papertrade_insert(
                 side=TradeSide.BUY_YES,
                 contracts=1,
                 fair_yes=fair_yes,
+                q_raw=fair_yes,
                 strategy="edge",
             )
         ]
@@ -5526,6 +5553,7 @@ def test_gate_ctx_for_buy_yes_uses_side_specific_edge() -> None:
         side=TradeSide.BUY_YES,
         contracts=10,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     ctx = _gate_ctx_for(
@@ -5561,6 +5589,7 @@ def test_gate_ctx_for_sell_yes_uses_side_specific_edge() -> None:
         side=TradeSide.SELL_YES,
         contracts=10,
         fair_yes=Decimal("0.20"),
+        q_raw=Decimal("0.20"),
         strategy="edge",
     )
     ctx = _gate_ctx_for(
@@ -5599,6 +5628,7 @@ def test_gate_ctx_for_sources_edge_from_book_not_market() -> None:
         side=TradeSide.BUY_YES,
         contracts=10,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     ctx = _gate_ctx_for(
@@ -5639,6 +5669,7 @@ def test_gate_ctx_for_passes_orderbook_depth_through() -> None:
         side=TradeSide.BUY_YES,
         contracts=10,
         fair_yes=Decimal("0.50"),
+        q_raw=Decimal("0.50"),
         strategy="edge",
     )
     sell = TradeIntent(
@@ -5646,6 +5677,7 @@ def test_gate_ctx_for_passes_orderbook_depth_through() -> None:
         side=TradeSide.SELL_YES,
         contracts=10,
         fair_yes=Decimal("0.20"),
+        q_raw=Decimal("0.20"),
         strategy="edge",
     )
     base = dict(
@@ -5914,6 +5946,7 @@ async def test_event_budget_recomputed_per_iteration_not_per_cycle(
                 side=TradeSide.BUY_YES,
                 contracts=contracts,
                 fair_yes=fair_yes,
+                q_raw=fair_yes,
                 strategy="edge",
             )
         ]
@@ -6088,6 +6121,7 @@ async def test_overlay_debit_uses_paper_basis_in_paper_mode(
                 side=TradeSide.SELL_YES,
                 contracts=contracts,
                 fair_yes=fair_yes,
+                q_raw=fair_yes,
                 strategy="tails",
             )
         ]
@@ -6148,6 +6182,7 @@ async def test_overlay_debit_uses_no_ask_in_demo_mode(
                 side=TradeSide.SELL_YES,
                 contracts=contracts,
                 fair_yes=fair_yes,
+                q_raw=fair_yes,
                 strategy="tails",
             )
         ]
@@ -6296,3 +6331,126 @@ async def test_build_intents_skips_blacklisted_tail_series() -> None:
         **_intents_defaults(),
     )
     assert all(i.strategy != "tails" for i in intents)
+
+
+def test_calibration_cold_start_log_emits_at_init(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="bot.main")
+    _make_app()
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any(
+        "calibration_maps_loaded n_buckets_fit=0 n_buckets_skipped=24 reason=cold_start" in m
+        for m in messages
+    )
+
+
+def test_gate_failure_reason_helper_formats_tokens() -> None:
+    from bot.validation.calibration import format_gate_failure_reason
+
+    out = format_gate_failure_reason(
+        "fair_value_sane fair_yes=0.005 outside [0.01, 0.99]",
+        q_raw=Decimal("0.005"),
+        fair_yes=Decimal("0.005"),
+        bucket_key=("tails", 0, 1),
+    )
+    assert "q_raw=" in out
+    assert "q_corrected=" in out
+    assert "bucket=" in out
+    assert len(out) < 512
+
+
+async def test_gate_failure_reason_includes_raw_corrected_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fc = StationForecast(
+        station="KDEN",
+        latitude=39.8466,
+        longitude=-104.6562,
+        timezone="America/Denver",
+        run_time=datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc),
+        daily_highs={date(2026, 5, 8): np.random.default_rng(0).normal(73.0, 4.0, size=31)},
+    )
+    meteo = _StubMeteo(fc)
+    market = _market_from(
+        "KXHIGHDEN-26MAY08-T100",
+        "0.20",
+        "0.18",
+        datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc),
+    )
+    book = _book_from(market.ticker, "0.20", "0.18")
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    _lift_caps(monkeypatch)
+
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        failures = session.scalars(select(GateFailure)).all()
+    assert failures, "expected at least one gate failure for this TAILS market"
+    for f in failures:
+        assert "q_raw=" in f.reason
+        assert "q_corrected=" in f.reason
+        assert "bucket=" in f.reason
+
+
+def test_seconds_until_next_refit_jitters_within_bound() -> None:
+    from bot.main import (
+        CALIBRATION_REFIT_JITTER_SECONDS,
+        CALIBRATION_REFIT_TARGET_HOUR_UTC,
+        _seconds_until_next_refit,
+    )
+
+    now = datetime(2026, 5, 6, 3, 0, tzinfo=timezone.utc)
+    base = (
+        now.replace(hour=CALIBRATION_REFIT_TARGET_HOUR_UTC, minute=0, second=0, microsecond=0) - now
+    ).total_seconds()
+    seen = {round(_seconds_until_next_refit(now), 3) for _ in range(50)}
+    assert len(seen) >= 5
+    for v in seen:
+        assert abs(v - base) <= CALIBRATION_REFIT_JITTER_SECONDS + 1
+
+
+def test_seconds_until_next_refit_handles_after_04_utc() -> None:
+    from bot.main import (
+        CALIBRATION_REFIT_JITTER_SECONDS,
+        _seconds_until_next_refit,
+    )
+
+    now = datetime(2026, 5, 6, 4, 30, tzinfo=timezone.utc)
+    base = (24 - 0.5) * 3600
+    for _ in range(20):
+        v = _seconds_until_next_refit(now)
+        assert abs(v - base) <= CALIBRATION_REFIT_JITTER_SECONDS + 1
+
+
+async def test_calibration_refit_loop_continues_after_refit_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bot.main import _calibration_refit_loop
+
+    app = _make_app()
+    call_count = {"n": 0}
+
+    def fake_refit(session, prev_maps=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("synthetic refit failure")
+        return prev_maps or bot_main._empty_calibration_maps()
+
+    monkeypatch.setattr(bot_main, "refit_all", fake_refit)
+    monkeypatch.setattr(bot_main, "_seconds_until_next_refit", lambda now: 0.001)
+
+    stop = asyncio.Event()
+
+    async def stop_after_two_iters() -> None:
+        while call_count["n"] < 2:
+            await asyncio.sleep(0.005)
+        stop.set()
+
+    await asyncio.gather(
+        _calibration_refit_loop(app, stop),
+        stop_after_two_iters(),
+    )
+    assert call_count["n"] >= 2
