@@ -4003,7 +4003,7 @@ def test_cap_helpers_fall_back_to_paper_bankroll_when_no_app() -> None:
 
 
 from bot.config import Settings as _DemoSettings  # noqa: E402
-from bot.execution.order_placer import DemoOrder  # noqa: E402
+from bot.execution.order_placer import DemoOrder, DemoOrderIdempotent  # noqa: E402
 from bot.storage.sqlite import DemoOrder as DemoOrderRow  # noqa: E402
 
 
@@ -4173,6 +4173,39 @@ async def test_evaluate_strategies_routes_to_demo_placer_in_demo_mode(
     assert len(demo_orders) == 1
     assert len(trades) == 1
     assert trades[0].demo_order_client_id == demo_orders[0].client_order_id
+
+
+async def test_evaluate_strategies_skips_writes_on_idempotent_409_sentinel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
+    _lift_caps(monkeypatch)
+
+    sentinel = DemoOrderIdempotent(
+        client_order_id="kw-edge-yes-KXHIGHDEN-26MAY08-T70-75-2026-05-08",
+        exchange_order_id="EX-PRIOR",
+        status="resting",
+    )
+
+    async def fake_place(intent, book, client, *, now):
+        return sentinel
+
+    monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        demo_orders = session.scalars(select(DemoOrderRow)).all()
+        trades = session.scalars(select(PaperTradeRow)).all()
+    assert demo_orders == []
+    assert trades == []
 
 
 async def test_evaluate_strategies_demo_does_not_post_on_failing_gate(
@@ -5273,11 +5306,15 @@ async def test_demo_integration_one_cycle_via_mock_transport(
                         "ticker": market.ticker,
                         "side": "yes",
                         "status": "executed",
-                        "requested_contracts": 5,
-                        "filled_contracts": 5,
-                        "avg_yes_fill_price_dollars": "0.2000",
+                        "initial_count": 5,
+                        "fill_count": 5,
                         "yes_price_dollars": "0.2000",
-                        "fee_dollars": "0.0100",
+                        "taker_fees": 1,
+                        "maker_fees": 0,
+                        "taker_fill_cost": 100,
+                        "maker_fill_cost": 0,
+                        "taker_fill_cost_dollars": "1.0000",
+                        "maker_fill_cost_dollars": "0.0000",
                     }
                 },
             )

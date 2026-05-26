@@ -215,11 +215,15 @@ async def test_poll_open_orders_paginates_via_cursor(rsa_pem: Path) -> None:
                     "ticker": "KXHIGHDEN-26MAY22-T70",
                     "side": "yes",
                     "status": "executed",
-                    "requested_contracts": 10,
-                    "filled_contracts": 10,
+                    "initial_count": 10,
+                    "fill_count": 10,
                     "yes_price_dollars": "0.58",
-                    "avg_yes_fill_price_dollars": "0.205",
-                    "fee_dollars": "0.07",
+                    "taker_fees": 7,
+                    "maker_fees": 0,
+                    "taker_fill_cost": 205,
+                    "maker_fill_cost": 0,
+                    "taker_fill_cost_dollars": "2.0500",
+                    "maker_fill_cost_dollars": "0.0000",
                 }
             ],
             "cursor": "page2",
@@ -232,10 +236,15 @@ async def test_poll_open_orders_paginates_via_cursor(rsa_pem: Path) -> None:
                     "ticker": "KXHIGHDEN-26MAY22-T70",
                     "side": "no",
                     "status": "canceled",
-                    "requested_contracts": 5,
-                    "filled_contracts": 0,
+                    "initial_count": 5,
+                    "fill_count": 0,
                     "no_price_dollars": "0.42",
-                    "fee_dollars": "0.00",
+                    "taker_fees": 0,
+                    "maker_fees": 0,
+                    "taker_fill_cost": 0,
+                    "maker_fill_cost": 0,
+                    "taker_fill_cost_dollars": "0.0000",
+                    "maker_fill_cost_dollars": "0.0000",
                 }
             ],
             "cursor": "",
@@ -260,6 +269,14 @@ async def test_poll_open_orders_paginates_via_cursor(rsa_pem: Path) -> None:
     assert calls[0].get("min_ts") == str(int(_now().timestamp()))
     assert "cursor" not in calls[0]
     assert calls[1].get("cursor") == "page2"
+    assert orders[0].requested_contracts == 10
+    assert orders[0].filled_contracts == 10
+    assert orders[0].fee_dollars == Decimal("0.07")
+    assert orders[0].avg_yes_fill_price_dollars == Decimal("0.2050")
+    assert orders[1].requested_contracts == 5
+    assert orders[1].filled_contracts == 0
+    assert orders[1].fee_dollars == Decimal("0")
+    assert orders[1].avg_yes_fill_price_dollars is None
 
 
 def test_upsert_exchange_record_inserts_backfill_row_with_null_intent(session):
@@ -1057,3 +1074,80 @@ def test_upsert_exchange_record_orphan_row_has_null_q_raw(session):
     ).one()
     assert row.q_raw is None
     assert row.fair_at_entry is None
+
+
+def test_fills_win_over_parsed_order_values_after_full_reconcile_cycle(session):
+    _seed_row(session, status="resting", filled_contracts=0, avg_fill_price=None, fee_dollars=None)
+    parsed = _exchange_order(
+        exchange_order_id="EX1",
+        status="executed",
+        filled_contracts=10,
+        avg=Decimal("0.999"),
+        fee=Decimal("9.99"),
+    )
+    upsert_exchange_record(session, parsed)
+    session.commit()
+
+    fills = [
+        _fill(fill_id="F1", count=4, yes_price="0.205", no_price="0.795", fee="0.04"),
+        _fill(fill_id="F2", count=6, yes_price="0.205", no_price="0.795", fee="0.03"),
+    ]
+    reconcile_fills_into_demo_orders(session, fills, [parsed])
+    session.commit()
+
+    row = session.scalars(select(DemoOrderRow)).one()
+    assert row.filled_contracts == 10
+    assert row.avg_fill_price == Decimal("0.205")
+    assert row.fee_dollars == Decimal("0.07")
+
+
+async def test_poll_open_orders_inverts_no_side_avg_fill_from_cents(rsa_pem: Path, session) -> None:
+    pages = [
+        {
+            "orders": [
+                {
+                    "order_id": "EX-NO",
+                    "client_order_id": "kw-edge-no-A",
+                    "ticker": "KXHIGHDEN-26MAY22-T70",
+                    "side": "no",
+                    "status": "executed",
+                    "initial_count": 4,
+                    "fill_count": 4,
+                    "no_price_dollars": "0.0750",
+                    "taker_fees": 1,
+                    "maker_fees": 0,
+                    "taker_fill_cost": 30,
+                    "maker_fill_cost": 0,
+                    "taker_fill_cost_dollars": "0.3000",
+                    "maker_fill_cost_dollars": "0.0000",
+                }
+            ],
+            "cursor": "",
+        },
+    ]
+    calls: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(dict(request.url.params))
+        return httpx.Response(200, json=pages[len(calls) - 1])
+
+    client = await _client_with_handler(rsa_pem, handler)
+    try:
+        orders = await poll_open_orders(client, _now())
+    finally:
+        await client.aclose()
+
+    assert len(orders) == 1
+    parsed = orders[0]
+    assert parsed.side_kalshi == "no"
+    assert parsed.avg_yes_fill_price_dollars == Decimal("0.9250")
+    assert parsed.fee_dollars == Decimal("0.01")
+
+    upsert_exchange_record(session, parsed)
+    session.commit()
+    row = session.scalars(
+        select(DemoOrderRow).where(DemoOrderRow.exchange_order_id == "EX-NO")
+    ).one()
+    assert row.avg_fill_price == Decimal("0.9250")
+    assert row.fee_dollars == Decimal("0.01")
+    assert row.side == "no"

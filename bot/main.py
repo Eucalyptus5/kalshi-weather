@@ -33,7 +33,7 @@ from bot.execution.gate_cost_basis import (
     paper_collateral_per_contract,
 )
 from bot.execution.order_loop import place_orders_resilient
-from bot.execution.order_placer import DemoOrder, place_order_demo
+from bot.execution.order_placer import DemoOrder, DemoOrderIdempotent, place_order_demo
 from bot.execution.order_reconciler import (
     poll_fills,
     poll_open_orders,
@@ -678,7 +678,9 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
         if intent.market_ticker not in app.latest_markets:
             return None
         order = await place_order_demo(intent, book, app.kalshi, now=now_pre_post)
-        return None if order is None else (intent, order, now_pre_post)
+        if order is None or isinstance(order, DemoOrderIdempotent):
+            return None
+        return (intent, order, now_pre_post)
 
     for intent, order, now_pre_post in await place_orders_resilient(pending_intents, _place):
         demo_rows.append(_demo_order_values(order, intent, now_pre_post))

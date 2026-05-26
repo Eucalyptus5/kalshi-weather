@@ -43,6 +43,13 @@ class DemoOrder:
     placed_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class DemoOrderIdempotent:
+    client_order_id: str
+    exchange_order_id: str
+    status: str
+
+
 def parse_avg_yes_fill_price(raw: str | Decimal | None) -> Decimal | None:
     if raw is None:
         return None
@@ -83,7 +90,6 @@ def _build_body(
         "side": side_kalshi,
         "action": "buy",
         "count": intent.contracts,
-        "type": "limit",
         "time_in_force": "immediate_or_cancel",
         price_key: format_price_dollars(price),
         "client_order_id": client_order_id,
@@ -117,19 +123,36 @@ def _parse_order(payload: dict[str, object], placed_at: datetime) -> DemoOrder:
         requested_yes_price = Decimal("1") - no_price if no_price is not None else Decimal("0")
     else:
         requested_yes_price = yes_price
-    fee = parse_avg_yes_fill_price(payload.get("fee_dollars"))
+    cid = str(payload["client_order_id"])
+    side = str(payload["side"])
+    fill_count = int(payload["fill_count"])
+    if "taker_fees" in payload:
+        cents = Decimal(int(payload["taker_fees"])) + Decimal(int(payload["maker_fees"]))
+        fee_dollars = cents / Decimal(100)
+    else:
+        taker_fee = parse_avg_yes_fill_price(payload.get("taker_fees_dollars")) or Decimal("0")
+        maker_fee = parse_avg_yes_fill_price(payload.get("maker_fees_dollars")) or Decimal("0")
+        fee_dollars = taker_fee + maker_fee
+    fill_cost_cents = int(payload["taker_fill_cost"]) + int(payload["maker_fill_cost"])
+    avg_yes_fill: Decimal | None
+    if fill_count == 0:
+        avg_yes_fill = None
+    elif fill_cost_cents == 0:
+        avg_yes_fill = None
+        logger.warning("demo_order_zero_cost_fill cid=%s fill_count=%d", cid, fill_count)
+    else:
+        per_contract = Decimal(fill_cost_cents) / Decimal(fill_count) / Decimal(100)
+        avg_yes_fill = Decimal("1") - per_contract if side == "no" else per_contract
     return DemoOrder(
-        client_order_id=str(payload["client_order_id"]),
+        client_order_id=cid,
         exchange_order_id=str(payload.get("order_id") or payload.get("exchange_order_id") or ""),
         ticker=str(payload["ticker"]),
-        side_kalshi=str(payload["side"]),
-        requested_contracts=int(payload.get("requested_contracts", 0)),
-        filled_contracts=int(payload.get("filled_contracts", 0)),
+        side_kalshi=side,
+        requested_contracts=int(payload["initial_count"]),
+        filled_contracts=fill_count,
         requested_yes_price_dollars=requested_yes_price,
-        avg_yes_fill_price_dollars=parse_avg_yes_fill_price(
-            payload.get("avg_yes_fill_price_dollars")
-        ),
-        fee_dollars=fee if fee is not None else Decimal("0"),
+        avg_yes_fill_price_dollars=avg_yes_fill,
+        fee_dollars=fee_dollars,
         status=str(payload["status"]),
         placed_at=placed_at,
     )
@@ -152,7 +175,7 @@ async def place_order_demo(
     client: KalshiDemoClient,
     *,
     now: datetime,
-) -> DemoOrder | None:
+) -> DemoOrder | DemoOrderIdempotent | None:
     parsed = parse_ticker(intent.market_ticker)
     cid = _client_order_id(intent.strategy, intent.side, intent.market_ticker, parsed.event_date)
     body = _build_body(intent, book, cid)
@@ -175,17 +198,30 @@ async def place_order_demo(
                 logger.error("demo_order_409_without_existing cid=%s", cid)
                 return None
             existing_status = str(existing.get("status", ""))
-            existing_contracts = int(existing.get("requested_contracts", 0))
-            if existing_status == "canceled" and existing_contracts != intent.contracts:
+            existing_contracts = int(existing.get("initial_count", 0))
+            if existing_status == "canceled":
                 logger.info(
-                    "demo_order_intent_drift cid=%s prior=%d new=%d status=canceled",
+                    "demo_order_idempotent_canceled cid=%s prior_initial_count=%d",
+                    cid,
+                    existing_contracts,
+                )
+                return None
+            if existing_contracts != intent.contracts:
+                logger.info(
+                    "demo_order_intent_drift cid=%s prior=%d new=%d status=%s",
                     cid,
                     existing_contracts,
                     intent.contracts,
+                    existing_status,
                 )
                 return None
             logger.info("demo_order_idempotent_duplicate cid=%s", cid)
-            return _parse_order(existing, placed_at=now)
+            existing_eid = str(existing.get("order_id") or existing.get("exchange_order_id") or "")
+            return DemoOrderIdempotent(
+                client_order_id=cid,
+                exchange_order_id=existing_eid,
+                status=existing_status,
+            )
         if status == 429:
             _record_429(time.monotonic())
             attempt += 1

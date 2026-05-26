@@ -15,7 +15,11 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from bot.config import Settings
 from bot.execution import order_placer as _order_placer_module
 from bot.execution.order_placer import (
+    DemoOrder,
+    DemoOrderIdempotent,
+    _build_body,
     _client_order_id,
+    _parse_order,
     parse_avg_yes_fill_price,
     place_order_demo,
 )
@@ -100,18 +104,29 @@ def _make_order_response(
     fee_dollars: str = "0.01",
     order_id: str = "ex-1",
 ) -> dict[str, object]:
+    if avg_yes_fill_price_dollars is None or filled_contracts == 0:
+        taker_fill_cost_cents = 0
+    else:
+        per_contract = Decimal(avg_yes_fill_price_dollars)
+        if side == "no":
+            per_contract = Decimal("1") - per_contract
+        taker_fill_cost_cents = int(per_contract * Decimal(100) * Decimal(filled_contracts))
+    taker_fees_cents = int(Decimal(fee_dollars) * Decimal(100))
     order: dict[str, object] = {
         "order_id": order_id,
         "client_order_id": client_order_id,
         "ticker": ticker,
         "side": side,
         "status": status,
-        "filled_contracts": filled_contracts,
-        "requested_contracts": requested_contracts,
-        "fee_dollars": fee_dollars,
+        "fill_count": filled_contracts,
+        "initial_count": requested_contracts,
+        "taker_fees": taker_fees_cents,
+        "maker_fees": 0,
+        "taker_fill_cost": taker_fill_cost_cents,
+        "maker_fill_cost": 0,
+        "taker_fill_cost_dollars": f"{(Decimal(taker_fill_cost_cents) / Decimal(100)):.4f}",
+        "maker_fill_cost_dollars": "0.0000",
     }
-    if avg_yes_fill_price_dollars is not None:
-        order["avg_yes_fill_price_dollars"] = avg_yes_fill_price_dollars
     return {"order": order}
 
 
@@ -150,7 +165,7 @@ async def test_place_order_demo_buys_yes_at_yes_ask(rsa_pem: Path) -> None:
     assert body["side"] == "yes"
     assert body["action"] == "buy"
     assert body["yes_price_dollars"] == "0.8500"
-    assert body["type"] == "limit"
+    assert "type" not in body
     assert body["time_in_force"] == "immediate_or_cancel"
     assert body["post_only"] is False
     assert body["count"] == 5
@@ -312,6 +327,7 @@ async def test_place_order_demo_handles_409_as_idempotent(rsa_pem: Path) -> None
                             filled_contracts=5,
                             requested_contracts=5,
                             avg_yes_fill_price_dollars="0.8500",
+                            order_id="ex-existing",
                         )["order"]
                     ]
                 },
@@ -324,12 +340,48 @@ async def test_place_order_demo_handles_409_as_idempotent(rsa_pem: Path) -> None
     finally:
         await client.aclose()
 
-    assert order is not None
-    assert order.filled_contracts == 5
-    assert order.avg_yes_fill_price_dollars == Decimal("0.8500")
+    assert isinstance(order, DemoOrderIdempotent)
+    assert order.exchange_order_id == "ex-existing"
+    assert order.status == "executed"
 
 
-async def test_place_order_demo_drops_intent_on_canceled_409_with_different_contracts(
+async def test_place_order_demo_409_echo_returns_sentinel_not_demo_order(rsa_pem: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(409, json={"error": "ORDER_ALREADY_EXISTS"})
+        if request.method == "GET" and "/portfolio/orders" in request.url.path:
+            cid = request.url.params.get("client_order_id")
+            return httpx.Response(
+                200,
+                json={
+                    "orders": [
+                        _make_order_response(
+                            client_order_id=cid,
+                            side="yes",
+                            status="resting",
+                            filled_contracts=0,
+                            requested_contracts=5,
+                            avg_yes_fill_price_dollars=None,
+                            order_id="ex-resting-prior",
+                        )["order"]
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    client = await _client_with_handler(rsa_pem, handler)
+    try:
+        order = await place_order_demo(_intent(contracts=5), _book(), client, now=_now())
+    finally:
+        await client.aclose()
+
+    assert isinstance(order, DemoOrderIdempotent)
+    assert not isinstance(order, DemoOrder)
+    assert order.exchange_order_id == "ex-resting-prior"
+    assert order.status == "resting"
+
+
+async def test_place_order_demo_canceled_409_mismatched_contracts_short_circuits(
     rsa_pem: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -356,12 +408,51 @@ async def test_place_order_demo_drops_intent_on_canceled_409_with_different_cont
     client = await _client_with_handler(rsa_pem, handler)
     try:
         caplog.set_level(logging.INFO, logger="bot.execution.order_placer")
-        order = await place_order_demo(_intent(contracts=200), _book(), client, now=_now())
+        order = await place_order_demo(_intent(contracts=5), _book(), client, now=_now())
     finally:
         await client.aclose()
 
     assert order is None
-    assert any("demo_order_intent_drift" in r.getMessage() for r in caplog.records)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("demo_order_idempotent_canceled" in m for m in messages)
+    assert not any("demo_order_intent_drift" in m for m in messages)
+
+
+async def test_place_order_demo_canceled_409_matching_contracts_also_short_circuits(
+    rsa_pem: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(409, json={"error": "ORDER_ALREADY_EXISTS"})
+        if request.method == "GET" and "/portfolio/orders" in request.url.path:
+            cid = request.url.params.get("client_order_id")
+            return httpx.Response(
+                200,
+                json={
+                    "orders": [
+                        _make_order_response(
+                            client_order_id=cid,
+                            status="canceled",
+                            filled_contracts=0,
+                            requested_contracts=5,
+                            avg_yes_fill_price_dollars=None,
+                        )["order"]
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    client = await _client_with_handler(rsa_pem, handler)
+    try:
+        caplog.set_level(logging.INFO, logger="bot.execution.order_placer")
+        order = await place_order_demo(_intent(contracts=5), _book(), client, now=_now())
+    finally:
+        await client.aclose()
+
+    assert order is None
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("demo_order_idempotent_canceled" in m for m in messages)
+    assert not any("demo_order_idempotent_duplicate" in m for m in messages)
 
 
 async def test_place_order_demo_returns_none_on_429_after_retries(
@@ -476,3 +567,176 @@ def test_placer_avg_fill_price_deserialization_golden_table(
     else:
         result = parse_avg_yes_fill_price(candidate)
         assert result == expected
+
+
+def test_build_body_omits_type_key_for_buy_yes() -> None:
+    body = _build_body(_intent(side=TradeSide.BUY_YES), _book(), "kw-cid")
+    assert "type" not in body
+
+
+def test_build_body_omits_type_key_for_sell_yes() -> None:
+    book = _book(yes_ask=Decimal("0.95"), yes_bid=Decimal("0.925"))
+    body = _build_body(_intent(side=TradeSide.SELL_YES, strategy="tails"), book, "kw-cid")
+    assert "type" not in body
+    assert body["side"] == "no"
+
+
+async def test_place_order_demo_reads_sdk_count_fields(rsa_pem: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(
+            201,
+            json={
+                "order": {
+                    "order_id": "ex-1",
+                    "client_order_id": body["client_order_id"],
+                    "ticker": "KXHIGHDEN-26MAY22-T70",
+                    "side": "yes",
+                    "status": "executed",
+                    "initial_count": 5,
+                    "fill_count": 5,
+                    "taker_fees": 1,
+                    "maker_fees": 0,
+                    "taker_fill_cost": 425,
+                    "maker_fill_cost": 0,
+                    "taker_fill_cost_dollars": "4.2500",
+                    "maker_fill_cost_dollars": "0.0000",
+                }
+            },
+        )
+
+    client = await _client_with_handler(rsa_pem, handler)
+    try:
+        order = await place_order_demo(_intent(), _book(), client, now=_now())
+    finally:
+        await client.aclose()
+
+    assert isinstance(order, DemoOrder)
+    assert order.requested_contracts == 5
+    assert order.filled_contracts == 5
+
+
+def test_parse_order_records_fees_from_cents_when_dollar_keys_absent() -> None:
+    payload: dict[str, object] = {
+        "order_id": "ex-1",
+        "client_order_id": "cid",
+        "ticker": "KXHIGHDEN-26MAY22-T70",
+        "side": "yes",
+        "status": "executed",
+        "initial_count": 5,
+        "fill_count": 5,
+        "taker_fees": 7,
+        "maker_fees": 3,
+        "taker_fill_cost": 425,
+        "maker_fill_cost": 0,
+        "taker_fill_cost_dollars": "4.2500",
+        "maker_fill_cost_dollars": "0.0000",
+    }
+    order = _parse_order(payload, placed_at=_now())
+    assert order.fee_dollars == Decimal("0.10")
+
+
+def test_parse_order_records_zero_cents_fee_not_silently_falling_back() -> None:
+    payload: dict[str, object] = {
+        "order_id": "ex-1",
+        "client_order_id": "cid",
+        "ticker": "KXHIGHDEN-26MAY22-T70",
+        "side": "yes",
+        "status": "executed",
+        "initial_count": 5,
+        "fill_count": 0,
+        "taker_fees": 0,
+        "maker_fees": 0,
+        "taker_fees_dollars": "9.99",
+        "maker_fees_dollars": "9.99",
+        "taker_fill_cost": 0,
+        "maker_fill_cost": 0,
+        "taker_fill_cost_dollars": "0.0000",
+        "maker_fill_cost_dollars": "0.0000",
+    }
+    order = _parse_order(payload, placed_at=_now())
+    assert order.fee_dollars == Decimal("0")
+
+
+def test_parse_order_falls_back_to_dollar_fees_when_cents_absent_by_key() -> None:
+    payload: dict[str, object] = {
+        "order_id": "ex-1",
+        "client_order_id": "cid",
+        "ticker": "KXHIGHDEN-26MAY22-T70",
+        "side": "yes",
+        "status": "executed",
+        "initial_count": 5,
+        "fill_count": 5,
+        "taker_fees_dollars": "0.05",
+        "maker_fees_dollars": "0.02",
+        "taker_fill_cost": 425,
+        "maker_fill_cost": 0,
+        "taker_fill_cost_dollars": "4.2500",
+        "maker_fill_cost_dollars": "0.0000",
+    }
+    order = _parse_order(payload, placed_at=_now())
+    assert order.fee_dollars == Decimal("0.07")
+
+
+def test_parse_order_inverts_avg_fill_for_no_side_from_cents() -> None:
+    payload: dict[str, object] = {
+        "order_id": "ex-1",
+        "client_order_id": "cid",
+        "ticker": "KXHIGHDEN-26MAY22-T70",
+        "side": "no",
+        "status": "executed",
+        "initial_count": 4,
+        "fill_count": 4,
+        "taker_fees": 1,
+        "maker_fees": 0,
+        "taker_fill_cost": 30,
+        "maker_fill_cost": 0,
+        "taker_fill_cost_dollars": "0.3000",
+        "maker_fill_cost_dollars": "0.0000",
+    }
+    order = _parse_order(payload, placed_at=_now())
+    assert order.avg_yes_fill_price_dollars == Decimal("0.9250")
+
+
+def test_parse_order_no_side_zero_fill_cost_does_not_record_perfect_fill(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    payload: dict[str, object] = {
+        "order_id": "ex-1",
+        "client_order_id": "cid",
+        "ticker": "KXHIGHDEN-26MAY22-T70",
+        "side": "no",
+        "status": "executed",
+        "initial_count": 4,
+        "fill_count": 4,
+        "taker_fees": 0,
+        "maker_fees": 0,
+        "taker_fill_cost": 0,
+        "maker_fill_cost": 0,
+        "taker_fill_cost_dollars": "0.0000",
+        "maker_fill_cost_dollars": "0.0000",
+    }
+    caplog.set_level(logging.WARNING, logger="bot.execution.order_placer")
+    order = _parse_order(payload, placed_at=_now())
+    assert order.avg_yes_fill_price_dollars is None
+    assert any("demo_order_zero_cost_fill" in r.getMessage() for r in caplog.records)
+
+
+def test_parse_order_yes_side_avg_fill_from_cents() -> None:
+    payload: dict[str, object] = {
+        "order_id": "ex-1",
+        "client_order_id": "cid",
+        "ticker": "KXHIGHDEN-26MAY22-T70",
+        "side": "yes",
+        "status": "executed",
+        "initial_count": 4,
+        "fill_count": 4,
+        "taker_fees": 1,
+        "maker_fees": 0,
+        "taker_fill_cost": 340,
+        "maker_fill_cost": 0,
+        "taker_fill_cost_dollars": "3.4000",
+        "maker_fill_cost_dollars": "0.0000",
+    }
+    order = _parse_order(payload, placed_at=_now())
+    assert order.avg_yes_fill_price_dollars == Decimal("0.8500")
