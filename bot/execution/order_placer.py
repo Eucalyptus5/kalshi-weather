@@ -27,6 +27,9 @@ _BREAKER_THRESHOLD = 3
 
 _breaker_state: dict[str, object] = {"recent_429": [], "paused_until": 0.0}
 
+_capture_next_400 = True
+_capture_next_201 = True
+
 
 @dataclass(frozen=True, slots=True)
 class DemoOrder:
@@ -153,6 +156,7 @@ async def place_order_demo(
     *,
     now: datetime,
 ) -> DemoOrder | None:
+    global _capture_next_201, _capture_next_400
     parsed = parse_ticker(intent.market_ticker)
     cid = _client_order_id(intent.strategy, intent.side, intent.market_ticker, parsed.event_date)
     body = _build_body(intent, book, cid)
@@ -167,6 +171,15 @@ async def place_order_demo(
         status = response.status_code
         if status == 201:
             payload = response.json()
+            if _capture_next_201:
+                logger.warning(
+                    "demo_order_request_payload body=%s yes_ask=%s no_ask=%s",
+                    body,
+                    book.yes_ask,
+                    book.no_ask,
+                )
+                logger.warning("demo_order_response_body status=%d body=%s", status, response.text)
+                _capture_next_201 = False
             order_payload = payload.get("order") or payload
             return _parse_order(order_payload, placed_at=now)
         if status == 409:
@@ -195,6 +208,15 @@ async def place_order_demo(
             await asyncio.sleep(_backoff_seconds(attempt))
             continue
         body_text = response.text
+        if status == 400 and _capture_next_400:
+            logger.warning(
+                "demo_order_request_payload body=%s yes_ask=%s no_ask=%s",
+                body,
+                book.yes_ask,
+                book.no_ask,
+            )
+            logger.warning("demo_order_response_body status=%d body=%s", status, body_text)
+            _capture_next_400 = False
         logger.warning("demo_order_rejected status=%d reason=%s", status, body_text)
         return None
 
