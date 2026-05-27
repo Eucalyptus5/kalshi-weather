@@ -93,7 +93,6 @@ def _build_body(
         "time_in_force": "immediate_or_cancel",
         price_key: format_price_dollars(price),
         "client_order_id": client_order_id,
-        "post_only": False,
     }
 
 

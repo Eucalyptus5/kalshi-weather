@@ -167,7 +167,7 @@ async def test_place_order_demo_buys_yes_at_yes_ask(rsa_pem: Path) -> None:
     assert body["yes_price_dollars"] == "0.8500"
     assert "type" not in body
     assert body["time_in_force"] == "immediate_or_cancel"
-    assert body["post_only"] is False
+    assert "post_only" not in body
     assert body["count"] == 5
 
 
@@ -572,12 +572,14 @@ def test_placer_avg_fill_price_deserialization_golden_table(
 def test_build_body_omits_type_key_for_buy_yes() -> None:
     body = _build_body(_intent(side=TradeSide.BUY_YES), _book(), "kw-cid")
     assert "type" not in body
+    assert "post_only" not in body
 
 
 def test_build_body_omits_type_key_for_sell_yes() -> None:
     book = _book(yes_ask=Decimal("0.95"), yes_bid=Decimal("0.925"))
     body = _build_body(_intent(side=TradeSide.SELL_YES, strategy="tails"), book, "kw-cid")
     assert "type" not in body
+    assert "post_only" not in body
     assert body["side"] == "no"
 
 
