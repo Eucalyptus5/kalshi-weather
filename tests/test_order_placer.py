@@ -302,6 +302,24 @@ def test_client_order_id_hashes_overlong_natural_key() -> None:
     assert cid.startswith("kw-")
 
 
+def test_client_order_id_replaces_period_with_hyphen() -> None:
+    cid = _client_order_id("edge", TradeSide.SELL_YES, "KXHIGHNY-26MAY31-B76.5", date(2026, 5, 31))
+    assert "." not in cid
+    assert cid == "kw-edge-no-KXHIGHNY-26MAY31-B76-5-2026-05-31"
+
+
+def test_client_order_id_preserves_uppercase_and_digits() -> None:
+    raw = "kw-edge-yes-KXHIGHNY-26MAY31-T79-2026-05-31"
+    cid = _client_order_id("edge", TradeSide.BUY_YES, "KXHIGHNY-26MAY31-T79", date(2026, 5, 31))
+    assert cid == raw
+
+
+def test_client_order_id_same_intent_yields_same_cid() -> None:
+    a = _client_order_id("edge", TradeSide.SELL_YES, "KXHIGHNY-26MAY31-B76.5", date(2026, 5, 31))
+    b = _client_order_id("edge", TradeSide.SELL_YES, "KXHIGHNY-26MAY31-B76.5", date(2026, 5, 31))
+    assert a == b
+
+
 async def test_place_order_demo_handles_409_as_idempotent(rsa_pem: Path) -> None:
     state: dict[str, int] = {"post_calls": 0}
 

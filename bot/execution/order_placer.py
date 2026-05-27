@@ -5,6 +5,7 @@ import decimal
 import hashlib
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -18,6 +19,7 @@ from bot.markets.parser import parse_ticker
 logger = logging.getLogger(__name__)
 
 _MAX_CID_LEN = 64
+_CID_INVALID_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 _MAX_429_RETRIES = 3
 _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_CAP_SECONDS = 30.0
@@ -66,9 +68,10 @@ def parse_avg_yes_fill_price(raw: str | Decimal | None) -> Decimal | None:
 def _client_order_id(strategy: str, side: TradeSide, market_ticker: str, event_date: date) -> str:
     side_literal = "yes" if side is TradeSide.BUY_YES else "no"
     raw = f"kw-{strategy}-{side_literal}-{market_ticker}-{event_date.isoformat()}"
-    if len(raw) <= _MAX_CID_LEN:
-        return raw
-    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    sanitized = _CID_INVALID_CHARS.sub("-", raw)
+    if len(sanitized) <= _MAX_CID_LEN:
+        return sanitized
+    digest = hashlib.sha256(sanitized.encode("utf-8")).hexdigest()[:32]
     return f"kw-{digest}"
 
 
