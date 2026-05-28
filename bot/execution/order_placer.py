@@ -127,30 +127,29 @@ def _parse_order(payload: dict[str, object], placed_at: datetime) -> DemoOrder:
         requested_yes_price = yes_price
     cid = str(payload["client_order_id"])
     side = str(payload["side"])
-    fill_count = int(payload["fill_count"])
-    if "taker_fees" in payload:
-        cents = Decimal(int(payload["taker_fees"])) + Decimal(int(payload["maker_fees"]))
-        fee_dollars = cents / Decimal(100)
-    else:
-        taker_fee = parse_avg_yes_fill_price(payload.get("taker_fees_dollars")) or Decimal("0")
-        maker_fee = parse_avg_yes_fill_price(payload.get("maker_fees_dollars")) or Decimal("0")
-        fee_dollars = taker_fee + maker_fee
-    fill_cost_cents = int(payload["taker_fill_cost"]) + int(payload["maker_fill_cost"])
+    fill_count = int(Decimal(str(payload["fill_count_fp"])))
+    initial_count = int(Decimal(str(payload["initial_count_fp"])))
+    taker_fee = parse_avg_yes_fill_price(payload.get("taker_fees_dollars")) or Decimal("0")
+    maker_fee = parse_avg_yes_fill_price(payload.get("maker_fees_dollars")) or Decimal("0")
+    fee_dollars = taker_fee + maker_fee
+    taker_cost = parse_avg_yes_fill_price(payload.get("taker_fill_cost_dollars")) or Decimal("0")
+    maker_cost = parse_avg_yes_fill_price(payload.get("maker_fill_cost_dollars")) or Decimal("0")
+    fill_cost = taker_cost + maker_cost
     avg_yes_fill: Decimal | None
     if fill_count == 0:
         avg_yes_fill = None
-    elif fill_cost_cents == 0:
+    elif fill_cost == 0:
         avg_yes_fill = None
         logger.warning("demo_order_zero_cost_fill cid=%s fill_count=%d", cid, fill_count)
     else:
-        per_contract = Decimal(fill_cost_cents) / Decimal(fill_count) / Decimal(100)
+        per_contract = fill_cost / Decimal(fill_count)
         avg_yes_fill = Decimal("1") - per_contract if side == "no" else per_contract
     return DemoOrder(
         client_order_id=cid,
         exchange_order_id=str(payload.get("order_id") or payload.get("exchange_order_id") or ""),
         ticker=str(payload["ticker"]),
         side_kalshi=side,
-        requested_contracts=int(payload["initial_count"]),
+        requested_contracts=initial_count,
         filled_contracts=fill_count,
         requested_yes_price_dollars=requested_yes_price,
         avg_yes_fill_price_dollars=avg_yes_fill,
@@ -200,7 +199,7 @@ async def place_order_demo(
                 logger.error("demo_order_409_without_existing cid=%s", cid)
                 return None
             existing_status = str(existing.get("status", ""))
-            existing_contracts = int(existing.get("initial_count", 0))
+            existing_contracts = int(Decimal(str(existing.get("initial_count_fp") or "0")))
             if existing_status == "canceled":
                 logger.info(
                     "demo_order_idempotent_canceled cid=%s prior_initial_count=%d",

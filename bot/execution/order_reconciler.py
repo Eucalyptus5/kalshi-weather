@@ -84,7 +84,7 @@ def _parse_fill(raw: dict[str, object]) -> DemoFill:
         ticker=str(raw["ticker"]),
         outcome_side=str(raw["outcome_side"]),
         book_side=str(raw["book_side"]),
-        count=int(raw.get("count_fp") or raw.get("count") or 0),
+        count=int(Decimal(str(raw.get("count_fp") or raw.get("count") or "0"))),
         yes_price_dollars=parse_avg_yes_fill_price(raw.get("yes_price_dollars")),
         no_price_dollars=parse_avg_yes_fill_price(raw.get("no_price_dollars")),
         is_taker=bool(raw.get("is_taker")),

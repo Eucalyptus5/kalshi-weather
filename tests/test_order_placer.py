@@ -105,27 +105,25 @@ def _make_order_response(
     order_id: str = "ex-1",
 ) -> dict[str, object]:
     if avg_yes_fill_price_dollars is None or filled_contracts == 0:
-        taker_fill_cost_cents = 0
+        taker_fill_cost = Decimal("0")
     else:
         per_contract = Decimal(avg_yes_fill_price_dollars)
         if side == "no":
             per_contract = Decimal("1") - per_contract
-        taker_fill_cost_cents = int(per_contract * Decimal(100) * Decimal(filled_contracts))
-    taker_fees_cents = int(Decimal(fee_dollars) * Decimal(100))
+        taker_fill_cost = per_contract * Decimal(filled_contracts)
     order: dict[str, object] = {
         "order_id": order_id,
         "client_order_id": client_order_id,
         "ticker": ticker,
         "side": side,
         "status": status,
-        "fill_count": filled_contracts,
-        "initial_count": requested_contracts,
-        "taker_fees": taker_fees_cents,
-        "maker_fees": 0,
-        "taker_fill_cost": taker_fill_cost_cents,
-        "maker_fill_cost": 0,
-        "taker_fill_cost_dollars": f"{(Decimal(taker_fill_cost_cents) / Decimal(100)):.4f}",
-        "maker_fill_cost_dollars": "0.0000",
+        "fill_count_fp": f"{Decimal(filled_contracts):.2f}",
+        "initial_count_fp": f"{Decimal(requested_contracts):.2f}",
+        "remaining_count_fp": f"{Decimal(requested_contracts - filled_contracts):.2f}",
+        "taker_fees_dollars": f"{Decimal(fee_dollars):.6f}",
+        "maker_fees_dollars": "0.000000",
+        "taker_fill_cost_dollars": f"{taker_fill_cost:.6f}",
+        "maker_fill_cost_dollars": "0.000000",
     }
     return {"order": order}
 
@@ -601,7 +599,7 @@ def test_build_body_omits_type_key_for_sell_yes() -> None:
     assert body["side"] == "no"
 
 
-async def test_place_order_demo_reads_sdk_count_fields(rsa_pem: Path) -> None:
+async def test_place_order_demo_reads_wire_count_fields(rsa_pem: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         return httpx.Response(
@@ -613,14 +611,13 @@ async def test_place_order_demo_reads_sdk_count_fields(rsa_pem: Path) -> None:
                     "ticker": "KXHIGHDEN-26MAY22-T70",
                     "side": "yes",
                     "status": "executed",
-                    "initial_count": 5,
-                    "fill_count": 5,
-                    "taker_fees": 1,
-                    "maker_fees": 0,
-                    "taker_fill_cost": 425,
-                    "maker_fill_cost": 0,
-                    "taker_fill_cost_dollars": "4.2500",
-                    "maker_fill_cost_dollars": "0.0000",
+                    "initial_count_fp": "5.00",
+                    "fill_count_fp": "5.00",
+                    "remaining_count_fp": "0.00",
+                    "taker_fees_dollars": "0.010000",
+                    "maker_fees_dollars": "0.000000",
+                    "taker_fill_cost_dollars": "4.250000",
+                    "maker_fill_cost_dollars": "0.000000",
                 }
             },
         )
@@ -636,83 +633,39 @@ async def test_place_order_demo_reads_sdk_count_fields(rsa_pem: Path) -> None:
     assert order.filled_contracts == 5
 
 
-def test_parse_order_records_fees_from_cents_when_dollar_keys_absent() -> None:
+def test_parse_order_sums_dollar_fees() -> None:
     payload: dict[str, object] = {
         "order_id": "ex-1",
         "client_order_id": "cid",
         "ticker": "KXHIGHDEN-26MAY22-T70",
         "side": "yes",
         "status": "executed",
-        "initial_count": 5,
-        "fill_count": 5,
-        "taker_fees": 7,
-        "maker_fees": 3,
-        "taker_fill_cost": 425,
-        "maker_fill_cost": 0,
-        "taker_fill_cost_dollars": "4.2500",
-        "maker_fill_cost_dollars": "0.0000",
+        "initial_count_fp": "5.00",
+        "fill_count_fp": "5.00",
+        "remaining_count_fp": "0.00",
+        "taker_fees_dollars": "0.050000",
+        "maker_fees_dollars": "0.020000",
+        "taker_fill_cost_dollars": "4.250000",
+        "maker_fill_cost_dollars": "0.000000",
     }
     order = _parse_order(payload, placed_at=_now())
-    assert order.fee_dollars == Decimal("0.10")
+    assert order.fee_dollars == Decimal("0.070000")
 
 
-def test_parse_order_records_zero_cents_fee_not_silently_falling_back() -> None:
-    payload: dict[str, object] = {
-        "order_id": "ex-1",
-        "client_order_id": "cid",
-        "ticker": "KXHIGHDEN-26MAY22-T70",
-        "side": "yes",
-        "status": "executed",
-        "initial_count": 5,
-        "fill_count": 0,
-        "taker_fees": 0,
-        "maker_fees": 0,
-        "taker_fees_dollars": "9.99",
-        "maker_fees_dollars": "9.99",
-        "taker_fill_cost": 0,
-        "maker_fill_cost": 0,
-        "taker_fill_cost_dollars": "0.0000",
-        "maker_fill_cost_dollars": "0.0000",
-    }
-    order = _parse_order(payload, placed_at=_now())
-    assert order.fee_dollars == Decimal("0")
-
-
-def test_parse_order_falls_back_to_dollar_fees_when_cents_absent_by_key() -> None:
-    payload: dict[str, object] = {
-        "order_id": "ex-1",
-        "client_order_id": "cid",
-        "ticker": "KXHIGHDEN-26MAY22-T70",
-        "side": "yes",
-        "status": "executed",
-        "initial_count": 5,
-        "fill_count": 5,
-        "taker_fees_dollars": "0.05",
-        "maker_fees_dollars": "0.02",
-        "taker_fill_cost": 425,
-        "maker_fill_cost": 0,
-        "taker_fill_cost_dollars": "4.2500",
-        "maker_fill_cost_dollars": "0.0000",
-    }
-    order = _parse_order(payload, placed_at=_now())
-    assert order.fee_dollars == Decimal("0.07")
-
-
-def test_parse_order_inverts_avg_fill_for_no_side_from_cents() -> None:
+def test_parse_order_inverts_avg_fill_for_no_side_from_dollars() -> None:
     payload: dict[str, object] = {
         "order_id": "ex-1",
         "client_order_id": "cid",
         "ticker": "KXHIGHDEN-26MAY22-T70",
         "side": "no",
         "status": "executed",
-        "initial_count": 4,
-        "fill_count": 4,
-        "taker_fees": 1,
-        "maker_fees": 0,
-        "taker_fill_cost": 30,
-        "maker_fill_cost": 0,
-        "taker_fill_cost_dollars": "0.3000",
-        "maker_fill_cost_dollars": "0.0000",
+        "initial_count_fp": "4.00",
+        "fill_count_fp": "4.00",
+        "remaining_count_fp": "0.00",
+        "taker_fees_dollars": "0.010000",
+        "maker_fees_dollars": "0.000000",
+        "taker_fill_cost_dollars": "0.300000",
+        "maker_fill_cost_dollars": "0.000000",
     }
     order = _parse_order(payload, placed_at=_now())
     assert order.avg_yes_fill_price_dollars == Decimal("0.9250")
@@ -727,14 +680,13 @@ def test_parse_order_no_side_zero_fill_cost_does_not_record_perfect_fill(
         "ticker": "KXHIGHDEN-26MAY22-T70",
         "side": "no",
         "status": "executed",
-        "initial_count": 4,
-        "fill_count": 4,
-        "taker_fees": 0,
-        "maker_fees": 0,
-        "taker_fill_cost": 0,
-        "maker_fill_cost": 0,
-        "taker_fill_cost_dollars": "0.0000",
-        "maker_fill_cost_dollars": "0.0000",
+        "initial_count_fp": "4.00",
+        "fill_count_fp": "4.00",
+        "remaining_count_fp": "0.00",
+        "taker_fees_dollars": "0.000000",
+        "maker_fees_dollars": "0.000000",
+        "taker_fill_cost_dollars": "0.000000",
+        "maker_fill_cost_dollars": "0.000000",
     }
     caplog.set_level(logging.WARNING, logger="bot.execution.order_placer")
     order = _parse_order(payload, placed_at=_now())
@@ -742,21 +694,20 @@ def test_parse_order_no_side_zero_fill_cost_does_not_record_perfect_fill(
     assert any("demo_order_zero_cost_fill" in r.getMessage() for r in caplog.records)
 
 
-def test_parse_order_yes_side_avg_fill_from_cents() -> None:
+def test_parse_order_yes_side_avg_fill_from_dollars() -> None:
     payload: dict[str, object] = {
         "order_id": "ex-1",
         "client_order_id": "cid",
         "ticker": "KXHIGHDEN-26MAY22-T70",
         "side": "yes",
         "status": "executed",
-        "initial_count": 4,
-        "fill_count": 4,
-        "taker_fees": 1,
-        "maker_fees": 0,
-        "taker_fill_cost": 340,
-        "maker_fill_cost": 0,
-        "taker_fill_cost_dollars": "3.4000",
-        "maker_fill_cost_dollars": "0.0000",
+        "initial_count_fp": "4.00",
+        "fill_count_fp": "4.00",
+        "remaining_count_fp": "0.00",
+        "taker_fees_dollars": "0.010000",
+        "maker_fees_dollars": "0.000000",
+        "taker_fill_cost_dollars": "3.400000",
+        "maker_fill_cost_dollars": "0.000000",
     }
     order = _parse_order(payload, placed_at=_now())
     assert order.avg_yes_fill_price_dollars == Decimal("0.8500")

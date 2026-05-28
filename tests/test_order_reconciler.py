@@ -16,6 +16,7 @@ from bot.config import Settings
 from bot.execution.order_placer import DemoOrder
 from bot.execution.order_reconciler import (
     DemoFill,
+    _parse_fill,
     poll_fills,
     poll_open_orders,
     reconcile_fills_into_demo_orders,
@@ -148,6 +149,26 @@ def _fill(
     )
 
 
+def test_parse_fill_handles_count_fp() -> None:
+    raw = {
+        "fill_id": "F1",
+        "order_id": "EX1",
+        "ticker": "KXHIGHNY-26MAY31-T79",
+        "outcome_side": "yes",
+        "book_side": "bid",
+        "count_fp": "1.00",
+        "yes_price_dollars": "0.9900",
+        "no_price_dollars": "0.0100",
+        "is_taker": True,
+        "created_time": "2026-05-31T00:43:47.462584Z",
+        "fee_cost": "0.000700",
+    }
+    fill = _parse_fill(raw)
+    assert fill.count == 1
+    assert fill.yes_price_dollars == Decimal("0.9900")
+    assert fill.fee_cost == Decimal("0.000700")
+
+
 async def test_poll_fills_paginates_via_cursor(rsa_pem: Path) -> None:
     pages = [
         {
@@ -215,15 +236,14 @@ async def test_poll_open_orders_paginates_via_cursor(rsa_pem: Path) -> None:
                     "ticker": "KXHIGHDEN-26MAY22-T70",
                     "side": "yes",
                     "status": "executed",
-                    "initial_count": 10,
-                    "fill_count": 10,
+                    "initial_count_fp": "10.00",
+                    "fill_count_fp": "10.00",
+                    "remaining_count_fp": "0.00",
                     "yes_price_dollars": "0.58",
-                    "taker_fees": 7,
-                    "maker_fees": 0,
-                    "taker_fill_cost": 205,
-                    "maker_fill_cost": 0,
-                    "taker_fill_cost_dollars": "2.0500",
-                    "maker_fill_cost_dollars": "0.0000",
+                    "taker_fees_dollars": "0.070000",
+                    "maker_fees_dollars": "0.000000",
+                    "taker_fill_cost_dollars": "2.050000",
+                    "maker_fill_cost_dollars": "0.000000",
                 }
             ],
             "cursor": "page2",
@@ -236,15 +256,14 @@ async def test_poll_open_orders_paginates_via_cursor(rsa_pem: Path) -> None:
                     "ticker": "KXHIGHDEN-26MAY22-T70",
                     "side": "no",
                     "status": "canceled",
-                    "initial_count": 5,
-                    "fill_count": 0,
+                    "initial_count_fp": "5.00",
+                    "fill_count_fp": "0.00",
+                    "remaining_count_fp": "5.00",
                     "no_price_dollars": "0.42",
-                    "taker_fees": 0,
-                    "maker_fees": 0,
-                    "taker_fill_cost": 0,
-                    "maker_fill_cost": 0,
-                    "taker_fill_cost_dollars": "0.0000",
-                    "maker_fill_cost_dollars": "0.0000",
+                    "taker_fees_dollars": "0.000000",
+                    "maker_fees_dollars": "0.000000",
+                    "taker_fill_cost_dollars": "0.000000",
+                    "maker_fill_cost_dollars": "0.000000",
                 }
             ],
             "cursor": "",
@@ -1101,7 +1120,9 @@ def test_fills_win_over_parsed_order_values_after_full_reconcile_cycle(session):
     assert row.fee_dollars == Decimal("0.07")
 
 
-async def test_poll_open_orders_inverts_no_side_avg_fill_from_cents(rsa_pem: Path, session) -> None:
+async def test_poll_open_orders_inverts_no_side_avg_fill_from_dollars(
+    rsa_pem: Path, session
+) -> None:
     pages = [
         {
             "orders": [
@@ -1111,15 +1132,14 @@ async def test_poll_open_orders_inverts_no_side_avg_fill_from_cents(rsa_pem: Pat
                     "ticker": "KXHIGHDEN-26MAY22-T70",
                     "side": "no",
                     "status": "executed",
-                    "initial_count": 4,
-                    "fill_count": 4,
+                    "initial_count_fp": "4.00",
+                    "fill_count_fp": "4.00",
+                    "remaining_count_fp": "0.00",
                     "no_price_dollars": "0.0750",
-                    "taker_fees": 1,
-                    "maker_fees": 0,
-                    "taker_fill_cost": 30,
-                    "maker_fill_cost": 0,
-                    "taker_fill_cost_dollars": "0.3000",
-                    "maker_fill_cost_dollars": "0.0000",
+                    "taker_fees_dollars": "0.010000",
+                    "maker_fees_dollars": "0.000000",
+                    "taker_fill_cost_dollars": "0.300000",
+                    "maker_fill_cost_dollars": "0.000000",
                 }
             ],
             "cursor": "",
