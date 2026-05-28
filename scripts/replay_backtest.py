@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import sqlite3
@@ -32,7 +33,8 @@ from bot.strategy.sizing import sigma_t_median_for_lead  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = REPO_ROOT / "data" / "state.db"
 REPORT_PATH = Path("/tmp/replay_backtest_report.txt")
-REGIME_CUTOFF = datetime(2026, 5, 18, 0, 0, 0, tzinfo=_timezone.utc)
+DEFAULT_START_DATE = date(2026, 5, 18)
+STRATEGY_CHOICES: tuple[str, ...] = ("edge", "tails", "all")
 
 PAPER_BANKROLL: Decimal = Decimal("500")
 REQUIRED_CUSHION: Decimal = Decimal("100")
@@ -133,7 +135,7 @@ def _open_readonly() -> sqlite3.Connection:
     return conn
 
 
-def fetch_trades(conn: sqlite3.Connection) -> list[TradeRow]:
+def fetch_trades(conn: sqlite3.Connection, cutoff: datetime) -> list[TradeRow]:
     rows = conn.execute(
         """
         SELECT p.id, p.intended_at, p.market_ticker, p.side, p.contracts,
@@ -143,7 +145,7 @@ def fetch_trades(conn: sqlite3.Connection) -> list[TradeRow]:
          WHERE p.intended_at >= ?
          ORDER BY p.intended_at ASC
         """,
-        (REGIME_CUTOFF.isoformat(sep=" "),),
+        (cutoff.isoformat(sep=" "),),
     ).fetchall()
     out: list[TradeRow] = []
     for r in rows:
@@ -351,11 +353,17 @@ def build_gate_ctx(
     )
 
 
-def replay(conn: sqlite3.Connection) -> tuple[dict[str, Bucket], int, int]:
+def replay(
+    conn: sqlite3.Connection,
+    cutoff: datetime,
+    strategy_filter: str,
+) -> tuple[dict[str, Bucket], int, int]:
     buckets: dict[str, Bucket] = defaultdict(Bucket)
     market_close_cache: dict[str, datetime | None] = {}
 
-    trades = fetch_trades(conn)
+    trades = fetch_trades(conn, cutoff)
+    if strategy_filter != "all":
+        trades = [t for t in trades if t.strategy == strategy_filter]
     n_total = len(trades)
     n_missing = 0
 
@@ -498,11 +506,18 @@ def _pct(num: int, denom: int) -> str:
     return f"{(num / denom) * 100:.2f}%"
 
 
-def render_report(buckets: dict[str, Bucket], n_total: int, n_missing: int) -> str:
+def render_report(
+    buckets: dict[str, Bucket],
+    n_total: int,
+    n_missing: int,
+    cutoff: datetime,
+    strategy_filter: str,
+) -> str:
     lines: list[str] = []
     now = datetime.now(tz=_timezone.utc).isoformat(timespec="seconds")
     lines.append(f"# strategy replay backtest report\tgenerated_at={now}")
-    lines.append(f"# regime_filter\tintended_at >= {REGIME_CUTOFF.isoformat()}")
+    lines.append(f"# regime_filter\tintended_at >= {cutoff.isoformat()}")
+    lines.append(f"# strategy_filter\t{strategy_filter}")
     lines.append(f"# rows_considered\t{n_total}")
     lines.append(f"# missing_inputs\t{n_missing}")
     lines.append("# regime_label\tpost_floor (single bucket; pre-floor excluded)")
@@ -547,17 +562,36 @@ def render_report(buckets: dict[str, Bucket], n_total: int, n_missing: int) -> s
     return "\n".join(lines)
 
 
-def main() -> int:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="replay paper trades through current strategy")
+    parser.add_argument(
+        "--start-date",
+        type=lambda s: date.fromisoformat(s),
+        default=DEFAULT_START_DATE,
+        help="inclusive lower bound on intended_at (YYYY-MM-DD), default 2026-05-18",
+    )
+    parser.add_argument(
+        "--strategy",
+        choices=STRATEGY_CHOICES,
+        default="all",
+        help="restrict replay to one strategy",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    cutoff = datetime.combine(args.start_date, datetime.min.time(), tzinfo=_timezone.utc)
     logging.disable(logging.CRITICAL)
     if not DB_PATH.exists():
         sys.stderr.write(f"db not found: {DB_PATH}\n")
         return 2
     conn = _open_readonly()
     try:
-        buckets, n_total, n_missing = replay(conn)
+        buckets, n_total, n_missing = replay(conn, cutoff, args.strategy)
     finally:
         conn.close()
-    report = render_report(buckets, n_total, n_missing)
+    report = render_report(buckets, n_total, n_missing, cutoff, args.strategy)
     REPORT_PATH.write_text(report + "\n")
     print(report)
     return 0
