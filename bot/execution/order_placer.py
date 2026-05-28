@@ -8,7 +8,7 @@ import random
 import re
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from bot.execution.paper import TradeIntent, TradeSide
@@ -159,15 +159,46 @@ def _parse_order(payload: dict[str, object], placed_at: datetime) -> DemoOrder:
     )
 
 
-async def _fetch_existing_by_cid(client: KalshiDemoClient, cid: str) -> dict[str, object] | None:
+_MALFORMED_CREATED_TIME_SENTINEL = datetime.max.replace(tzinfo=timezone.utc)
+
+
+def _parse_created_time(raw: object) -> datetime:
+    if not isinstance(raw, str) or not raw:
+        return _MALFORMED_CREATED_TIME_SENTINEL
+    text = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
+    try:
+        return datetime.fromisoformat(text)
+    except (ValueError, TypeError):
+        return _MALFORMED_CREATED_TIME_SENTINEL
+
+
+async def _fetch_existing_by_cid(
+    client: KalshiDemoClient, cid: str
+) -> tuple[dict[str, object] | None, int]:
     response = await client.get_signed("/portfolio/orders", {"client_order_id": cid})
     if response.status_code != 200:
-        return None
+        return None, 0
     payload = response.json()
     orders = payload.get("orders") or []
+    count = len(orders)
     if not orders:
-        return None
-    return orders[0]
+        return None, 0
+    fallback_count = sum(
+        1
+        for order in orders
+        if _parse_created_time(order.get("created_time")) is _MALFORMED_CREATED_TIME_SENTINEL
+    )
+    if fallback_count >= 1:
+        logger.warning(
+            "demo_order_malformed_created_time cid=%s orders_count=%d fallback_count=%d",
+            cid,
+            count,
+            fallback_count,
+        )
+    if fallback_count >= 2:
+        return None, count
+    newest = max(orders, key=lambda o: _parse_created_time(o.get("created_time")))
+    return newest, count
 
 
 async def place_order_demo(
@@ -194,7 +225,7 @@ async def place_order_demo(
             order_payload = payload.get("order") or payload
             return _parse_order(order_payload, placed_at=now)
         if status == 409:
-            existing = await _fetch_existing_by_cid(client, cid)
+            existing, existing_count = await _fetch_existing_by_cid(client, cid)
             if existing is None:
                 logger.error("demo_order_409_without_existing cid=%s", cid)
                 return None
@@ -209,11 +240,12 @@ async def place_order_demo(
                 return None
             if existing_contracts != intent.contracts:
                 logger.info(
-                    "demo_order_intent_drift cid=%s prior=%d new=%d status=%s",
+                    "demo_order_intent_drift cid=%s prior=%d new=%d status=%s count=%d",
                     cid,
                     existing_contracts,
                     intent.contracts,
                     existing_status,
+                    existing_count,
                 )
                 return None
             logger.info("demo_order_idempotent_duplicate cid=%s", cid)

@@ -434,6 +434,200 @@ async def test_place_order_demo_canceled_409_mismatched_contracts_short_circuits
     assert not any("demo_order_intent_drift" in m for m in messages)
 
 
+async def test_place_order_demo_409_picks_newest_by_created_time_mixed_precision(
+    rsa_pem: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(409, json={"error": "ORDER_ALREADY_EXISTS"})
+        if request.method == "GET" and "/portfolio/orders" in request.url.path:
+            cid = request.url.params.get("client_order_id")
+            stale_executed = _make_order_response(
+                client_order_id=cid,
+                side="yes",
+                status="executed",
+                filled_contracts=1,
+                requested_contracts=1,
+                avg_yes_fill_price_dollars="0.8500",
+                order_id="ex-stale",
+            )["order"]
+            stale_executed["created_time"] = "2026-05-31T03:21:37Z"
+            recent_canceled = _make_order_response(
+                client_order_id=cid,
+                side="yes",
+                status="canceled",
+                filled_contracts=0,
+                requested_contracts=5,
+                avg_yes_fill_price_dollars=None,
+                order_id="ex-recent",
+            )["order"]
+            recent_canceled["created_time"] = "2026-05-31T03:21:37.123Z"
+            return httpx.Response(200, json={"orders": [stale_executed, recent_canceled]})
+        return httpx.Response(404)
+
+    client = await _client_with_handler(rsa_pem, handler)
+    try:
+        caplog.set_level(logging.INFO, logger="bot.execution.order_placer")
+        order = await place_order_demo(_intent(contracts=5), _book(), client, now=_now())
+    finally:
+        await client.aclose()
+
+    assert order is None
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("demo_order_idempotent_canceled" in m for m in messages)
+    assert not any("demo_order_intent_drift" in m for m in messages)
+
+
+async def test_place_order_demo_409_picks_newest_resting_returns_idempotent(
+    rsa_pem: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(409, json={"error": "ORDER_ALREADY_EXISTS"})
+        if request.method == "GET" and "/portfolio/orders" in request.url.path:
+            cid = request.url.params.get("client_order_id")
+            stale_executed = _make_order_response(
+                client_order_id=cid,
+                side="yes",
+                status="executed",
+                filled_contracts=1,
+                requested_contracts=1,
+                avg_yes_fill_price_dollars="0.8500",
+                order_id="ex-stale",
+            )["order"]
+            stale_executed["created_time"] = "2026-05-31T03:21:37Z"
+            recent_resting = _make_order_response(
+                client_order_id=cid,
+                side="yes",
+                status="resting",
+                filled_contracts=0,
+                requested_contracts=5,
+                avg_yes_fill_price_dollars=None,
+                order_id="ex-recent-resting",
+            )["order"]
+            recent_resting["created_time"] = "2026-05-31T03:21:37.123Z"
+            return httpx.Response(200, json={"orders": [stale_executed, recent_resting]})
+        return httpx.Response(404)
+
+    client = await _client_with_handler(rsa_pem, handler)
+    try:
+        caplog.set_level(logging.INFO, logger="bot.execution.order_placer")
+        order = await place_order_demo(_intent(contracts=5), _book(), client, now=_now())
+    finally:
+        await client.aclose()
+
+    assert isinstance(order, DemoOrderIdempotent)
+    assert order.exchange_order_id == "ex-recent-resting"
+    assert order.status == "resting"
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("demo_order_intent_drift" in m for m in messages)
+
+
+async def test_place_order_demo_409_malformed_newer_still_wins(
+    rsa_pem: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(409, json={"error": "ORDER_ALREADY_EXISTS"})
+        if request.method == "GET" and "/portfolio/orders" in request.url.path:
+            cid = request.url.params.get("client_order_id")
+            stale_executed = _make_order_response(
+                client_order_id=cid,
+                side="yes",
+                status="executed",
+                filled_contracts=1,
+                requested_contracts=1,
+                avg_yes_fill_price_dollars="0.8500",
+                order_id="ex-stale",
+            )["order"]
+            stale_executed["created_time"] = "2026-05-31T03:21:37Z"
+            malformed_canceled = _make_order_response(
+                client_order_id=cid,
+                side="yes",
+                status="canceled",
+                filled_contracts=0,
+                requested_contracts=5,
+                avg_yes_fill_price_dollars=None,
+                order_id="ex-malformed",
+            )["order"]
+            malformed_canceled["created_time"] = "not-a-timestamp"
+            return httpx.Response(200, json={"orders": [stale_executed, malformed_canceled]})
+        return httpx.Response(404)
+
+    client = await _client_with_handler(rsa_pem, handler)
+    try:
+        caplog.set_level(logging.WARNING, logger="bot.execution.order_placer")
+        caplog.set_level(logging.INFO, logger="bot.execution.order_placer")
+        order = await place_order_demo(_intent(contracts=5), _book(), client, now=_now())
+    finally:
+        await client.aclose()
+
+    assert order is None
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("demo_order_idempotent_canceled" in m for m in messages)
+    assert not any("demo_order_intent_drift" in m for m in messages)
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "demo_order_malformed_created_time" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "fallback_count=1" in warnings[0].getMessage()
+
+
+async def test_place_order_demo_409_both_malformed_returns_none_without_short_circuit(
+    rsa_pem: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(409, json={"error": "ORDER_ALREADY_EXISTS"})
+        if request.method == "GET" and "/portfolio/orders" in request.url.path:
+            cid = request.url.params.get("client_order_id")
+            first = _make_order_response(
+                client_order_id=cid,
+                side="yes",
+                status="executed",
+                filled_contracts=1,
+                requested_contracts=1,
+                avg_yes_fill_price_dollars="0.8500",
+                order_id="ex-first",
+            )["order"]
+            first["created_time"] = "not-a-timestamp"
+            second = _make_order_response(
+                client_order_id=cid,
+                side="yes",
+                status="canceled",
+                filled_contracts=0,
+                requested_contracts=5,
+                avg_yes_fill_price_dollars=None,
+                order_id="ex-second",
+            )["order"]
+            second["created_time"] = "not-a-timestamp"
+            return httpx.Response(200, json={"orders": [first, second]})
+        return httpx.Response(404)
+
+    client = await _client_with_handler(rsa_pem, handler)
+    try:
+        caplog.set_level(logging.WARNING, logger="bot.execution.order_placer")
+        caplog.set_level(logging.INFO, logger="bot.execution.order_placer")
+        order = await place_order_demo(_intent(contracts=5), _book(), client, now=_now())
+    finally:
+        await client.aclose()
+
+    assert order is None
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("demo_order_idempotent_canceled" in m for m in messages)
+    assert not any("demo_order_idempotent_executed" in m for m in messages)
+    assert any("demo_order_409_without_existing" in m for m in messages)
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and "demo_order_malformed_created_time" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "fallback_count=2" in warnings[0].getMessage()
+
+
 async def test_place_order_demo_canceled_409_matching_contracts_also_short_circuits(
     rsa_pem: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
