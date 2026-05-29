@@ -781,7 +781,7 @@ def test_migrate_script_stamps_head_on_head_shape_db(tmp_path):
     cfg = _alembic_cfg(tmp_path, db_file)
     script_dir = ScriptDirectory.from_config(cfg)
     baseline = _detect_baseline(engine, script_dir)
-    assert baseline == "0004"
+    assert baseline == "0005"
     ensure_baseline_stamped(engine, baseline)
     with engine.connect() as connection:
         cfg.attributes["connection"] = connection
@@ -789,7 +789,7 @@ def test_migrate_script_stamps_head_on_head_shape_db(tmp_path):
 
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0004"
+    assert version == "0005"
     engine.dispose()
 
 
@@ -810,7 +810,7 @@ def test_migrate_script_stamps_0001_on_baseline_shape_db(tmp_path):
 
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0004"
+    assert version == "0005"
     engine.dispose()
 
 
@@ -875,16 +875,19 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     (versions / "0004_paper_trades_q_raw.py").write_text(
         (REPO_ROOT / "alembic" / "versions" / "0004_paper_trades_q_raw.py").read_text()
     )
-    (versions / "0005_decoy.py").write_text(
-        '"""decoy 0005 for forward-compat test\n\n'
-        "Revision ID: 0005\n"
-        "Revises: 0004\n"
-        "Create Date: 2026-05-29 13:00:00.000000\n\n"
+    (versions / "0005_reconciler_state.py").write_text(
+        (REPO_ROOT / "alembic" / "versions" / "0005_reconciler_state.py").read_text()
+    )
+    (versions / "0006_decoy.py").write_text(
+        '"""decoy 0006 for forward-compat test\n\n'
+        "Revision ID: 0006\n"
+        "Revises: 0005\n"
+        "Create Date: 2026-05-31 13:00:00.000000\n\n"
         '"""\n\n'
         "from typing import Sequence, Union\n\n"
         "from alembic import op  # noqa: F401\n\n\n"
-        'revision: str = "0005"\n'
-        'down_revision: Union[str, Sequence[str], None] = "0004"\n'
+        'revision: str = "0006"\n'
+        'down_revision: Union[str, Sequence[str], None] = "0005"\n'
         "branch_labels: Union[str, Sequence[str], None] = None\n"
         "depends_on: Union[str, Sequence[str], None] = None\n\n\n"
         "def upgrade() -> None:\n"
@@ -903,8 +906,8 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     engine = make_engine(db_file)
     Base.metadata.create_all(engine)
     script_dir = ScriptDirectory.from_config(cfg)
-    assert script_dir.get_current_head() == "0005"
-    assert _detect_baseline(engine, script_dir) == "0004"
+    assert script_dir.get_current_head() == "0006"
+    assert _detect_baseline(engine, script_dir) == "0005"
     engine.dispose()
 
 

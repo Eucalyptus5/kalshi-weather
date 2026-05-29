@@ -178,6 +178,14 @@ class SimulatedPnl(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now)
 
 
+class ReconcilerState(Base):
+    __tablename__ = "reconciler_state"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now, onupdate=_utc_now)
+
+
 class GateFailure(Base):
     __tablename__ = "gate_failures"
 

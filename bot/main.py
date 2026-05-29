@@ -64,6 +64,7 @@ from bot.storage.sqlite import (
     Market,
     OrderbookSnapshot,
     PaperTradeRow,
+    ReconcilerState,
     SimulatedPnl,
     make_engine,
     make_session_factory,
@@ -1037,21 +1038,44 @@ async def _eval_loop(app: App, stop: asyncio.Event) -> None:
             pass
 
 
+_WATERMARK_OVERLAP_SECONDS: int = 60
+_COLD_START_GAP = timedelta(hours=1)
+_COLD_START_FALLBACK = timedelta(days=7)
+
+
+def _load_reconciler_watermark(app: App) -> datetime | None:
+    with app.session_factory() as session:
+        row = session.get(ReconcilerState, "last_poll_ts")
+        if row is None:
+            return None
+        return datetime.fromisoformat(row.value)
+
+
+async def _reconcile_once(app: App, watermark: datetime) -> datetime:
+    poll_started_at = datetime.now(tz=_timezone.utc) - timedelta(seconds=_WATERMARK_OVERLAP_SECONDS)
+    fills = await poll_fills(app.kalshi, watermark)
+    open_orders = await poll_open_orders(app.kalshi, watermark)
+    async with app.db_lock:
+        with app.session_factory() as session:
+            for record in open_orders:
+                upsert_exchange_record(session, record)
+            reconcile_fills_into_demo_orders(session, fills, open_orders)
+            session.merge(ReconcilerState(key="last_poll_ts", value=poll_started_at.isoformat()))
+            session.commit()
+    return poll_started_at
+
+
 async def _order_reconcile_loop(app: App, stop: asyncio.Event) -> None:
-    watermark = datetime.now(tz=_timezone.utc) - timedelta(hours=1)
+    persisted = _load_reconciler_watermark(app)
+    watermark = (
+        persisted
+        if persisted is not None
+        else datetime.now(tz=_timezone.utc) - _COLD_START_FALLBACK
+    )
     while not stop.is_set():
         if app.settings.mode == "demo":
             try:
-                now = datetime.now(tz=_timezone.utc)
-                fills = await poll_fills(app.kalshi, watermark)
-                open_orders = await poll_open_orders(app.kalshi, watermark)
-                async with app.db_lock:
-                    with app.session_factory() as session:
-                        for record in open_orders:
-                            upsert_exchange_record(session, record)
-                        reconcile_fills_into_demo_orders(session, fills, open_orders)
-                        session.commit()
-                watermark = now
+                watermark = await _reconcile_once(app, watermark)
             except Exception:
                 logger.exception("loop_iteration_failed name=order_reconcile_loop")
         try:
@@ -1364,21 +1388,23 @@ async def _demo_startup_backfill(app: App) -> None:
     if balance <= Decimal("0"):
         raise RuntimeError("demo account has no balance; fund via demo UI before MODE=demo")
     app.bankroll = balance
-    watermark = datetime.now(tz=_timezone.utc) - timedelta(hours=1)
-    open_orders = await poll_open_orders(app.kalshi, watermark)
-    fills = await poll_fills(app.kalshi, watermark)
+    now = datetime.now(tz=_timezone.utc)
+    persisted = _load_reconciler_watermark(app)
+    if persisted is None:
+        watermark = now - _COLD_START_FALLBACK
+        reason = "no_persisted_watermark"
+    elif now - persisted > _COLD_START_GAP:
+        watermark = persisted
+        reason = "stale_persisted_watermark"
+    else:
+        watermark = persisted
+        reason = "recent_persisted_watermark"
     logger.info(
-        "demo_startup_backfill watermark=%s open_orders=%d fills=%d",
+        "demo_startup_backfill watermark=%s reason=%s",
         watermark.isoformat(),
-        len(open_orders),
-        len(fills),
+        reason,
     )
-    async with app.db_lock:
-        with app.session_factory() as session:
-            for record in open_orders:
-                upsert_exchange_record(session, record)
-            reconcile_fills_into_demo_orders(session, fills, open_orders)
-            session.commit()
+    await _reconcile_once(app, watermark)
 
 
 def main() -> None:
