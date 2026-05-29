@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import signal
@@ -36,8 +37,10 @@ from bot.execution.order_loop import place_orders_resilient
 from bot.execution.order_placer import DemoOrder, DemoOrderIdempotent, place_order_demo
 from bot.execution.order_reconciler import (
     idempotent_insert_demo_order_row,
+    local_position_aggregate,
     poll_fills,
     poll_open_orders,
+    poll_positions,
     reconcile_fills_into_demo_orders,
     stitch_natural_key_order,
     upsert_exchange_record,
@@ -1382,6 +1385,45 @@ def _parse_series_arg(raw: str) -> tuple[str, ...]:
     return requested
 
 
+async def _assert_boot_position_invariant(app: App, *, require_parity: bool) -> None:
+    if not require_parity:
+        return
+
+    # KW_RESUME_AFTER_CRASH=1 downgrades the mismatch from a hard exit to a
+    # WARNING log; the operator has accepted the drift and the recovery script
+    # would be a no-op.
+    suppressed = os.environ.get("KW_RESUME_AFTER_CRASH") == "1"
+    positions = await poll_positions(app.kalshi)
+    nonzero = [p for p in positions if p.position_fp != 0]
+
+    violations: list[tuple[str, int, int]] = []
+    with app.session_factory() as session:
+        for pos in nonzero:
+            local = local_position_aggregate(session, pos.ticker)
+            if local != pos.position_fp:
+                violations.append((pos.ticker, pos.position_fp, local))
+
+    if not violations:
+        logger.info("boot_position_invariant_ok positions=%d", len(nonzero))
+        return
+
+    level = logging.WARNING if suppressed else logging.ERROR
+    for ticker, kalshi_fp, local in violations:
+        logger.log(
+            level,
+            "boot_position_invariant_violated ticker=%s kalshi=%d local=%d",
+            ticker,
+            kalshi_fp,
+            local,
+        )
+    if suppressed:
+        return
+    logger.error(
+        "boot_position_invariant_recovery_hint cmd=scripts/reconcile/backfill_from_kalshi.py"
+    )
+    sys.exit(1)
+
+
 async def _demo_startup_backfill(app: App) -> None:
     balance = await app.kalshi.get_balance()
     logger.info("demo_account_balance balance_dollars=%s", balance)
@@ -1412,6 +1454,15 @@ def main() -> None:
     parser.add_argument("--mode", choices=["paper", "demo"], default=None)
     parser.add_argument("--series", default="all")
     parser.add_argument("--duration", default="24h")
+    parser.add_argument(
+        "--require-position-parity",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "assert every Kalshi position has a matching local demo_orders row at boot; "
+            "set KW_RESUME_AFTER_CRASH=1 to log mismatches and continue instead of exiting"
+        ),
+    )
     args = parser.parse_args()
 
     series_list = _parse_series_arg(args.series)
@@ -1446,6 +1497,7 @@ def main() -> None:
         await app.kalshi.aopen()
         if app.settings.mode == "demo":
             await _demo_startup_backfill(app)
+            await _assert_boot_position_invariant(app, require_parity=args.require_position_parity)
         try:
             await run(app, duration)
         finally:

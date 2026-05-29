@@ -36,15 +36,27 @@ class DemoFill:
     fee_cost: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class KalshiPosition:
+    ticker: str
+    position_fp: int
+
+
 def _now() -> datetime:
     return datetime.now(tz=_timezone.utc)
 
 
-async def poll_open_orders(client: KalshiDemoClient, watermark: datetime) -> list[DemoOrder]:
-    params: dict[str, object] = {
-        "status": "executed,canceled",
-        "min_ts": int(watermark.timestamp()),
-    }
+async def poll_open_orders(
+    client: KalshiDemoClient,
+    watermark: datetime | None,
+    *,
+    ticker: str | None = None,
+) -> list[DemoOrder]:
+    params: dict[str, object] = {"status": "executed,canceled"}
+    if watermark is not None:
+        params["min_ts"] = int(watermark.timestamp())
+    if ticker is not None:
+        params["ticker"] = ticker
     out: list[DemoOrder] = []
     cursor: str | None = None
     while True:
@@ -60,8 +72,54 @@ async def poll_open_orders(client: KalshiDemoClient, watermark: datetime) -> lis
             return out
 
 
-async def poll_fills(client: KalshiDemoClient, watermark: datetime) -> list[DemoFill]:
-    params: dict[str, object] = {"min_ts": int(watermark.timestamp())}
+async def poll_positions(client: KalshiDemoClient) -> list[KalshiPosition]:
+    params: dict[str, object] = {}
+    out: list[KalshiPosition] = []
+    cursor: str | None = None
+    while True:
+        if cursor:
+            params["cursor"] = cursor
+        response = await client.get_signed("/portfolio/positions", params)
+        response.raise_for_status()
+        payload = response.json()
+        raw_positions = payload.get("market_positions") or payload.get("positions") or []
+        for raw in raw_positions:
+            ticker = raw.get("ticker") or raw.get("market_ticker")
+            if ticker is None:
+                raise KeyError(f"position payload missing ticker / market_ticker: {raw!r}")
+            raw_pos = raw.get("position_fp")
+            if raw_pos is None:
+                raw_pos = raw.get("position")
+            if raw_pos is None:
+                raise KeyError(f"position payload missing position_fp / position: {raw!r}")
+            out.append(KalshiPosition(ticker=str(ticker), position_fp=int(Decimal(str(raw_pos)))))
+        cursor = payload.get("cursor") or None
+        if not cursor:
+            return out
+
+
+def local_position_aggregate(session: Session, ticker: str) -> int:
+    rows = session.scalars(select(DemoOrderRow).where(DemoOrderRow.market_ticker == ticker)).all()
+    total = 0
+    for row in rows:
+        if row.side == "yes":
+            total += row.filled_contracts
+        elif row.side == "no":
+            total -= row.filled_contracts
+    return total
+
+
+async def poll_fills(
+    client: KalshiDemoClient,
+    watermark: datetime | None,
+    *,
+    ticker: str | None = None,
+) -> list[DemoFill]:
+    params: dict[str, object] = {}
+    if watermark is not None:
+        params["min_ts"] = int(watermark.timestamp())
+    if ticker is not None:
+        params["ticker"] = ticker
     out: list[DemoFill] = []
     cursor: str | None = None
     while True:
