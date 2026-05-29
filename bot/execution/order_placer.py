@@ -33,7 +33,7 @@ _breaker_state: dict[str, object] = {"recent_429": [], "paused_until": 0.0}
 @dataclass(frozen=True, slots=True)
 class DemoOrder:
     client_order_id: str
-    exchange_order_id: str
+    exchange_order_id: str | None
     ticker: str
     side_kalshi: str
     requested_contracts: int
@@ -50,6 +50,8 @@ class DemoOrderIdempotent:
     client_order_id: str
     exchange_order_id: str
     status: str
+    filled_contracts: int = 0
+    requested_yes_price_dollars: Decimal = Decimal("0")
 
 
 def parse_avg_yes_fill_price(raw: str | Decimal | None) -> Decimal | None:
@@ -144,9 +146,10 @@ def _parse_order(payload: dict[str, object], placed_at: datetime) -> DemoOrder:
     else:
         per_contract = fill_cost / Decimal(fill_count)
         avg_yes_fill = Decimal("1") - per_contract if side == "no" else per_contract
+    raw_eid = payload.get("order_id") or payload.get("exchange_order_id") or None
     return DemoOrder(
         client_order_id=cid,
-        exchange_order_id=str(payload.get("order_id") or payload.get("exchange_order_id") or ""),
+        exchange_order_id=str(raw_eid) if raw_eid else None,
         ticker=str(payload["ticker"]),
         side_kalshi=side,
         requested_contracts=initial_count,
@@ -249,11 +252,13 @@ async def place_order_demo(
                 )
                 return None
             logger.info("demo_order_idempotent_duplicate cid=%s", cid)
-            existing_eid = str(existing.get("order_id") or existing.get("exchange_order_id") or "")
+            parsed = _parse_order(existing, placed_at=now)
             return DemoOrderIdempotent(
                 client_order_id=cid,
-                exchange_order_id=existing_eid,
+                exchange_order_id=parsed.exchange_order_id or "",
                 status=existing_status,
+                filled_contracts=parsed.filled_contracts,
+                requested_yes_price_dollars=parsed.requested_yes_price_dollars,
             )
         if status == 429:
             _record_429(time.monotonic())

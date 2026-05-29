@@ -17,6 +17,7 @@ from bot.execution.order_placer import DemoOrder
 from bot.execution.order_reconciler import (
     DemoFill,
     _parse_fill,
+    idempotent_insert_demo_order_row,
     poll_fills,
     poll_open_orders,
     reconcile_fills_into_demo_orders,
@@ -1171,3 +1172,223 @@ async def test_poll_open_orders_inverts_no_side_avg_fill_from_dollars(
     assert row.avg_fill_price == Decimal("0.9250")
     assert row.fee_dollars == Decimal("0.01")
     assert row.side == "no"
+
+
+def test_upsert_exchange_record_backfills_empty_eid_on_existing_cid_row(session):
+    cid = "kw-edge-yes-KXHIGHDEN-26MAY22-T70-2026-05-22"
+    idempotent_insert_demo_order_row(
+        session,
+        client_order_id=cid,
+        exchange_order_id=None,
+        market_ticker="KXHIGHDEN-26MAY22-T70",
+        strategy="edge",
+        side="yes",
+        requested_contracts=10,
+        filled_contracts=5,
+        requested_yes_price_dollars=Decimal("0.58"),
+        fair_at_entry=Decimal("0.62"),
+        q_raw=Decimal("0.62"),
+        intended_at=_now(),
+        status="resting",
+        placed_at=_now(),
+    )
+    session.commit()
+
+    upsert_exchange_record(
+        session,
+        _exchange_order(
+            client_order_id=cid,
+            exchange_order_id="EX-NEW",
+            status="executed",
+            filled_contracts=10,
+            avg=Decimal("0.205"),
+        ),
+    )
+    session.commit()
+
+    rows = session.scalars(select(DemoOrderRow)).all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.client_order_id == cid
+    assert row.exchange_order_id == "EX-NEW"
+    assert row.strategy == "edge"
+    assert row.fair_at_entry == Decimal("0.62")
+    assert row.status == "executed"
+    assert row.filled_contracts == 10
+    backfill = session.scalars(
+        select(DemoOrderRow).where(DemoOrderRow.client_order_id.like("kw-backfill-%"))
+    ).all()
+    assert backfill == []
+
+
+def test_upsert_exchange_record_raises_on_cid_eid_mismatch(session):
+    cid = "kw-edge-yes-KXHIGHDEN-26MAY22-T70-2026-05-22"
+    _seed_row(session, client_order_id=cid, exchange_order_id="EX-OLD")
+    with pytest.raises(ValueError):
+        upsert_exchange_record(
+            session,
+            _exchange_order(
+                client_order_id=cid,
+                exchange_order_id="EX-DIFFERENT",
+                status="executed",
+                filled_contracts=10,
+            ),
+        )
+    session.rollback()
+
+    rows = session.scalars(select(DemoOrderRow)).all()
+    assert len(rows) == 1
+    assert rows[0].exchange_order_id == "EX-OLD"
+
+
+def test_idempotent_insert_helper_cid_update_branch_backfills_eid(session):
+    cid = "kw-edge-yes-KXHIGHDEN-26MAY22-T70-2026-05-22"
+    _seed_row(
+        session,
+        client_order_id=cid,
+        exchange_order_id=None,
+        status="resting",
+        filled_contracts=0,
+    )
+
+    idempotent_insert_demo_order_row(
+        session,
+        client_order_id=cid,
+        exchange_order_id="EX-1",
+        market_ticker="KXHIGHDEN-26MAY22-T70",
+        strategy="edge",
+        side="yes",
+        requested_contracts=10,
+        filled_contracts=5,
+        requested_yes_price_dollars=Decimal("0.58"),
+        fair_at_entry=Decimal("0.62"),
+        q_raw=Decimal("0.62"),
+        intended_at=_now(),
+        status="executed",
+        placed_at=_now(),
+    )
+    session.commit()
+
+    rows = session.scalars(select(DemoOrderRow)).all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.client_order_id == cid
+    assert row.exchange_order_id == "EX-1"
+    assert row.status == "executed"
+    assert row.strategy == "edge"
+    assert row.fair_at_entry == Decimal("0.62")
+
+
+def test_idempotent_insert_helper_renames_backfill_row_and_lifts_intent_fields(session):
+    cid = "kw-edge-yes-KXHIGHDEN-26MAY22-T70-2026-05-22"
+    _seed_row(
+        session,
+        client_order_id="kw-backfill-EX-1",
+        exchange_order_id="EX-1",
+        strategy=None,
+        fair_at_entry=None,
+        q_raw=None,
+        intended_at=None,
+        requested_yes_price_dollars=None,
+        status="executed",
+        filled_contracts=10,
+        avg_fill_price=Decimal("0.205"),
+        fee_dollars=Decimal("0.07"),
+    )
+
+    idempotent_insert_demo_order_row(
+        session,
+        client_order_id=cid,
+        exchange_order_id="EX-1",
+        market_ticker="KXHIGHDEN-26MAY22-T70",
+        strategy="edge",
+        side="yes",
+        requested_contracts=10,
+        filled_contracts=10,
+        requested_yes_price_dollars=Decimal("0.58"),
+        fair_at_entry=Decimal("0.62"),
+        q_raw=Decimal("0.62"),
+        intended_at=_now(),
+        status="executed",
+        placed_at=_now(),
+    )
+    session.commit()
+
+    rows = session.scalars(select(DemoOrderRow)).all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.client_order_id == cid
+    assert row.exchange_order_id == "EX-1"
+    assert row.strategy == "edge"
+    assert row.fair_at_entry == Decimal("0.62")
+    assert row.requested_yes_price_dollars == Decimal("0.58")
+    assert row.side == "yes"
+    assert row.status == "executed"
+
+
+def test_idempotent_insert_helper_raises_on_eid_collision_with_unrelated_cid(session):
+    _seed_row(
+        session,
+        client_order_id="kw-edge-yes-KXHIGHDEN-26MAY22-T70-2026-05-22-other",
+        exchange_order_id="EX-1",
+        strategy="edge",
+        fair_at_entry=Decimal("0.62"),
+        status="executed",
+        filled_contracts=10,
+    )
+
+    with pytest.raises(ValueError):
+        idempotent_insert_demo_order_row(
+            session,
+            client_order_id="kw-edge-yes-DIFFERENT-CID",
+            exchange_order_id="EX-1",
+            market_ticker="KXHIGHDEN-26MAY22-T70",
+            strategy="edge",
+            side="yes",
+            requested_contracts=10,
+            filled_contracts=10,
+            requested_yes_price_dollars=Decimal("0.58"),
+            fair_at_entry=Decimal("0.62"),
+            q_raw=Decimal("0.62"),
+            intended_at=_now(),
+            status="executed",
+            placed_at=_now(),
+        )
+    session.rollback()
+
+    rows = session.scalars(select(DemoOrderRow)).all()
+    assert len(rows) == 1
+    assert rows[0].client_order_id == "kw-edge-yes-KXHIGHDEN-26MAY22-T70-2026-05-22-other"
+
+
+def test_idempotent_insert_helper_fresh_insert(session):
+    cid = "kw-edge-yes-NEW"
+    idempotent_insert_demo_order_row(
+        session,
+        client_order_id=cid,
+        exchange_order_id="EX-NEW",
+        market_ticker="KXHIGHDEN-26MAY22-T70",
+        strategy="edge",
+        side="yes",
+        requested_contracts=10,
+        filled_contracts=3,
+        requested_yes_price_dollars=Decimal("0.58"),
+        fair_at_entry=Decimal("0.62"),
+        q_raw=Decimal("0.62"),
+        intended_at=_now(),
+        status="executed",
+        placed_at=_now(),
+    )
+    session.commit()
+
+    rows = session.scalars(select(DemoOrderRow)).all()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.client_order_id == cid
+    assert row.exchange_order_id == "EX-NEW"
+    assert row.strategy == "edge"
+    assert row.side == "yes"
+    assert row.requested_contracts == 10
+    assert row.filled_contracts == 3
+    assert row.fair_at_entry == Decimal("0.62")
+    assert row.status == "executed"

@@ -35,6 +35,7 @@ from bot.execution.gate_cost_basis import (
 from bot.execution.order_loop import place_orders_resilient
 from bot.execution.order_placer import DemoOrder, DemoOrderIdempotent, place_order_demo
 from bot.execution.order_reconciler import (
+    idempotent_insert_demo_order_row,
     poll_fills,
     poll_open_orders,
     reconcile_fills_into_demo_orders,
@@ -678,7 +679,29 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
         if intent.market_ticker not in app.latest_markets:
             return None
         order = await place_order_demo(intent, book, app.kalshi, now=now_pre_post)
-        if order is None or isinstance(order, DemoOrderIdempotent):
+        if order is None:
+            return None
+        if isinstance(order, DemoOrderIdempotent):
+            side_kalshi = "yes" if intent.side is TradeSide.BUY_YES else "no"
+            async with app.db_lock:
+                with app.session_factory() as session:
+                    idempotent_insert_demo_order_row(
+                        session,
+                        client_order_id=order.client_order_id,
+                        exchange_order_id=order.exchange_order_id or None,
+                        market_ticker=intent.market_ticker,
+                        strategy=intent.strategy,
+                        side=side_kalshi,
+                        requested_contracts=intent.contracts,
+                        filled_contracts=order.filled_contracts,
+                        requested_yes_price_dollars=order.requested_yes_price_dollars,
+                        fair_at_entry=intent.fair_yes,
+                        q_raw=intent.q_raw,
+                        intended_at=now_pre_post,
+                        status=order.status,
+                        placed_at=now_pre_post,
+                    )
+                    session.commit()
             return None
         return (intent, order, now_pre_post)
 

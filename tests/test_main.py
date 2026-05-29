@@ -4175,7 +4175,7 @@ async def test_evaluate_strategies_routes_to_demo_placer_in_demo_mode(
     assert trades[0].demo_order_client_id == demo_orders[0].client_order_id
 
 
-async def test_evaluate_strategies_skips_writes_on_idempotent_409_sentinel(
+async def test_evaluate_strategies_persists_demo_order_on_idempotent_409_sentinel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
@@ -4190,7 +4190,9 @@ async def test_evaluate_strategies_skips_writes_on_idempotent_409_sentinel(
     sentinel = DemoOrderIdempotent(
         client_order_id="kw-edge-yes-KXHIGHDEN-26MAY08-T70-75-2026-05-08",
         exchange_order_id="EX-PRIOR",
-        status="resting",
+        status="executed",
+        filled_contracts=5,
+        requested_yes_price_dollars=Decimal("0.20"),
     )
 
     async def fake_place(intent, book, client, *, now):
@@ -4204,8 +4206,82 @@ async def test_evaluate_strategies_skips_writes_on_idempotent_409_sentinel(
     with app.session_factory() as session:
         demo_orders = session.scalars(select(DemoOrderRow)).all()
         trades = session.scalars(select(PaperTradeRow)).all()
-    assert demo_orders == []
+    assert len(demo_orders) == 1
+    row = demo_orders[0]
+    assert row.client_order_id == sentinel.client_order_id
+    assert row.exchange_order_id == "EX-PRIOR"
+    assert row.status == "executed"
+    assert row.filled_contracts == 5
+    assert row.strategy == "edge"
+    assert row.market_ticker == market.ticker
     assert trades == []
+
+
+async def test_evaluate_strategies_persists_demo_order_on_idempotent_409_with_empty_eid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    meteo, market, book = _demo_bracket_setup(now)
+    kalshi = _DemoKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_demo_app(meteo=meteo, kalshi=kalshi)
+    await refresh_forecasts(app)
+    await refresh_markets(app)
+    app.forecast_run_times[("KDEN", date(2026, 5, 8))] = now
+    _lift_caps(monkeypatch)
+
+    cid = "kw-edge-yes-KXHIGHDEN-26MAY08-T70-75-2026-05-08"
+    sentinel = DemoOrderIdempotent(
+        client_order_id=cid,
+        exchange_order_id="",
+        status="executed",
+        filled_contracts=5,
+        requested_yes_price_dollars=Decimal("0.20"),
+    )
+
+    async def fake_place(intent, book, client, *, now):
+        return sentinel
+
+    monkeypatch.setattr(bot_main, "place_order_demo", fake_place)
+    monkeypatch.setattr(bot_main, "_build_intents", _one_intent_stub())
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        demo_orders = session.scalars(select(DemoOrderRow)).all()
+    assert len(demo_orders) == 1
+    row = demo_orders[0]
+    assert row.client_order_id == cid
+    assert row.exchange_order_id is None
+    assert row.status == "executed"
+
+    poll_record = DemoOrder(
+        client_order_id=cid,
+        exchange_order_id="EX-LATE",
+        ticker=market.ticker,
+        side_kalshi="yes",
+        requested_contracts=5,
+        filled_contracts=5,
+        requested_yes_price_dollars=Decimal("0.20"),
+        avg_yes_fill_price_dollars=Decimal("0.20"),
+        fee_dollars=Decimal("0.01"),
+        status="executed",
+        placed_at=now,
+    )
+    from bot.execution.order_reconciler import upsert_exchange_record
+
+    with app.session_factory() as session:
+        upsert_exchange_record(session, poll_record)
+        session.commit()
+        rows = session.scalars(select(DemoOrderRow)).all()
+        assert len(rows) == 1
+        stitched = rows[0]
+        assert stitched.client_order_id == cid
+        assert stitched.exchange_order_id == "EX-LATE"
+        assert stitched.strategy == "edge"
+        backfill = session.scalars(
+            select(DemoOrderRow).where(DemoOrderRow.client_order_id.like("kw-backfill-%"))
+        ).all()
+        assert backfill == []
 
 
 async def test_evaluate_strategies_demo_does_not_post_on_failing_gate(

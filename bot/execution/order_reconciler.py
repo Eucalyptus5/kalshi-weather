@@ -94,17 +94,49 @@ def _parse_fill(raw: dict[str, object]) -> DemoFill:
 
 
 def upsert_exchange_record(session: Session, record: DemoOrder) -> None:
-    existing = session.scalars(
-        select(DemoOrderRow).where(DemoOrderRow.exchange_order_id == record.exchange_order_id)
-    ).one_or_none()
     now = _now()
-    if existing is not None:
-        existing.status = record.status
-        existing.filled_contracts = record.filled_contracts
-        existing.avg_fill_price = record.avg_yes_fill_price_dollars
-        existing.fee_dollars = record.fee_dollars
-        existing.last_status_at = now
+    cid = record.client_order_id
+    by_cid = (
+        session.scalars(
+            select(DemoOrderRow).where(DemoOrderRow.client_order_id == cid)
+        ).one_or_none()
+        if cid
+        else None
+    )
+    if by_cid is not None:
+        if (
+            record.exchange_order_id is not None
+            and by_cid.exchange_order_id is not None
+            and by_cid.exchange_order_id != record.exchange_order_id
+        ):
+            raise ValueError(
+                f"exchange_order_id collision for client_order_id {cid!r}: "
+                f"row has {by_cid.exchange_order_id!r}, record has {record.exchange_order_id!r}"
+            )
+        if record.exchange_order_id and not by_cid.exchange_order_id:
+            by_cid.exchange_order_id = record.exchange_order_id
+        by_cid.status = record.status
+        by_cid.filled_contracts = record.filled_contracts
+        by_cid.avg_fill_price = record.avg_yes_fill_price_dollars
+        by_cid.fee_dollars = record.fee_dollars
+        by_cid.last_status_at = now
         return
+
+    by_eid = (
+        session.scalars(
+            select(DemoOrderRow).where(DemoOrderRow.exchange_order_id == record.exchange_order_id)
+        ).one_or_none()
+        if record.exchange_order_id
+        else None
+    )
+    if by_eid is not None:
+        by_eid.status = record.status
+        by_eid.filled_contracts = record.filled_contracts
+        by_eid.avg_fill_price = record.avg_yes_fill_price_dollars
+        by_eid.fee_dollars = record.fee_dollars
+        by_eid.last_status_at = now
+        return
+
     session.add(
         DemoOrderRow(
             client_order_id=f"kw-backfill-{record.exchange_order_id}",
@@ -122,6 +154,82 @@ def upsert_exchange_record(session: Session, record: DemoOrder) -> None:
             realized_pnl_dollars=None,
             status=record.status,
             placed_at=record.placed_at,
+            last_status_at=now,
+        )
+    )
+
+
+def idempotent_insert_demo_order_row(
+    session: Session,
+    *,
+    client_order_id: str,
+    exchange_order_id: str | None,
+    market_ticker: str,
+    strategy: str,
+    side: str,
+    requested_contracts: int,
+    filled_contracts: int,
+    requested_yes_price_dollars: Decimal | None,
+    fair_at_entry: Decimal | None,
+    q_raw: Decimal | None,
+    intended_at: datetime,
+    status: str,
+    placed_at: datetime,
+) -> None:
+    now = _now()
+    by_cid = session.scalars(
+        select(DemoOrderRow).where(DemoOrderRow.client_order_id == client_order_id)
+    ).one_or_none()
+    if by_cid is not None:
+        if exchange_order_id and not by_cid.exchange_order_id:
+            by_cid.exchange_order_id = exchange_order_id
+        by_cid.status = status
+        by_cid.last_status_at = now
+        return
+
+    by_eid = (
+        session.scalars(
+            select(DemoOrderRow).where(DemoOrderRow.exchange_order_id == exchange_order_id)
+        ).one_or_none()
+        if exchange_order_id
+        else None
+    )
+    if by_eid is not None:
+        if not by_eid.client_order_id.startswith("kw-backfill-"):
+            raise ValueError(
+                f"exchange_order_id {exchange_order_id!r} bound to unrelated "
+                f"client_order_id {by_eid.client_order_id!r}"
+            )
+        by_eid.client_order_id = client_order_id
+        by_eid.strategy = strategy
+        by_eid.fair_at_entry = fair_at_entry
+        by_eid.q_raw = q_raw
+        by_eid.intended_at = intended_at
+        by_eid.requested_contracts = requested_contracts
+        by_eid.requested_yes_price_dollars = requested_yes_price_dollars
+        by_eid.side = side
+        by_eid.status = status
+        by_eid.last_status_at = now
+        return
+
+    session.add(
+        DemoOrderRow(
+            client_order_id=client_order_id,
+            exchange_order_id=exchange_order_id,
+            market_ticker=market_ticker,
+            strategy=strategy,
+            side=side,
+            requested_contracts=requested_contracts,
+            filled_contracts=filled_contracts,
+            requested_yes_price_dollars=requested_yes_price_dollars,
+            fair_at_entry=fair_at_entry,
+            q_raw=q_raw,
+            intended_at=intended_at,
+            avg_fill_price=None,
+            fee_dollars=None,
+            realized_pnl_dollars=None,
+            status=status,
+            placed_at=placed_at,
             last_status_at=now,
         )
     )
