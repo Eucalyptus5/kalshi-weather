@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+# Out-of-loop probe scripts that POST to /portfolio/orders must live under
+# scripts/probes/ and instantiate KalshiDemoClient directly. Probe POSTs that
+# bypass _place / _commit_phase2 orphan demo_orders rows. Convention is
+# enforced by review and by tests/test_probes_directory.py, not by code here.
+
 import logging
 import urllib.parse
 from dataclasses import dataclass
