@@ -1,0 +1,221 @@
+[
+  {
+    "cursor": "",
+    "event_positions": [
+      {
+        "event_exposure_dollars": "0.830000",
+        "event_ticker": "KXHIGHDEN-26JUN01",
+        "fees_paid_dollars": "0.009900",
+        "realized_pnl_dollars": "0.000000",
+        "total_cost_dollars": "0.830000",
+        "total_cost_shares_fp": "1.00"
+      },
+      {
+        "event_exposure_dollars": "1.620000",
+        "event_ticker": "KXHIGHCHI-26JUN01",
+        "fees_paid_dollars": "0.021600",
+        "realized_pnl_dollars": "0.000000",
+        "total_cost_dollars": "1.620000",
+        "total_cost_shares_fp": "2.00"
+      },
+      {
+        "event_exposure_dollars": "17.210000",
+        "event_ticker": "KXHIGHNY-26JUN01",
+        "fees_paid_dollars": "0.548400",
+        "realized_pnl_dollars": "0.000000",
+        "total_cost_dollars": "35.210000",
+        "total_cost_shares_fp": "46.00"
+      },
+      {
+        "event_exposure_dollars": "120.380000",
+        "event_ticker": "KXHIGHPHIL-26JUN02",
+        "fees_paid_dollars": "1.570700",
+        "realized_pnl_dollars": "0.000000",
+        "total_cost_dollars": "120.380000",
+        "total_cost_shares_fp": "148.00"
+      },
+      {
+        "event_exposure_dollars": "53.420000",
+        "event_ticker": "KXHIGHNY-26JUN02",
+        "fees_paid_dollars": "0.751100",
+        "realized_pnl_dollars": "0.000000",
+        "total_cost_dollars": "62.420000",
+        "total_cost_shares_fp": "76.00"
+      },
+      {
+        "event_exposure_dollars": "0.810000",
+        "event_ticker": "KXHIGHTLV-26JUN02",
+        "fees_paid_dollars": "0.010800",
+        "realized_pnl_dollars": "0.000000",
+        "total_cost_dollars": "0.810000",
+        "total_cost_shares_fp": "1.00"
+      },
+      {
+        "event_exposure_dollars": "12.180000",
+        "event_ticker": "KXHIGHDEN-26JUN02",
+        "fees_paid_dollars": "0.358400",
+        "realized_pnl_dollars": "0.000000",
+        "total_cost_dollars": "12.180000",
+        "total_cost_shares_fp": "21.00"
+      },
+      {
+        "event_exposure_dollars": "1.720000",
+        "event_ticker": "KXHIGHTMIN-26JUN02",
+        "fees_paid_dollars": "0.017000",
+        "realized_pnl_dollars": "0.000000",
+        "total_cost_dollars": "1.720000",
+        "total_cost_shares_fp": "2.00"
+      },
+      {
+        "event_exposure_dollars": "0.820000",
+        "event_ticker": "KXHIGHCHI-26JUN02",
+        "fees_paid_dollars": "0.010400",
+        "realized_pnl_dollars": "0.000000",
+        "total_cost_dollars": "0.820000",
+        "total_cost_shares_fp": "1.00"
+      }
+    ],
+    "market_positions": [
+      {
+        "fees_paid_dollars": "0.009900",
+        "last_updated_ts": "2026-06-02T06:59:02.587929Z",
+        "market_exposure_dollars": "0.830000",
+        "position_fp": "-1.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHDEN-26JUN01-B83.5",
+        "total_traded_dollars": "0.830000"
+      },
+      {
+        "fees_paid_dollars": "0.021600",
+        "last_updated_ts": "2026-06-02T05:59:02.768576Z",
+        "market_exposure_dollars": "1.620000",
+        "position_fp": "-2.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHCHI-26JUN01-B74.5",
+        "total_traded_dollars": "1.620000"
+      },
+      {
+        "fees_paid_dollars": "0.055200",
+        "last_updated_ts": "2026-06-02T04:59:03.169354Z",
+        "market_exposure_dollars": "2.920000",
+        "position_fp": "-4.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHNY-26JUN01-B70.5",
+        "total_traded_dollars": "2.920000"
+      },
+      {
+        "fees_paid_dollars": "0.048300",
+        "last_updated_ts": "2026-06-02T04:59:03.169619Z",
+        "market_exposure_dollars": "3.120000",
+        "position_fp": "-4.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHNY-26JUN01-B72.5",
+        "total_traded_dollars": "3.120000"
+      },
+      {
+        "fees_paid_dollars": "0.346000",
+        "last_updated_ts": "2026-06-02T04:59:03.169994Z",
+        "market_exposure_dollars": "20.870000",
+        "position_fp": "-28.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHNY-26JUN01-B74.5",
+        "total_traded_dollars": "20.870000"
+      },
+      {
+        "fees_paid_dollars": "0.098900",
+        "last_updated_ts": "2026-06-02T04:59:03.17025Z",
+        "market_exposure_dollars": "8.300000",
+        "position_fp": "-10.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHNY-26JUN01-B76.5",
+        "total_traded_dollars": "8.300000"
+      },
+      {
+        "fees_paid_dollars": "1.570700",
+        "last_updated_ts": "2026-06-01T20:25:59.083863Z",
+        "market_exposure_dollars": "120.380000",
+        "position_fp": "-148.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHPHIL-26JUN02-B77.5",
+        "total_traded_dollars": "120.380000"
+      },
+      {
+        "fees_paid_dollars": "0.652200",
+        "last_updated_ts": "2026-06-01T20:25:58.835751Z",
+        "market_exposure_dollars": "54.780000",
+        "position_fp": "-66.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHNY-26JUN02-B73.5",
+        "total_traded_dollars": "54.780000"
+      },
+      {
+        "fees_paid_dollars": "0.009900",
+        "last_updated_ts": "2026-06-01T18:30:12.126881Z",
+        "market_exposure_dollars": "0.170000",
+        "position_fp": "1.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHNY-26JUN02-B75.5",
+        "total_traded_dollars": "0.170000"
+      },
+      {
+        "fees_paid_dollars": "0.089000",
+        "last_updated_ts": "2026-06-01T19:20:11.154342Z",
+        "market_exposure_dollars": "7.470000",
+        "position_fp": "-9.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHNY-26JUN02-B77.5",
+        "total_traded_dollars": "7.470000"
+      },
+      {
+        "fees_paid_dollars": "0.010800",
+        "last_updated_ts": "2026-06-01T20:14:51.856965Z",
+        "market_exposure_dollars": "0.810000",
+        "position_fp": "-1.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHTLV-26JUN02-B98.5",
+        "total_traded_dollars": "0.810000"
+      },
+      {
+        "fees_paid_dollars": "0.358400",
+        "last_updated_ts": "2026-06-01T19:34:24.387997Z",
+        "market_exposure_dollars": "12.180000",
+        "position_fp": "-21.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHDEN-26JUN02-B79.5",
+        "total_traded_dollars": "12.180000"
+      },
+      {
+        "fees_paid_dollars": "0.017000",
+        "last_updated_ts": "2026-06-01T18:38:23.950028Z",
+        "market_exposure_dollars": "1.720000",
+        "position_fp": "-2.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHTMIN-26JUN02-B86.5",
+        "total_traded_dollars": "1.720000"
+      },
+      {
+        "fees_paid_dollars": "0.010400",
+        "last_updated_ts": "2026-06-01T18:13:03.411368Z",
+        "market_exposure_dollars": "0.820000",
+        "position_fp": "-1.00",
+        "realized_pnl_dollars": "0.000000",
+        "resting_orders_count": 0,
+        "ticker": "KXHIGHCHI-26JUN02-B72.5",
+        "total_traded_dollars": "0.820000"
+      }
+    ]
+  }
+]
