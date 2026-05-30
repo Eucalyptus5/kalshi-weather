@@ -639,6 +639,7 @@ async def evaluate_strategies(app: App, now: datetime) -> int:
                         reason=reason,
                         mode=gate_mode.value,
                         market_ticker=ticker,
+                        last_seen_at=now,
                     )
                 )
             if any(f.name in CAP_GATE_NAMES for f in check.failures):
@@ -743,7 +744,24 @@ async def _commit_phase2(
     async with app.db_lock:
         with app.session_factory() as session:
             for failure_row in gate_failures:
-                session.add(failure_row)
+                stmt = sqlite_insert(GateFailure).values(
+                    evaluated_at=failure_row.evaluated_at,
+                    gate_name=failure_row.gate_name,
+                    reason=failure_row.reason,
+                    mode=failure_row.mode,
+                    market_ticker=failure_row.market_ticker,
+                    count=1,
+                    last_seen_at=failure_row.last_seen_at,
+                )
+                session.execute(
+                    stmt.on_conflict_do_update(
+                        index_elements=["gate_name", "market_ticker", "reason"],
+                        set_={
+                            "count": GateFailure.count + 1,
+                            "last_seen_at": stmt.excluded.last_seen_at,
+                        },
+                    )
+                )
             for paper_row in paper_rows:
                 if paper_row.demo_order_client_id is None:
                     session.add(paper_row)

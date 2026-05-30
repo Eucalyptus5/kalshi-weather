@@ -3253,6 +3253,7 @@ def test_checkpoint_wal_truncates_wal_file(tmp_path) -> None:
                 reason="market_status=closed",
                 mode="paper",
                 market_ticker="KXHIGHDEN-26MAY06-T70-75",
+                last_seen_at=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
             )
         )
         session.commit()
@@ -3275,6 +3276,7 @@ def test_checkpoint_wal_retries_after_busy_via_monkeypatched_pragma(tmp_path, mo
                 reason="market_status=closed",
                 mode="paper",
                 market_ticker="KXHIGHDEN-26MAY06-T70-75",
+                last_seen_at=datetime(2026, 5, 5, 18, 0, tzinfo=timezone.utc),
             )
         )
         session.commit()
@@ -4824,6 +4826,7 @@ async def test_phase2_upsert_commits_gate_failures_despite_demo_row_savepoint_ro
         reason="x",
         mode="demo",
         market_ticker="KXHIGHDEN-26MAY08-T70-75",
+        last_seen_at=now,
     )
     await _run_phase2(app, demo_rows=[values], gate_failures=[gate_failure])
 
@@ -4878,7 +4881,12 @@ async def test_phase2_paper_rows_upsert_survives_duplicate_demo_order_client_id(
         demo_order_client_id=None,
     )
     gate_failure = GateFailure(
-        evaluated_at=now, gate_name="edge_threshold", reason="x", mode="demo", market_ticker="T"
+        evaluated_at=now,
+        gate_name="edge_threshold",
+        reason="x",
+        mode="demo",
+        market_ticker="T",
+        last_seen_at=now,
     )
     await _run_phase2(app, paper_rows=[dup_row, legacy_row], gate_failures=[gate_failure])
 
@@ -4893,6 +4901,73 @@ async def test_phase2_paper_rows_upsert_survives_duplicate_demo_order_client_id(
     assert len(for_cid) == 1
     assert len(legacy) == 1
     assert len(failures) == 1
+
+
+async def test_phase2_gate_failure_upsert_dedupes_identical_tuple() -> None:
+    app = _phase2_drain_app()
+    base = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    reason = "fair_value_sane fair_yes=9.649e-09 outside [0.01, 0.99]"
+    last: datetime | None = None
+    for i in range(5):
+        ts = base + timedelta(minutes=i)
+        last = ts
+        await _run_phase2(
+            app,
+            gate_failures=[
+                GateFailure(
+                    evaluated_at=ts,
+                    gate_name="fair_value_sane",
+                    reason=reason,
+                    mode="paper",
+                    market_ticker="KXHIGHTPHX-26JUN01-B106.5",
+                    last_seen_at=ts,
+                )
+            ],
+        )
+
+    with app.session_factory() as session:
+        rows = session.scalars(select(GateFailure)).all()
+    assert len(rows) == 1
+    assert rows[0].count == 5
+    assert rows[0].last_seen_at == last
+
+
+async def test_phase2_gate_failure_upsert_keeps_distinct_tuples_separate() -> None:
+    app = _phase2_drain_app()
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    failures = [
+        GateFailure(
+            evaluated_at=now,
+            gate_name="fair_value_sane",
+            reason="fair_yes=9.649e-09 outside [0.01, 0.99]",
+            mode="paper",
+            market_ticker="KXHIGHTPHX-26JUN01-B106.5",
+            last_seen_at=now,
+        ),
+        GateFailure(
+            evaluated_at=now,
+            gate_name="fair_value_sane",
+            reason="fair_yes=9.649e-09 outside [0.01, 0.99]",
+            mode="paper",
+            market_ticker="KXHIGHTNY-26JUN01-B72.5",
+            last_seen_at=now,
+        ),
+        GateFailure(
+            evaluated_at=now,
+            gate_name="model_fresh",
+            reason="model_age_hours=7.5 > 6",
+            mode="paper",
+            market_ticker="KXHIGHTPHX-26JUN01-B106.5",
+            last_seen_at=now,
+        ),
+    ]
+    await _run_phase2(app, gate_failures=failures)
+    await _run_phase2(app, gate_failures=failures)
+
+    with app.session_factory() as session:
+        rows = session.scalars(select(GateFailure)).all()
+    assert len(rows) == 3
+    assert all(r.count == 2 for r in rows)
 
 
 async def test_phase2_resting_order_skips_paper_row_insert(

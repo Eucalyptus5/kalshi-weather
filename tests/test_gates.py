@@ -705,3 +705,61 @@ def test_demo_mode_blocks_on_any_failure_regardless_of_blocking_set() -> None:
 def test_paper_blocking_gates_is_frozenset_with_expected_members() -> None:
     assert PAPER_BLOCKING_GATES == frozenset({"edge_threshold", "edge_after_friction"})
     assert isinstance(PAPER_BLOCKING_GATES, frozenset)
+
+
+def test_fair_value_sane_reason_uses_canonical_short_token() -> None:
+    raw = Decimal("9.648719156984953E-9")
+    check = evaluate(_ctx(fair_yes=raw), GateMode.LIVE)
+    failure = [r for r in check.failures if r.name == "fair_value_sane"][0]
+    assert "9.649e-09" in failure.reason
+    assert "9.648719156984953" not in failure.reason
+
+
+def test_fair_value_sane_logs_reason_raw_with_full_precision(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw = Decimal("9.648719156984953E-9")
+    caplog.set_level(logging.WARNING, logger="bot.risk.gates")
+    evaluate(_ctx(fair_yes=raw), GateMode.LIVE)
+    messages = [rec.getMessage() for rec in caplog.records if rec.name == "bot.risk.gates"]
+    fv_msgs = [m for m in messages if "fair_value_sane" in m]
+    assert fv_msgs, "expected a fair_value_sane log line"
+    assert any("reason_raw=" in m and "9.648719156984953" in m for m in fv_msgs)
+
+
+def test_fair_value_sane_canonical_collapses_near_boundary() -> None:
+    params = GateParams(fair_min=Decimal("0"), fair_max=Decimal("1"))
+    check = evaluate(_ctx(fair_yes=Decimal("1.0001")), GateMode.LIVE, params)
+    failure = [r for r in check.failures if r.name == "fair_value_sane"][0]
+    assert failure.reason == "fair_yes=1 outside [0, 1]"
+
+
+def test_fair_value_sane_reason_raw_preserves_boundary_digits(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    params = GateParams(fair_min=Decimal("0"), fair_max=Decimal("1"))
+    caplog.set_level(logging.WARNING, logger="bot.risk.gates")
+    evaluate(_ctx(fair_yes=Decimal("1.0001")), GateMode.LIVE, params)
+    messages = [rec.getMessage() for rec in caplog.records if rec.name == "bot.risk.gates"]
+    fv_msgs = [m for m in messages if "fair_value_sane" in m]
+    assert any("reason_raw=" in m and "fair_yes=1.0001 outside [0, 1]" in m for m in fv_msgs)
+
+
+def test_fair_value_sane_near_identical_decimals_collapse() -> None:
+    a = Decimal("9.6487191569849531E-9")
+    b = Decimal("9.6487191569849539E-9")
+    fa = evaluate(_ctx(fair_yes=a), GateMode.LIVE).failures[0]
+    fb = evaluate(_ctx(fair_yes=b), GateMode.LIVE).failures[0]
+    assert fa.reason == fb.reason
+
+
+def test_fair_value_sane_distinct_decimals_stay_distinct() -> None:
+    fa = evaluate(_ctx(fair_yes=Decimal("9.6e-9")), GateMode.LIVE).failures[0]
+    fb = evaluate(_ctx(fair_yes=Decimal("9.7e-9")), GateMode.LIVE).failures[0]
+    assert fa.reason != fb.reason
+
+
+def test_sibling_gate_reasons_retain_full_precision() -> None:
+    check = evaluate(_ctx(model_age_hours=Decimal("7.123456789")), GateMode.LIVE)
+    failure = [r for r in check.failures if r.name == "model_fresh"][0]
+    assert "7.123456789" in failure.reason

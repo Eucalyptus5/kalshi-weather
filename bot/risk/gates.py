@@ -47,6 +47,7 @@ class GateResult:
     name: str
     passed: bool
     reason: str | None
+    reason_raw: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +114,12 @@ def _check_fair_value(fair_yes: Decimal | None, params: GateParams) -> GateResul
     if fair_yes is None:
         return _fail(name, "fair_yes is None")
     if fair_yes < params.fair_min or fair_yes > params.fair_max:
-        return _fail(name, f"fair_yes={fair_yes} outside [{params.fair_min}, {params.fair_max}]")
+        fy = f"{float(fair_yes):.4g}"
+        fmin = f"{float(params.fair_min):.4g}"
+        fmax = f"{float(params.fair_max):.4g}"
+        reason = f"fair_yes={fy} outside [{fmin}, {fmax}]"
+        reason_raw = f"fair_yes={fair_yes} outside [{params.fair_min}, {params.fair_max}]"
+        return GateResult(name=name, passed=False, reason=reason, reason_raw=reason_raw)
     return _ok(name)
 
 
@@ -238,9 +244,10 @@ def evaluate(
     failures = tuple(r for r in results if not r.passed)
     for r in failures:
         log.warning(
-            "risk gate failed gate=%s reason=%s mode=%s",
+            "risk gate failed gate=%s reason=%s reason_raw=%s mode=%s",
             r.name,
             r.reason,
+            r.reason_raw if r.reason_raw is not None else r.reason,
             mode.value,
         )
 

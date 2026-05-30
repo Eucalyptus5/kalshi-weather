@@ -196,10 +196,19 @@ class GateFailure(Base):
     mode: Mapped[str] = mapped_column(String(8))
     market_ticker: Mapped[str | None] = mapped_column(String(64), nullable=True)
     notes: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_seen_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now)
 
     __table_args__ = (
         Index("ix_gate_failures_evaluated_at_gate_name", "evaluated_at", "gate_name"),
+        Index(
+            "ux_gate_failures_dedup",
+            "gate_name",
+            "market_ticker",
+            "reason",
+            unique=True,
+        ),
     )
 
 

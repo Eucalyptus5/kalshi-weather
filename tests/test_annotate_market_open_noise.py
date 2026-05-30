@@ -33,6 +33,7 @@ def test_annotates_pre_fix_market_open_rows() -> None:
         reason="market_status=active",
         mode="paper",
         market_ticker="KXHIGHDEN-26MAY07-T70-75",
+        last_seen_at=pre_fix,
     )
 
     rows_annotated = annotate(factory)
@@ -54,6 +55,7 @@ def test_skips_post_fix_rows() -> None:
         reason="market_status=active",
         mode="paper",
         market_ticker="KXHIGHDEN-26MAY07-T70-75",
+        last_seen_at=post_fix,
     )
 
     rows_annotated = annotate(factory)
@@ -75,6 +77,7 @@ def test_skips_other_gate_rows() -> None:
         reason="edge=0.01 < 0.05",
         mode="paper",
         market_ticker="KXHIGHDEN-26MAY07-T70-75",
+        last_seen_at=pre_fix,
     )
 
     rows_annotated = annotate(factory)
@@ -96,6 +99,7 @@ def test_idempotent_rerun() -> None:
         reason="market_status=active",
         mode="paper",
         market_ticker="KXHIGHDEN-26MAY07-T70-75",
+        last_seen_at=pre_fix,
     )
 
     first = annotate(factory)
@@ -116,6 +120,7 @@ def test_order_independent_against_running_bot() -> None:
         reason="market_status=active",
         mode="paper",
         market_ticker="KXHIGHDEN-26MAY07-T70-75",
+        last_seen_at=pre_fix,
     )
 
     first = annotate(factory)
@@ -128,6 +133,7 @@ def test_order_independent_against_running_bot() -> None:
         reason="market_status=closed",
         mode="paper",
         market_ticker="KXHIGHDEN-26MAY07-T70-75",
+        last_seen_at=post_fix,
     )
 
     second = annotate(factory)

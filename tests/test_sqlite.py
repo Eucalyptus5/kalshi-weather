@@ -253,6 +253,7 @@ def test_gate_failure_round_trip(session):
         reason="fair_yes=0.999 outside [0.01, 0.99]",
         mode="paper",
         market_ticker="KXHIGHDEN-26MAY06-T70-75",
+        last_seen_at=when,
     )
     no_ticker = GateFailure(
         evaluated_at=when,
@@ -260,6 +261,7 @@ def test_gate_failure_round_trip(session):
         reason="circuit_breakers_armed=False",
         mode="paper",
         market_ticker=None,
+        last_seen_at=when,
     )
     session.add_all([with_ticker, no_ticker])
     session.commit()
@@ -279,6 +281,7 @@ def test_datetime_timezone_preserved(session):
             reason="stale",
             mode="paper",
             market_ticker=None,
+            last_seen_at=when,
         )
     )
     session.commit()
@@ -539,6 +542,7 @@ def test_gate_failure_notes_nullable(session):
         mode="paper",
         market_ticker="KXHIGHDEN-26MAY06-T70-75",
         notes=None,
+        last_seen_at=when,
     )
     with_note = GateFailure(
         evaluated_at=when,
@@ -547,6 +551,7 @@ def test_gate_failure_notes_nullable(session):
         mode="paper",
         market_ticker="KXHIGHDEN-26MAY06-T70-75",
         notes="pre_fix_status_string_bug",
+        last_seen_at=when,
     )
     session.add_all([no_note, with_note])
     session.commit()
@@ -781,7 +786,7 @@ def test_migrate_script_stamps_head_on_head_shape_db(tmp_path):
     cfg = _alembic_cfg(tmp_path, db_file)
     script_dir = ScriptDirectory.from_config(cfg)
     baseline = _detect_baseline(engine, script_dir)
-    assert baseline == "0005"
+    assert baseline == "0006"
     ensure_baseline_stamped(engine, baseline)
     with engine.connect() as connection:
         cfg.attributes["connection"] = connection
@@ -789,7 +794,7 @@ def test_migrate_script_stamps_head_on_head_shape_db(tmp_path):
 
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0005"
+    assert version == "0006"
     engine.dispose()
 
 
@@ -810,7 +815,7 @@ def test_migrate_script_stamps_0001_on_baseline_shape_db(tmp_path):
 
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0005"
+    assert version == "0006"
     engine.dispose()
 
 
@@ -878,16 +883,19 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     (versions / "0005_reconciler_state.py").write_text(
         (REPO_ROOT / "alembic" / "versions" / "0005_reconciler_state.py").read_text()
     )
-    (versions / "0006_decoy.py").write_text(
-        '"""decoy 0006 for forward-compat test\n\n'
-        "Revision ID: 0006\n"
-        "Revises: 0005\n"
-        "Create Date: 2026-05-31 13:00:00.000000\n\n"
+    (versions / "0006_gate_failures_dedupe.py").write_text(
+        (REPO_ROOT / "alembic" / "versions" / "0006_gate_failures_dedupe.py").read_text()
+    )
+    (versions / "0007_decoy.py").write_text(
+        '"""decoy 0007 for forward-compat test\n\n'
+        "Revision ID: 0007\n"
+        "Revises: 0006\n"
+        "Create Date: 2026-05-31 14:00:00.000000\n\n"
         '"""\n\n'
         "from typing import Sequence, Union\n\n"
         "from alembic import op  # noqa: F401\n\n\n"
-        'revision: str = "0006"\n'
-        'down_revision: Union[str, Sequence[str], None] = "0005"\n'
+        'revision: str = "0007"\n'
+        'down_revision: Union[str, Sequence[str], None] = "0006"\n'
         "branch_labels: Union[str, Sequence[str], None] = None\n"
         "depends_on: Union[str, Sequence[str], None] = None\n\n\n"
         "def upgrade() -> None:\n"
@@ -906,8 +914,8 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     engine = make_engine(db_file)
     Base.metadata.create_all(engine)
     script_dir = ScriptDirectory.from_config(cfg)
-    assert script_dir.get_current_head() == "0006"
-    assert _detect_baseline(engine, script_dir) == "0005"
+    assert script_dir.get_current_head() == "0007"
+    assert _detect_baseline(engine, script_dir) == "0006"
     engine.dispose()
 
 
