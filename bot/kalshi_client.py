@@ -14,6 +14,7 @@ from decimal import Decimal
 
 import httpx
 from kalshi_python_async import KalshiAuth
+from pydantic import BaseModel, ConfigDict
 
 from bot.config import Settings
 from bot.execution.token_bucket import TokenBucket
@@ -43,6 +44,25 @@ class KalshiMarket:
     close_time: datetime | None
     yes_ask: Decimal
     yes_bid: Decimal
+
+
+class BalanceBreakdownEntry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    balance: str
+    exchange_index: int
+
+
+class BalancePayload(BaseModel):
+    # forward-compat for unannounced demo wire fields; the snapshot loop reads a
+    # known subset and silently drops the rest rather than crashing on additions.
+    model_config = ConfigDict(extra="ignore")
+
+    balance: int
+    balance_breakdown: list[BalanceBreakdownEntry]
+    balance_dollars: Decimal
+    portfolio_value: int
+    updated_ts: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +251,16 @@ class KalshiDemoClient:
         response.raise_for_status()
         payload = response.json()
         return Decimal(str(payload["balance_dollars"]))
+
+    async def get_balance_full(self) -> BalancePayload:
+        assert self._http is not None and self._auth is not None
+        path = "/portfolio/balance"
+        _assert_demo_host("read", _resolved_request_url(self._http, "GET", path))
+        await self._read_bucket.acquire(cost=1)
+        headers = self._auth.create_auth_headers("GET", f"{_API_PREFIX}{path}")
+        response = await self._http.get(path, headers=headers)
+        response.raise_for_status()
+        return BalancePayload.model_validate(response.json())
 
 
 def _parse_close_time(raw: object) -> datetime | None:

@@ -5,7 +5,7 @@ from datetime import timezone as _timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from bot.storage.sqlite import (
     Base,
@@ -25,7 +25,7 @@ INITIAL_BALANCE = Decimal("500.000000")
 
 NATURAL_KEY_FORMULA = text("SELECT COALESCE(SUM(realized_pnl), 0) FROM simulated_pnl")
 
-TWO_COHORT_FORMULA = text(
+DOUBLE_COUNT_FORMULA = text(
     "SELECT COALESCE((SELECT SUM(realized_pnl) FROM simulated_pnl), 0) "
     "+ COALESCE((SELECT SUM(realized_pnl_dollars) FROM demo_orders), 0)"
 )
@@ -108,17 +108,24 @@ def _seed_backfill_order(session, *, eid: str) -> None:
     )
 
 
-def test_two_cohort_formula_silently_drops_backfill_payouts(session):
-    _seed_natural_key_trade(session, cid="kw-edge-yes-A", realized=Decimal("3.000000"))
-    _seed_backfill_order(session, eid="EXB1")
+def test_two_cohort_sum_double_counts_paper_mirrored_demo_trades(session):
+    cid = "kw-edge-yes-A"
+    _seed_natural_key_trade(session, cid=cid, realized=Decimal("9.270000"))
+    row = session.scalars(select(DemoOrder).where(DemoOrder.client_order_id == cid)).one()
+    row.realized_pnl_dollars = Decimal("1.530000")
     session.commit()
 
-    backfill_settled_on_exchange = Decimal("4.000000")
-    true_exchange_pnl = Decimal("3.000000") + backfill_settled_on_exchange
+    sim_sum = Decimal(str(session.execute(NATURAL_KEY_FORMULA).scalar()))
+    assert sim_sum == Decimal("9.270000")
+    demo_sum = Decimal(
+        str(session.execute(text("SELECT SUM(realized_pnl_dollars) FROM demo_orders")).scalar())
+    )
+    assert demo_sum == Decimal("1.530000")
 
-    two_cohort = Decimal(str(session.execute(TWO_COHORT_FORMULA).scalar()))
-    assert two_cohort == Decimal("3.000000")
-    assert (INITIAL_BALANCE + two_cohort) != (INITIAL_BALANCE + true_exchange_pnl)
+    double = session.execute(DOUBLE_COUNT_FORMULA).scalar()
+    assert abs(Decimal(str(double)) - Decimal("10.800000")) < Decimal("0.000001")
+    assert Decimal(str(double)) != sim_sum
+    assert Decimal(str(double)) != demo_sum
 
 
 def test_natural_key_formula_returns_expected_sum(session):

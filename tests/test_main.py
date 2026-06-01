@@ -6694,3 +6694,564 @@ async def test_calibration_refit_loop_logs_bss_aggregate_tokens(
     assert "tails_holdout_bs_new=" in line
     assert "edge_holdout_bs_new=" in line
     assert BSS_AGGREGATE_NA not in line.split("tails_bss_aggregate=")[1].split(" ")[0]
+
+
+def _balance_json(balance_dollars: str = "788.3901", balance: int = 78839) -> dict:
+    return {
+        "balance": balance,
+        "balance_breakdown": [{"balance": balance_dollars, "exchange_index": 0}],
+        "balance_dollars": balance_dollars,
+        "portfolio_value": 13434,
+        "updated_ts": 1780428732,
+    }
+
+
+def _position_dict(
+    *,
+    ticker: str,
+    market_exposure: str = "0.830000",
+    realized_pnl: str = "0.000000",
+    fees_paid: str = "0.000000",
+    position_fp: str = "-1.00",
+    drop: tuple[str, ...] = (),
+    nulls: tuple[str, ...] = (),
+) -> dict:
+    base = {
+        "fees_paid_dollars": fees_paid,
+        "last_updated_ts": "2026-06-02T11:00:00Z",
+        "market_exposure_dollars": market_exposure,
+        "position_fp": position_fp,
+        "realized_pnl_dollars": realized_pnl,
+        "resting_orders_count": 0,
+        "ticker": ticker,
+        "total_traded_dollars": market_exposure,
+    }
+    for k in drop:
+        base.pop(k, None)
+    for k in nulls:
+        base[k] = None
+    return base
+
+
+def _make_snapshot_demo_app(_rsa_pem: Path, kalshi) -> App:
+    from bot.config import Settings as _Settings
+
+    engine = make_engine(":memory:")
+    Base.metadata.create_all(engine)
+    sf = make_session_factory(engine)
+    settings = _Settings(
+        mode="demo",
+        kalshi_demo_key_id="demo-key-id",
+        kalshi_demo_private_key_path=_rsa_pem,
+    )
+    return App(
+        settings=settings,
+        engine=engine,
+        session_factory=sf,
+        meteo=None,  # type: ignore[arg-type]
+        kalshi=kalshi,
+        acis=None,  # type: ignore[arg-type]
+        series_list=("KXHIGHDEN",),
+    )
+
+
+async def _demo_client(_rsa_pem: Path, handler) -> KalshiDemoClient:
+    transport = httpx.MockTransport(handler)
+    http = httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    )
+    from bot.config import Settings as _Settings
+
+    settings = _Settings(
+        mode="demo",
+        kalshi_demo_key_id="demo-key-id",
+        kalshi_demo_private_key_path=_rsa_pem,
+    )
+    client = KalshiDemoClient(settings, http_client=http)
+    await client.aopen()
+    return client
+
+
+def test_paper_mode_skips_portfolio_snapshot_loop_task() -> None:
+    src = Path(bot_main.__file__).read_text()
+    tree = ast.parse(src)
+
+    enclosing_func: list[str] = []
+
+    class _RunVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.found_in_demo_branch = False
+            self.found_unconditionally = False
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            if node.name == "run":
+                enclosing_func.append(node.name)
+                self.generic_visit(node)
+                enclosing_func.pop()
+                return
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if not enclosing_func:
+                self.generic_visit(node)
+                return
+            func = node.func
+            is_create_task = (
+                isinstance(func, ast.Attribute)
+                and func.attr == "create_task"
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "asyncio"
+            )
+            if is_create_task and node.args:
+                arg = node.args[0]
+                if (
+                    isinstance(arg, ast.Call)
+                    and isinstance(arg.func, ast.Name)
+                    and arg.func.id == "_portfolio_snapshot_loop"
+                ):
+                    parent = _find_parent_if(node, tree)
+                    if parent is not None and _if_tests_demo_mode(parent):
+                        self.found_in_demo_branch = True
+                    else:
+                        self.found_unconditionally = True
+            self.generic_visit(node)
+
+    def _find_parent_if(target: ast.AST, root: ast.AST) -> ast.If | None:
+        for node in ast.walk(root):
+            if isinstance(node, ast.If):
+                for sub in ast.walk(node):
+                    if sub is target:
+                        return node
+        return None
+
+    def _if_tests_demo_mode(node: ast.If) -> bool:
+        test = node.test
+        return (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Attribute)
+            and isinstance(test.left.value, ast.Attribute)
+            and test.left.value.attr == "settings"
+            and test.left.attr == "mode"
+            and any(isinstance(c, ast.Constant) and c.value == "demo" for c in test.comparators)
+        )
+
+    v = _RunVisitor()
+    v.visit(tree)
+    assert v.found_in_demo_branch is True
+    assert v.found_unconditionally is False
+
+
+def test_app_bankroll_assignment_site_is_demo_startup_backfill_only() -> None:
+    src = Path(bot_main.__file__).read_text()
+    tree = ast.parse(src)
+    enclosing_func_names: list[str] = []
+
+    sites: list[str] = []
+
+    class _V(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            enclosing_func_names.append(node.name)
+            self.generic_visit(node)
+            enclosing_func_names.pop()
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            enclosing_func_names.append(node.name)
+            self.generic_visit(node)
+            enclosing_func_names.pop()
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            for tgt in node.targets:
+                if (
+                    isinstance(tgt, ast.Attribute)
+                    and tgt.attr == "bankroll"
+                    and isinstance(tgt.value, ast.Name)
+                    and tgt.value.id == "app"
+                ):
+                    sites.append(enclosing_func_names[-1])
+            self.generic_visit(node)
+
+    _V().visit(tree)
+    assert set(sites) == {"_demo_startup_backfill"}
+    assert len(sites) == 1
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["market_exposure_dollars", "realized_pnl_dollars", "fees_paid_dollars"],
+)
+async def test_aggregator_raises_key_error_on_missing_required_field(
+    _rsa_pem: Path, missing_field: str
+) -> None:
+    from bot.execution.portfolio_snapshot import aggregate_positions
+
+    payload = {
+        "market_positions": [
+            _position_dict(ticker="KXHIGHDEN-26JUN01-T70", drop=(missing_field,)),
+        ],
+        "cursor": "",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = await _demo_client(_rsa_pem, handler)
+    app = _make_snapshot_demo_app(_rsa_pem, client)
+    try:
+        with pytest.raises(KeyError):
+            await aggregate_positions(client)
+    finally:
+        await client.aclose()
+
+    with app.session_factory() as session:
+        from bot.storage.sqlite import PortfolioSnapshot as _PS
+
+        assert session.scalars(select(_PS)).all() == []
+
+
+async def test_aggregator_raises_key_error_on_null_realized_pnl(_rsa_pem: Path) -> None:
+    from bot.execution.portfolio_snapshot import aggregate_positions
+
+    payload = {
+        "market_positions": [
+            _position_dict(ticker="KXHIGHDEN-26JUN01-T70", nulls=("realized_pnl_dollars",)),
+        ],
+        "cursor": "",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = await _demo_client(_rsa_pem, handler)
+    try:
+        with pytest.raises(KeyError):
+            await aggregate_positions(client)
+    finally:
+        await client.aclose()
+
+
+def _seed_demo_order_row(
+    session,
+    *,
+    cid: str,
+    ticker: str = "KXHIGHDEN-26JUN01-T70",
+    status: str = "executed",
+    filled: int = 10,
+    placed_at: datetime | None = None,
+    realized: Decimal | None = None,
+):
+    from bot.storage.sqlite import DemoOrder as _DemoOrderRow
+
+    placed = (
+        placed_at if placed_at is not None else datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+    )
+    row = _DemoOrderRow(
+        client_order_id=cid,
+        exchange_order_id="EX-" + cid,
+        market_ticker=ticker,
+        strategy=None if cid.startswith("kw-backfill-") else "edge",
+        side="no",
+        requested_contracts=filled if filled else 10,
+        filled_contracts=filled,
+        requested_yes_price_dollars=Decimal("0.58"),
+        fair_at_entry=Decimal("0.62"),
+        intended_at=placed,
+        avg_fill_price=Decimal("0.205"),
+        fee_dollars=Decimal("0.07"),
+        realized_pnl_dollars=realized,
+        status=status,
+        placed_at=placed,
+        last_status_at=placed,
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
+async def test_zero_row_update_emits_snapshot_pnl_unattributed_for_backfill_only(
+    _rsa_pem: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from bot.execution.portfolio_snapshot import update_demo_realized_pnl
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    client = await _demo_client(_rsa_pem, handler)
+    app = _make_snapshot_demo_app(_rsa_pem, client)
+    snapshot_at = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+    with app.session_factory() as session:
+        _seed_demo_order_row(session, cid="kw-backfill-EX1")
+        caplog.set_level(logging.INFO, logger="bot.execution.portfolio_snapshot")
+        rc = update_demo_realized_pnl(
+            session, "KXHIGHDEN-26JUN01-T70", Decimal("1.530000"), snapshot_at
+        )
+        session.commit()
+    await client.aclose()
+
+    assert rc == 0
+    matching = [r for r in caplog.records if "snapshot_pnl_unattributed" in r.getMessage()]
+    assert len(matching) == 1
+    msg = matching[0].getMessage()
+    assert "ticker=KXHIGHDEN-26JUN01-T70" in msg
+    assert "pnl=1.530000" in msg
+    assert "reason=no_eligible_row" in msg
+
+
+async def test_zero_row_update_emits_log_when_natural_row_placed_after_snapshot(
+    _rsa_pem: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from bot.execution.portfolio_snapshot import update_demo_realized_pnl
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    client = await _demo_client(_rsa_pem, handler)
+    app = _make_snapshot_demo_app(_rsa_pem, client)
+    snapshot_at = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+    with app.session_factory() as session:
+        _seed_demo_order_row(
+            session, cid="kw-edge-late", placed_at=snapshot_at + timedelta(minutes=5)
+        )
+        caplog.set_level(logging.INFO, logger="bot.execution.portfolio_snapshot")
+        rc = update_demo_realized_pnl(
+            session, "KXHIGHDEN-26JUN01-T70", Decimal("1.530000"), snapshot_at
+        )
+        session.commit()
+    await client.aclose()
+    assert rc == 0
+    matching = [r for r in caplog.records if "snapshot_pnl_unattributed" in r.getMessage()]
+    assert len(matching) == 1
+
+
+async def test_zero_row_update_no_log_when_match_lands(
+    _rsa_pem: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from bot.execution.portfolio_snapshot import update_demo_realized_pnl
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    client = await _demo_client(_rsa_pem, handler)
+    app = _make_snapshot_demo_app(_rsa_pem, client)
+    snapshot_at = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+    with app.session_factory() as session:
+        _seed_demo_order_row(session, cid="kw-edge-natural", placed_at=snapshot_at)
+        caplog.set_level(logging.INFO, logger="bot.execution.portfolio_snapshot")
+        rc = update_demo_realized_pnl(
+            session, "KXHIGHDEN-26JUN01-T70", Decimal("1.530000"), snapshot_at
+        )
+        session.commit()
+    await client.aclose()
+    assert rc == 1
+    matching = [r for r in caplog.records if "snapshot_pnl_unattributed" in r.getMessage()]
+    assert matching == []
+
+
+async def test_snapshot_loop_skips_ticks_until_auth_present(_rsa_pem: Path) -> None:
+    from bot.kalshi_client import BalancePayload as _BP
+    from bot.main import _portfolio_snapshot_once
+
+    polled = {"balance": 0, "positions": 0}
+
+    class _StubClient:
+        def __init__(self) -> None:
+            self._auth = None
+
+        async def get_balance_full(self):
+            polled["balance"] += 1
+            return _BP.model_validate(_balance_json())
+
+    async def fake_aggregate(client):
+        polled["positions"] += 1
+        from bot.execution.portfolio_snapshot import PositionAggregate
+
+        return PositionAggregate(
+            per_ticker_realized_pnl={},
+            total_exposure_dollars=Decimal("0"),
+            realized_pnl_dollars=Decimal("0"),
+            fees_paid_dollars=Decimal("0"),
+            open_positions_count=0,
+        )
+
+    stub = _StubClient()
+    app = _make_snapshot_demo_app(_rsa_pem, stub)
+
+    import bot.main as _main
+
+    saved = _main.aggregate_positions
+    _main.aggregate_positions = fake_aggregate  # type: ignore[assignment]
+    try:
+        await _portfolio_snapshot_once(app)
+        await _portfolio_snapshot_once(app)
+        assert polled == {"balance": 0, "positions": 0}
+        with app.session_factory() as session:
+            from bot.storage.sqlite import PortfolioSnapshot as _PS
+
+            assert session.scalars(select(_PS)).all() == []
+
+        stub._auth = object()
+        await _portfolio_snapshot_once(app)
+        assert polled["balance"] == 1
+        assert polled["positions"] == 1
+        with app.session_factory() as session:
+            from bot.storage.sqlite import PortfolioSnapshot as _PS
+
+            rows = session.scalars(select(_PS)).all()
+        assert len(rows) == 1
+    finally:
+        _main.aggregate_positions = saved  # type: ignore[assignment]
+
+
+async def test_per_ticker_update_binds_decimal_without_coercion(_rsa_pem: Path) -> None:
+    from bot.main import _portfolio_snapshot_once
+    from bot.storage.sqlite import DemoOrder as _DemoOrderRow
+
+    snapshot_at = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+    ticker = "KXHIGHDEN-26JUN01-T70"
+    payload = {
+        "market_positions": [
+            _position_dict(
+                ticker=ticker,
+                realized_pnl="1.53",
+                market_exposure="0.83",
+                fees_paid="0.01",
+                position_fp="-1.00",
+            ),
+        ],
+        "cursor": "",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/portfolio/balance"):
+            return httpx.Response(200, json=_balance_json())
+        if request.url.path.endswith("/portfolio/positions"):
+            return httpx.Response(200, json=payload)
+        return httpx.Response(404)
+
+    client = await _demo_client(_rsa_pem, handler)
+    app = _make_snapshot_demo_app(_rsa_pem, client)
+    with app.session_factory() as session:
+        _seed_demo_order_row(
+            session,
+            cid="kw-edge-natural",
+            ticker=ticker,
+            placed_at=snapshot_at - timedelta(minutes=5),
+        )
+
+    try:
+        await _portfolio_snapshot_once(app)
+    finally:
+        await client.aclose()
+
+    with app.session_factory() as session:
+        row = session.scalars(
+            select(_DemoOrderRow).where(_DemoOrderRow.client_order_id == "kw-edge-natural")
+        ).one()
+    assert row.realized_pnl_dollars == Decimal("1.530000")
+    assert isinstance(row.realized_pnl_dollars, Decimal)
+
+
+async def test_predicate_tiebreaker_on_id_is_stable(_rsa_pem: Path) -> None:
+    from bot.execution.portfolio_snapshot import update_demo_realized_pnl
+    from bot.storage.sqlite import DemoOrder as _DemoOrderRow
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    client = await _demo_client(_rsa_pem, handler)
+    app = _make_snapshot_demo_app(_rsa_pem, client)
+    ticker = "KXHIGHDEN-26JUN01-T70"
+    snapshot_at = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+    placed = snapshot_at - timedelta(minutes=5)
+
+    with app.session_factory() as session:
+        _seed_demo_order_row(session, cid="kw-edge-a", ticker=ticker, placed_at=placed)
+        _seed_demo_order_row(session, cid="kw-edge-b", ticker=ticker, placed_at=placed)
+        rows = session.scalars(
+            select(_DemoOrderRow).where(_DemoOrderRow.market_ticker == ticker)
+        ).all()
+        max_id = max(r.id for r in rows)
+
+        for _ in range(10):
+            rc = update_demo_realized_pnl(session, ticker, Decimal("1.530000"), snapshot_at)
+            assert rc == 1
+            session.commit()
+            rows_post = session.scalars(
+                select(_DemoOrderRow).where(_DemoOrderRow.market_ticker == ticker)
+            ).all()
+            with_pnl = [r for r in rows_post if r.realized_pnl_dollars is not None]
+            assert len(with_pnl) == 1
+            assert with_pnl[0].id == max_id
+            assert with_pnl[0].realized_pnl_dollars == Decimal("1.530000")
+            for r in rows_post:
+                r.realized_pnl_dollars = None
+            session.commit()
+    await client.aclose()
+
+
+async def test_expire_all_makes_same_session_read_see_updated_pnl(_rsa_pem: Path) -> None:
+    from bot.execution.portfolio_snapshot import update_demo_realized_pnl
+    from bot.storage.sqlite import DemoOrder as _DemoOrderRow
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    client = await _demo_client(_rsa_pem, handler)
+    app = _make_snapshot_demo_app(_rsa_pem, client)
+    ticker = "KXHIGHDEN-26JUN01-T70"
+    snapshot_at = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+
+    with app.session_factory() as session:
+        _seed_demo_order_row(session, cid="kw-edge-a", ticker=ticker, placed_at=snapshot_at)
+        loaded = session.scalars(
+            select(_DemoOrderRow).where(_DemoOrderRow.client_order_id == "kw-edge-a")
+        ).one()
+        assert loaded.realized_pnl_dollars is None
+
+        rc = update_demo_realized_pnl(session, ticker, Decimal("1.530000"), snapshot_at)
+        assert rc == 1
+        post = session.scalars(
+            select(_DemoOrderRow).where(_DemoOrderRow.client_order_id == "kw-edge-a")
+        ).one()
+        assert post.realized_pnl_dollars == Decimal("1.530000")
+
+    with app.session_factory() as session:
+        _seed_demo_order_row(
+            session, cid="kw-edge-b", ticker="KXHIGHCHI-26JUN01-T70", placed_at=snapshot_at
+        )
+        loaded = session.scalars(
+            select(_DemoOrderRow).where(_DemoOrderRow.client_order_id == "kw-edge-b")
+        ).one()
+        assert loaded.realized_pnl_dollars is None
+
+        from sqlalchemy import Numeric, bindparam, text as _text
+        from bot.storage.sqlite import UtcDateTime as _UDT
+
+        stmt = _text(
+            """
+            UPDATE demo_orders SET realized_pnl_dollars = :pnl
+             WHERE id = (SELECT id FROM demo_orders
+                          WHERE market_ticker = :ticker
+                            AND status = 'executed'
+                            AND filled_contracts > 0
+                            AND client_order_id NOT LIKE 'kw-backfill-%'
+                            AND placed_at <= :snapshot_at
+                          ORDER BY placed_at DESC, id DESC LIMIT 1)
+            """
+        ).bindparams(
+            bindparam("pnl", type_=Numeric(10, 6)),
+            bindparam("snapshot_at", type_=_UDT()),
+        )
+        session.execute(
+            stmt,
+            {
+                "pnl": Decimal("2.250000"),
+                "ticker": "KXHIGHCHI-26JUN01-T70",
+                "snapshot_at": snapshot_at,
+            },
+        )
+        stale = session.scalars(
+            select(_DemoOrderRow).where(_DemoOrderRow.client_order_id == "kw-edge-b")
+        ).one()
+        assert stale.realized_pnl_dollars is None
+
+    await client.aclose()

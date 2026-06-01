@@ -786,7 +786,7 @@ def test_migrate_script_stamps_head_on_head_shape_db(tmp_path):
     cfg = _alembic_cfg(tmp_path, db_file)
     script_dir = ScriptDirectory.from_config(cfg)
     baseline = _detect_baseline(engine, script_dir)
-    assert baseline == "0006"
+    assert baseline == script_dir.get_current_head()
     ensure_baseline_stamped(engine, baseline)
     with engine.connect() as connection:
         cfg.attributes["connection"] = connection
@@ -794,7 +794,7 @@ def test_migrate_script_stamps_head_on_head_shape_db(tmp_path):
 
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0006"
+    assert version == script_dir.get_current_head()
     engine.dispose()
 
 
@@ -815,7 +815,7 @@ def test_migrate_script_stamps_0001_on_baseline_shape_db(tmp_path):
 
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
-    assert version == "0006"
+    assert version == script_dir.get_current_head()
     engine.dispose()
 
 
@@ -886,16 +886,19 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     (versions / "0006_gate_failures_dedupe.py").write_text(
         (REPO_ROOT / "alembic" / "versions" / "0006_gate_failures_dedupe.py").read_text()
     )
-    (versions / "0007_decoy.py").write_text(
-        '"""decoy 0007 for forward-compat test\n\n'
-        "Revision ID: 0007\n"
-        "Revises: 0006\n"
-        "Create Date: 2026-05-31 14:00:00.000000\n\n"
+    (versions / "0007_portfolio_snapshots.py").write_text(
+        (REPO_ROOT / "alembic" / "versions" / "0007_portfolio_snapshots.py").read_text()
+    )
+    (versions / "0008_decoy.py").write_text(
+        '"""decoy 0008 for forward-compat test\n\n'
+        "Revision ID: 0008\n"
+        "Revises: 0007\n"
+        "Create Date: 2026-06-02 14:00:00.000000\n\n"
         '"""\n\n'
         "from typing import Sequence, Union\n\n"
         "from alembic import op  # noqa: F401\n\n\n"
-        'revision: str = "0007"\n'
-        'down_revision: Union[str, Sequence[str], None] = "0006"\n'
+        'revision: str = "0008"\n'
+        'down_revision: Union[str, Sequence[str], None] = "0007"\n'
         "branch_labels: Union[str, Sequence[str], None] = None\n"
         "depends_on: Union[str, Sequence[str], None] = None\n\n\n"
         "def upgrade() -> None:\n"
@@ -914,8 +917,8 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     engine = make_engine(db_file)
     Base.metadata.create_all(engine)
     script_dir = ScriptDirectory.from_config(cfg)
-    assert script_dir.get_current_head() == "0007"
-    assert _detect_baseline(engine, script_dir) == "0006"
+    assert script_dir.get_current_head() == "0008"
+    assert _detect_baseline(engine, script_dir) == "0007"
     engine.dispose()
 
 
@@ -1446,6 +1449,82 @@ def test_upgrade_schema_does_not_touch_real_data_state_db(tmp_path):
     tables = set(inspect(engine).get_table_names())
     assert "alembic_version" in tables
     engine.dispose()
+
+
+def test_orm_update_cannot_replace_text_for_per_ticker_pnl_update(session):
+    from sqlalchemy import Numeric, bindparam, update
+    from sqlalchemy.sql.dml import Update
+
+    from bot.storage.sqlite import UtcDateTime
+
+    assert getattr(Update, "order_by", None) is None
+    assert getattr(Update, "limit", None) is None
+
+    ticker = "KXHIGHDEN-26JUN01-T70"
+    base = datetime(2026, 6, 2, 12, 0, tzinfo=_timezone.utc)
+    for cid in ("kw-edge-a", "kw-edge-b"):
+        session.add(
+            DemoOrder(
+                client_order_id=cid,
+                exchange_order_id="EX-" + cid,
+                market_ticker=ticker,
+                strategy="edge",
+                side="no",
+                requested_contracts=10,
+                filled_contracts=10,
+                requested_yes_price_dollars=Decimal("0.58"),
+                fair_at_entry=Decimal("0.62"),
+                intended_at=base,
+                avg_fill_price=Decimal("0.205"),
+                fee_dollars=Decimal("0.07"),
+                status="executed",
+                placed_at=base,
+                last_status_at=base,
+            )
+        )
+    session.commit()
+
+    orm_result = session.execute(
+        update(DemoOrder)
+        .where(DemoOrder.market_ticker == ticker)
+        .where(DemoOrder.status == "executed")
+        .where(DemoOrder.filled_contracts > 0)
+        .values(realized_pnl_dollars=Decimal("1.530000"))
+    )
+    assert orm_result.rowcount == 2
+    session.rollback()
+
+    text_sql = text(
+        """
+        UPDATE demo_orders
+           SET realized_pnl_dollars = :pnl
+         WHERE id = (
+             SELECT id FROM demo_orders
+              WHERE market_ticker = :ticker
+                AND status = 'executed'
+                AND filled_contracts > 0
+                AND client_order_id NOT LIKE 'kw-backfill-%'
+                AND placed_at <= :snapshot_at
+              ORDER BY placed_at DESC, id DESC
+              LIMIT 1
+         )
+        """
+    ).bindparams(
+        bindparam("pnl", type_=Numeric(10, 6)),
+        bindparam("snapshot_at", type_=UtcDateTime()),
+    )
+    text_result = session.execute(
+        text_sql,
+        {"pnl": Decimal("1.530000"), "ticker": ticker, "snapshot_at": base + timedelta(hours=1)},
+    )
+    assert text_result.rowcount == 1
+    session.commit()
+
+    pinned = session.scalars(
+        select(DemoOrder).where(DemoOrder.realized_pnl_dollars.is_not(None))
+    ).all()
+    assert len(pinned) == 1
+    assert pinned[0].client_order_id == "kw-edge-b"
 
 
 def test_upgrade_schema_does_not_mutate_root_logger(tmp_path, caplog):

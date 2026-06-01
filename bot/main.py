@@ -45,6 +45,7 @@ from bot.execution.order_reconciler import (
     stitch_natural_key_order,
     upsert_exchange_record,
 )
+from bot.execution.portfolio_snapshot import aggregate_positions, update_demo_realized_pnl
 from bot.execution.paper import (
     Orderbook,
     PaperTrade,
@@ -67,6 +68,7 @@ from bot.storage.sqlite import (
     Market,
     OrderbookSnapshot,
     PaperTradeRow,
+    PortfolioSnapshot,
     ReconcilerState,
     SimulatedPnl,
     make_engine,
@@ -131,6 +133,7 @@ def aggregate_exposure_cap(app: "App | None" = None) -> Decimal:
 MARKET_REFRESH_INTERVAL = 60.0
 EVAL_INTERVAL = 60.0
 RECONCILE_INTERVAL_SECONDS: float = 30.0
+PORTFOLIO_SNAPSHOT_INTERVAL_SECONDS: float = 60.0
 SETTLEMENT_INTERVAL_SECONDS: float = 6 * 3600
 _SETTLEMENT_GRACE_DAYS: int = 1
 GFS_CYCLES_HOURS: tuple[int, ...] = (0, 6, 12, 18)
@@ -1105,6 +1108,53 @@ async def _order_reconcile_loop(app: App, stop: asyncio.Event) -> None:
             pass
 
 
+async def _portfolio_snapshot_once(app: App) -> None:
+    if app.kalshi._auth is None:
+        return
+    balance = await app.kalshi.get_balance_full()
+    aggregate = await aggregate_positions(app.kalshi)
+    snapshot_at = datetime.now(tz=_timezone.utc)
+    cash_dollars = balance.balance_dollars
+    portfolio_value_dollars = cash_dollars + aggregate.total_exposure_dollars
+    async with app.db_lock:
+        with app.session_factory() as session:
+            for ticker, realized_pnl in aggregate.per_ticker_realized_pnl.items():
+                update_demo_realized_pnl(session, ticker, realized_pnl, snapshot_at)
+            session.add(
+                PortfolioSnapshot(
+                    snapshot_at=snapshot_at,
+                    cash_dollars=cash_dollars,
+                    portfolio_value_dollars=portfolio_value_dollars,
+                    total_exposure_dollars=aggregate.total_exposure_dollars,
+                    realized_pnl_dollars=aggregate.realized_pnl_dollars,
+                    fees_paid_dollars=aggregate.fees_paid_dollars,
+                    open_positions_count=aggregate.open_positions_count,
+                )
+            )
+            session.commit()
+    logger.info(
+        "portfolio_snapshot cash=%s value=%s exposure=%s realized_pnl=%s fees=%s open=%d",
+        cash_dollars,
+        portfolio_value_dollars,
+        aggregate.total_exposure_dollars,
+        aggregate.realized_pnl_dollars,
+        aggregate.fees_paid_dollars,
+        aggregate.open_positions_count,
+    )
+
+
+async def _portfolio_snapshot_loop(app: App, stop: asyncio.Event) -> None:
+    while not stop.is_set():
+        try:
+            await _portfolio_snapshot_once(app)
+        except Exception:
+            logger.exception("loop_iteration_failed name=portfolio_snapshot_loop")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=PORTFOLIO_SNAPSHOT_INTERVAL_SECONDS)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def reconcile_settled_trades(app: App, now: datetime) -> int:
     cutoff = (now - timedelta(days=_SETTLEMENT_GRACE_DAYS)).date()
 
@@ -1189,6 +1239,12 @@ async def reconcile_settled_trades(app: App, now: datetime) -> int:
                     strategy=row.strategy,
                 )
                 recon = reconcile_trade(paper_trade_value, parsed, observed)
+                # paper-mode notional even when the trade was mirrored to a demo
+                # order via paper_trades.demo_order_client_id: the simulator scores
+                # (sell-YES premium - $1 payoff if YES wins - fees) while demo
+                # execution buys NO at no_ask and gains ($1 if NO wins - cost - fees).
+                # Demo-cash realized P&L lives on demo_orders.realized_pnl_dollars,
+                # populated by the portfolio snapshot loop.
                 session.add(
                     SimulatedPnl(
                         paper_trade_id=row.id,
@@ -1353,6 +1409,10 @@ async def run(app: App, duration: timedelta) -> None:
         asyncio.create_task(_order_reconcile_loop(app, stop), name="order_reconcile_loop"),
         asyncio.create_task(_calibration_refit_loop(app, stop), name="calibration_loop"),
     ]
+    if app.settings.mode == "demo":
+        tasks.append(
+            asyncio.create_task(_portfolio_snapshot_loop(app, stop), name="portfolio_snapshot_loop")
+        )
 
     try:
         await asyncio.wait_for(stop.wait(), timeout=duration.total_seconds())

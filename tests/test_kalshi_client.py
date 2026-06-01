@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -12,6 +13,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 
 from bot.config import Settings
 from bot.kalshi_client import (
+    BalancePayload,
     KalshiDemoClient,
     KalshiMarket,
     KalshiOrderbook,
@@ -19,6 +21,9 @@ from bot.kalshi_client import (
     _resolved_request_url,
 )
 from bot.markets.parser import event_id
+
+
+_BALANCE_FIXTURE_PATH = Path(__file__).parent / "data" / "portfolio_balance_demo.json"
 
 
 _EVENT_TICKER_GOLDEN: tuple[tuple[str, str], ...] = (
@@ -917,6 +922,56 @@ async def test_get_balance_parses_balance_dollars(rsa_pem: Path) -> None:
         await client.aclose()
 
     assert balance == Decimal("537.250000")
+
+
+def test_balance_payload_parses_captured_demo_fixture() -> None:
+    captured = json.loads(_BALANCE_FIXTURE_PATH.read_text())
+    payload = BalancePayload.model_validate(captured)
+    assert payload.balance == 78839
+    assert payload.balance_dollars == Decimal("788.3901")
+    assert isinstance(payload.balance_dollars, Decimal)
+    assert payload.portfolio_value == 13434
+    assert payload.updated_ts == 1780428732
+    assert len(payload.balance_breakdown) == 1
+    entry = payload.balance_breakdown[0]
+    assert entry.balance == "788.3901"
+    assert entry.exchange_index == 0
+
+
+def test_balance_payload_drops_unknown_fields() -> None:
+    captured = json.loads(_BALANCE_FIXTURE_PATH.read_text())
+    captured["unannounced_demo_field"] = "should be dropped"
+    payload = BalancePayload.model_validate(captured)
+    assert not hasattr(payload, "unannounced_demo_field")
+    assert payload.balance == 78839
+
+
+def test_balance_payload_tolerates_missing_optional_breakdown_entry_field() -> None:
+    captured = json.loads(_BALANCE_FIXTURE_PATH.read_text())
+    del captured["balance_breakdown"][0]["exchange_index"]
+    with pytest.raises(Exception):
+        BalancePayload.model_validate(captured)
+
+
+async def test_get_balance_full_round_trips_captured_payload(rsa_pem: Path) -> None:
+    captured = json.loads(_BALANCE_FIXTURE_PATH.read_text())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=captured)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiDemoClient(_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        payload = await client.get_balance_full()
+        balance = await client.get_balance()
+        await client.aclose()
+
+    assert isinstance(payload, BalancePayload)
+    assert payload.balance_dollars == Decimal("788.3901")
+    assert balance == Decimal("788.3901")
 
 
 def test_signing_golden_pss_verifies(rsa_pem: Path) -> None:

@@ -186,6 +186,21 @@ class ReconcilerState(Base):
     updated_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now, onupdate=_utc_now)
 
 
+class PortfolioSnapshot(Base):
+    __tablename__ = "portfolio_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False, index=True)
+    cash_dollars: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    # collateral-basis: cash + sum(market_exposure), not MTM.
+    portfolio_value_dollars: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    total_exposure_dollars: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    realized_pnl_dollars: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    fees_paid_dollars: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    open_positions_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False, default=_utc_now)
+
+
 class GateFailure(Base):
     __tablename__ = "gate_failures"
 
