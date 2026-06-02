@@ -1115,7 +1115,8 @@ async def _portfolio_snapshot_once(app: App) -> None:
     aggregate = await aggregate_positions(app.kalshi)
     snapshot_at = datetime.now(tz=_timezone.utc)
     cash_dollars = balance.balance_dollars
-    portfolio_value_dollars = cash_dollars + aggregate.total_exposure_dollars
+    total_collateral_dollars = cash_dollars + aggregate.total_exposure_dollars
+    portfolio_value_mtm_dollars = cash_dollars + Decimal(balance.portfolio_value) / Decimal(100)
     async with app.db_lock:
         with app.session_factory() as session:
             for ticker, realized_pnl in aggregate.per_ticker_realized_pnl.items():
@@ -1124,7 +1125,8 @@ async def _portfolio_snapshot_once(app: App) -> None:
                 PortfolioSnapshot(
                     snapshot_at=snapshot_at,
                     cash_dollars=cash_dollars,
-                    portfolio_value_dollars=portfolio_value_dollars,
+                    total_collateral_dollars=total_collateral_dollars,
+                    portfolio_value_mtm_dollars=portfolio_value_mtm_dollars,
                     total_exposure_dollars=aggregate.total_exposure_dollars,
                     realized_pnl_dollars=aggregate.realized_pnl_dollars,
                     fees_paid_dollars=aggregate.fees_paid_dollars,
@@ -1133,9 +1135,10 @@ async def _portfolio_snapshot_once(app: App) -> None:
             )
             session.commit()
     logger.info(
-        "portfolio_snapshot cash=%s value=%s exposure=%s realized_pnl=%s fees=%s open=%d",
+        "portfolio_snapshot cash=%s collateral=%s mtm=%s exposure=%s realized_pnl=%s fees=%s open=%d",
         cash_dollars,
-        portfolio_value_dollars,
+        total_collateral_dollars,
+        portfolio_value_mtm_dollars,
         aggregate.total_exposure_dollars,
         aggregate.realized_pnl_dollars,
         aggregate.fees_paid_dollars,

@@ -192,8 +192,12 @@ class PortfolioSnapshot(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     snapshot_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False, index=True)
     cash_dollars: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
-    # collateral-basis: cash + sum(market_exposure), not MTM.
-    portfolio_value_dollars: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    # collateral basis: cash + sum(market_exposure)
+    total_collateral_dollars: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    # mark-to-market: cash + wire portfolio_value; matches Kalshi UI
+    portfolio_value_mtm_dollars: Mapped[Decimal | None] = mapped_column(
+        Numeric(12, 6), nullable=True
+    )
     total_exposure_dollars: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
     realized_pnl_dollars: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
     fees_paid_dollars: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)

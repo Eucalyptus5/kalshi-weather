@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 from datetime import timezone as _timezone
 from decimal import Decimal
@@ -186,10 +187,56 @@ async def test_snapshot_writes_one_row_with_aggregated_values(rsa_pem: Path) -> 
     row = rows[0]
     assert row.cash_dollars == Decimal("788.3901")
     assert row.total_exposure_dollars == Decimal("2.450000")
-    assert row.portfolio_value_dollars == Decimal("790.840100")
+    assert row.total_collateral_dollars == Decimal("790.840100")
     assert row.realized_pnl_dollars == Decimal("1.730000")
     assert row.fees_paid_dollars == Decimal("0.071500")
     assert row.open_positions_count == 2
+
+
+async def test_snapshot_writes_mtm_from_wire_portfolio_value(
+    rsa_pem: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    positions_payload = {
+        "market_positions": [
+            _position(
+                ticker="KXHIGHDEN-26JUN01-T70",
+                market_exposure="0.830000",
+                realized_pnl="0.000000",
+                fees_paid="0.009900",
+                position_fp="-1.00",
+            ),
+        ],
+        "cursor": "",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/portfolio/balance"):
+            return httpx.Response(200, json=_balance_json())
+        if request.url.path.endswith("/portfolio/positions"):
+            return httpx.Response(200, json=positions_payload)
+        return httpx.Response(404)
+
+    client = await _client_with_handler(rsa_pem, handler)
+    app = _make_app(rsa_pem, client)
+    caplog.set_level(logging.INFO, logger="bot.main")
+    try:
+        await _portfolio_snapshot_once(app)
+    finally:
+        await client.aclose()
+
+    with app.session_factory() as session:
+        row = session.scalars(select(PortfolioSnapshot)).one()
+    assert row.portfolio_value_mtm_dollars == Decimal("922.7301")
+    assert row.total_collateral_dollars == Decimal("789.220100")
+    assert row.total_collateral_dollars != row.portfolio_value_mtm_dollars
+
+    snapshot_records = [r for r in caplog.records if r.message.startswith("portfolio_snapshot")]
+    assert len(snapshot_records) == 1
+    assert re.fullmatch(
+        r"portfolio_snapshot cash=\S+ collateral=\S+ mtm=\S+ exposure=\S+ "
+        r"realized_pnl=\S+ fees=\S+ open=\d+",
+        snapshot_records[0].getMessage(),
+    )
 
 
 async def test_snapshot_loop_survives_transient_503(

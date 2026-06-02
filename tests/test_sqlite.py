@@ -889,16 +889,21 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     (versions / "0007_portfolio_snapshots.py").write_text(
         (REPO_ROOT / "alembic" / "versions" / "0007_portfolio_snapshots.py").read_text()
     )
-    (versions / "0008_decoy.py").write_text(
-        '"""decoy 0008 for forward-compat test\n\n'
-        "Revision ID: 0008\n"
-        "Revises: 0007\n"
+    (versions / "0008_portfolio_mtm_and_collateral_rename.py").write_text(
+        (
+            REPO_ROOT / "alembic" / "versions" / "0008_portfolio_mtm_and_collateral_rename.py"
+        ).read_text()
+    )
+    (versions / "0009_decoy.py").write_text(
+        '"""decoy 0009 for forward-compat test\n\n'
+        "Revision ID: 0009\n"
+        "Revises: 0008\n"
         "Create Date: 2026-06-02 14:00:00.000000\n\n"
         '"""\n\n'
         "from typing import Sequence, Union\n\n"
         "from alembic import op  # noqa: F401\n\n\n"
-        'revision: str = "0008"\n'
-        'down_revision: Union[str, Sequence[str], None] = "0007"\n'
+        'revision: str = "0009"\n'
+        'down_revision: Union[str, Sequence[str], None] = "0008"\n'
         "branch_labels: Union[str, Sequence[str], None] = None\n"
         "depends_on: Union[str, Sequence[str], None] = None\n\n\n"
         "def upgrade() -> None:\n"
@@ -917,8 +922,8 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     engine = make_engine(db_file)
     Base.metadata.create_all(engine)
     script_dir = ScriptDirectory.from_config(cfg)
-    assert script_dir.get_current_head() == "0008"
-    assert _detect_baseline(engine, script_dir) == "0007"
+    assert script_dir.get_current_head() == "0009"
+    assert _detect_baseline(engine, script_dir) == "0008"
     engine.dispose()
 
 
