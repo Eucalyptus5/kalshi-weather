@@ -6883,6 +6883,8 @@ async def test_aggregator_raises_key_error_on_missing_required_field(
     _rsa_pem: Path, missing_field: str
 ) -> None:
     from bot.execution.portfolio_snapshot import aggregate_positions
+    from bot.main import _portfolio_snapshot_once
+    from bot.storage.sqlite import PortfolioSnapshot as _PS
 
     payload = {
         "market_positions": [
@@ -6892,24 +6894,30 @@ async def test_aggregator_raises_key_error_on_missing_required_field(
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=payload)
+        if request.url.path.endswith("/portfolio/balance"):
+            return httpx.Response(200, json=_balance_json())
+        if request.url.path.endswith("/portfolio/positions"):
+            return httpx.Response(200, json=payload)
+        return httpx.Response(404)
 
     client = await _demo_client(_rsa_pem, handler)
     app = _make_snapshot_demo_app(_rsa_pem, client)
     try:
         with pytest.raises(KeyError):
             await aggregate_positions(client)
+        with pytest.raises(KeyError):
+            await _portfolio_snapshot_once(app)
     finally:
         await client.aclose()
 
     with app.session_factory() as session:
-        from bot.storage.sqlite import PortfolioSnapshot as _PS
-
         assert session.scalars(select(_PS)).all() == []
 
 
 async def test_aggregator_raises_key_error_on_null_realized_pnl(_rsa_pem: Path) -> None:
     from bot.execution.portfolio_snapshot import aggregate_positions
+    from bot.main import _portfolio_snapshot_once
+    from bot.storage.sqlite import PortfolioSnapshot as _PS
 
     payload = {
         "market_positions": [
@@ -6919,14 +6927,24 @@ async def test_aggregator_raises_key_error_on_null_realized_pnl(_rsa_pem: Path) 
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=payload)
+        if request.url.path.endswith("/portfolio/balance"):
+            return httpx.Response(200, json=_balance_json())
+        if request.url.path.endswith("/portfolio/positions"):
+            return httpx.Response(200, json=payload)
+        return httpx.Response(404)
 
     client = await _demo_client(_rsa_pem, handler)
+    app = _make_snapshot_demo_app(_rsa_pem, client)
     try:
         with pytest.raises(KeyError):
             await aggregate_positions(client)
+        with pytest.raises(KeyError):
+            await _portfolio_snapshot_once(app)
     finally:
         await client.aclose()
+
+    with app.session_factory() as session:
+        assert session.scalars(select(_PS)).all() == []
 
 
 def _seed_demo_order_row(
@@ -7102,6 +7120,8 @@ async def test_snapshot_loop_skips_ticks_until_auth_present(_rsa_pem: Path) -> N
 
 
 async def test_per_ticker_update_binds_decimal_without_coercion(_rsa_pem: Path) -> None:
+    from sqlalchemy import event as _sa_event
+
     from bot.main import _portfolio_snapshot_once
     from bot.storage.sqlite import DemoOrder as _DemoOrderRow
 
@@ -7137,9 +7157,16 @@ async def test_per_ticker_update_binds_decimal_without_coercion(_rsa_pem: Path) 
             placed_at=snapshot_at - timedelta(minutes=5),
         )
 
+    captured: list[tuple[str, object]] = []
+
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        captured.append((statement, parameters))
+
+    _sa_event.listen(app.engine, "before_cursor_execute", _capture)
     try:
         await _portfolio_snapshot_once(app)
     finally:
+        _sa_event.remove(app.engine, "before_cursor_execute", _capture)
         await client.aclose()
 
     with app.session_factory() as session:
@@ -7148,6 +7175,17 @@ async def test_per_ticker_update_binds_decimal_without_coercion(_rsa_pem: Path) 
         ).one()
     assert row.realized_pnl_dollars == Decimal("1.530000")
     assert isinstance(row.realized_pnl_dollars, Decimal)
+
+    pnl_updates = [
+        (stmt, params)
+        for stmt, params in captured
+        if "UPDATE demo_orders" in stmt and "realized_pnl_dollars" in stmt
+    ]
+    assert len(pnl_updates) >= 1, f"no per-ticker UPDATE captured; saw {[s for s, _ in captured]!r}"
+    for stmt, _ in pnl_updates:
+        assert "realized_pnl_dollars = ?" in stmt or "realized_pnl_dollars = :pnl" in stmt
+        assert "1.53" not in stmt
+        assert "1.530000" not in stmt
 
 
 async def test_predicate_tiebreaker_on_id_is_stable(_rsa_pem: Path) -> None:

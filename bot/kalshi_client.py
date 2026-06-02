@@ -59,7 +59,9 @@ class BalancePayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     balance: int
-    balance_breakdown: list[BalanceBreakdownEntry]
+    # absent on accounts with no trade activity (demo wire omits the breakdown
+    # block until the first fill lands).
+    balance_breakdown: list[BalanceBreakdownEntry] | None = None
     balance_dollars: Decimal
     portfolio_value: int
     updated_ts: int

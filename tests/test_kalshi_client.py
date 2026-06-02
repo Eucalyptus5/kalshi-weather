@@ -946,11 +946,14 @@ def test_balance_payload_drops_unknown_fields() -> None:
     assert payload.balance == 78839
 
 
-def test_balance_payload_tolerates_missing_optional_breakdown_entry_field() -> None:
+def test_balance_payload_tolerates_missing_optional_balance_breakdown() -> None:
     captured = json.loads(_BALANCE_FIXTURE_PATH.read_text())
-    del captured["balance_breakdown"][0]["exchange_index"]
-    with pytest.raises(Exception):
-        BalancePayload.model_validate(captured)
+    modified = dict(captured)
+    del modified["balance_breakdown"]
+    payload = BalancePayload.model_validate(modified)
+    assert payload.balance_breakdown is None
+    assert payload.balance == 78839
+    assert payload.balance_dollars == Decimal("788.3901")
 
 
 async def test_get_balance_full_round_trips_captured_payload(rsa_pem: Path) -> None:
