@@ -59,6 +59,7 @@ from bot.forecast.open_meteo import OpenMeteoClient, StationForecast
 from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook
 from bot.markets.observation_window import observation_window
 from bot.markets.parser import ParsedTicker, parse_ticker
+from bot.observability.loop_runner import LoopSkipped, _sleep_or_stop, run_loop
 from bot.risk.gates import CAP_GATE_NAMES, GateContext, GateMode, evaluate as evaluate_gates
 from bot.storage.positions import open_exposures
 from bot.storage.sqlite import (
@@ -142,6 +143,7 @@ FORECAST_RETRY_INTERVAL_SECONDS: float = 60.0
 CALIBRATION_REFIT_JITTER_SECONDS: int = 300
 CALIBRATION_REFIT_TARGET_HOUR_UTC: int = 4
 CALIBRATION_REFIT_TOTAL_BUCKETS: int = 24
+CALIBRATION_INTERVAL_SECONDS: float = 24 * 3600
 
 
 @dataclass(frozen=True, slots=True)
@@ -1038,28 +1040,27 @@ def _next_gfs_cycle(now: datetime) -> datetime:
 
 
 async def _market_loop(app: App, stop: asyncio.Event) -> None:
-    while not stop.is_set():
-        try:
-            await refresh_markets(app)
-        except Exception:
-            logger.exception("loop_iteration_failed name=market_loop")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=MARKET_REFRESH_INTERVAL)
-        except asyncio.TimeoutError:
-            pass
+    async def body() -> None:
+        await refresh_markets(app)
+
+    await run_loop(
+        name="market_loop",
+        body=body,
+        interval_seconds=MARKET_REFRESH_INTERVAL,
+        stop=stop,
+    )
 
 
 async def _eval_loop(app: App, stop: asyncio.Event) -> None:
-    while not stop.is_set():
-        try:
-            now = datetime.now(tz=_timezone.utc)
-            await evaluate_strategies(app, now)
-        except Exception:
-            logger.exception("loop_iteration_failed name=eval_loop")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=EVAL_INTERVAL)
-        except asyncio.TimeoutError:
-            pass
+    async def body() -> None:
+        await evaluate_strategies(app, datetime.now(tz=_timezone.utc))
+
+    await run_loop(
+        name="eval_loop",
+        body=body,
+        interval_seconds=EVAL_INTERVAL,
+        stop=stop,
+    )
 
 
 _WATERMARK_OVERLAP_SECONDS: int = 60
@@ -1096,16 +1097,19 @@ async def _order_reconcile_loop(app: App, stop: asyncio.Event) -> None:
         if persisted is not None
         else datetime.now(tz=_timezone.utc) - _COLD_START_FALLBACK
     )
-    while not stop.is_set():
-        if app.settings.mode == "demo":
-            try:
-                watermark = await _reconcile_once(app, watermark)
-            except Exception:
-                logger.exception("loop_iteration_failed name=order_reconcile_loop")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=RECONCILE_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
+
+    async def body() -> None:
+        nonlocal watermark
+        if app.settings.mode != "demo":
+            raise LoopSkipped
+        watermark = await _reconcile_once(app, watermark)
+
+    await run_loop(
+        name="order_reconcile_loop",
+        body=body,
+        interval_seconds=RECONCILE_INTERVAL_SECONDS,
+        stop=stop,
+    )
 
 
 async def _portfolio_snapshot_once(app: App) -> None:
@@ -1147,15 +1151,17 @@ async def _portfolio_snapshot_once(app: App) -> None:
 
 
 async def _portfolio_snapshot_loop(app: App, stop: asyncio.Event) -> None:
-    while not stop.is_set():
-        try:
-            await _portfolio_snapshot_once(app)
-        except Exception:
-            logger.exception("loop_iteration_failed name=portfolio_snapshot_loop")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=PORTFOLIO_SNAPSHOT_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
+    async def body() -> None:
+        if app.kalshi._auth is None:
+            raise LoopSkipped
+        await _portfolio_snapshot_once(app)
+
+    await run_loop(
+        name="portfolio_snapshot_loop",
+        body=body,
+        interval_seconds=PORTFOLIO_SNAPSHOT_INTERVAL_SECONDS,
+        stop=stop,
+    )
 
 
 async def reconcile_settled_trades(app: App, now: datetime) -> int:
@@ -1270,17 +1276,18 @@ async def reconcile_settled_trades(app: App, now: datetime) -> int:
 
 
 async def _settlement_loop(app: App, stop: asyncio.Event) -> None:
-    while not stop.is_set():
-        try:
-            now = datetime.now(tz=_timezone.utc)
-            async with app.reconcile_lock:
-                await reconcile_settled_trades(app, now)
-        except Exception:
-            logger.exception("loop_iteration_failed name=settlement_loop")
-        try:
-            await asyncio.wait_for(stop.wait(), timeout=SETTLEMENT_INTERVAL_SECONDS)
-        except asyncio.TimeoutError:
-            pass
+    async def body() -> None:
+        now = datetime.now(tz=_timezone.utc)
+        async with app.reconcile_lock:
+            await reconcile_settled_trades(app, now)
+
+    await run_loop(
+        name="settlement_loop",
+        body=body,
+        interval_seconds=SETTLEMENT_INTERVAL_SECONDS,
+        stop=stop,
+        failure_delay=lambda: SETTLEMENT_INTERVAL_SECONDS,
+    )
 
 
 async def _on_demand_reconcile(app: App) -> None:
@@ -1303,85 +1310,80 @@ def _seconds_until_next_refit(now: datetime) -> float:
 
 
 async def _calibration_refit_loop(app: App, stop: asyncio.Event) -> None:
-    while not stop.is_set():
-        try:
-            await asyncio.wait_for(
-                stop.wait(), timeout=_seconds_until_next_refit(datetime.now(tz=_timezone.utc))
-            )
-        except asyncio.TimeoutError:
-            pass
+    async def body() -> None:
+        await _sleep_or_stop(stop, _seconds_until_next_refit(datetime.now(tz=_timezone.utc)))
         if stop.is_set():
-            return
-        try:
-            async with app.db_lock:
-                with app.session_factory() as session:
-                    new_maps = refit_all(session, prev_maps=app.calibration_maps)
-            app.calibration_maps = new_maps
-            n_fit = len(new_maps.maps)
-            n_skipped = CALIBRATION_REFIT_TOTAL_BUCKETS - n_fit
-            tails_keys = [k for k in new_maps.maps if k[0] == "tails"]
-            edge_keys = [k for k in new_maps.maps if k[0] == "edge"]
-            tails_bs_new = (
-                sum(new_maps.holdout_bs_new[k] for k in tails_keys) / Decimal(len(tails_keys))
-                if tails_keys
-                else Decimal("0")
-            )
-            tails_bs_prev = (
-                sum(new_maps.holdout_bs_prev[k] for k in tails_keys) / Decimal(len(tails_keys))
-                if tails_keys
-                else Decimal("0")
-            )
-            edge_bs_new = (
-                sum(new_maps.holdout_bs_new[k] for k in edge_keys) / Decimal(len(edge_keys))
-                if edge_keys
-                else Decimal("0")
-            )
-            edge_bs_prev = (
-                sum(new_maps.holdout_bs_prev[k] for k in edge_keys) / Decimal(len(edge_keys))
-                if edge_keys
-                else Decimal("0")
-            )
-            tails_bss_aggregate = new_maps.bss_aggregate_per_stratum.get("tails", BSS_AGGREGATE_NA)
-            edge_bss_aggregate = new_maps.bss_aggregate_per_stratum.get("edge", BSS_AGGREGATE_NA)
-            logger.info(
-                "calibration_refit_complete n_buckets_fit=%d n_buckets_skipped=%d "
-                "tails_bss_aggregate=%s edge_bss_aggregate=%s "
-                "tails_holdout_bs_new=%s tails_holdout_bs_prev=%s "
-                "edge_holdout_bs_new=%s edge_holdout_bs_prev=%s",
-                n_fit,
-                n_skipped,
-                tails_bss_aggregate,
-                edge_bss_aggregate,
-                tails_bs_new,
-                tails_bs_prev,
-                edge_bs_new,
-                edge_bs_prev,
-            )
-        except Exception:
-            logger.exception("loop_iteration_failed name=calibration_loop")
+            raise LoopSkipped
+        async with app.db_lock:
+            with app.session_factory() as session:
+                new_maps = refit_all(session, prev_maps=app.calibration_maps)
+        app.calibration_maps = new_maps
+        n_fit = len(new_maps.maps)
+        n_skipped = CALIBRATION_REFIT_TOTAL_BUCKETS - n_fit
+        tails_keys = [k for k in new_maps.maps if k[0] == "tails"]
+        edge_keys = [k for k in new_maps.maps if k[0] == "edge"]
+        tails_bs_new = (
+            sum(new_maps.holdout_bs_new[k] for k in tails_keys) / Decimal(len(tails_keys))
+            if tails_keys
+            else Decimal("0")
+        )
+        tails_bs_prev = (
+            sum(new_maps.holdout_bs_prev[k] for k in tails_keys) / Decimal(len(tails_keys))
+            if tails_keys
+            else Decimal("0")
+        )
+        edge_bs_new = (
+            sum(new_maps.holdout_bs_new[k] for k in edge_keys) / Decimal(len(edge_keys))
+            if edge_keys
+            else Decimal("0")
+        )
+        edge_bs_prev = (
+            sum(new_maps.holdout_bs_prev[k] for k in edge_keys) / Decimal(len(edge_keys))
+            if edge_keys
+            else Decimal("0")
+        )
+        tails_bss_aggregate = new_maps.bss_aggregate_per_stratum.get("tails", BSS_AGGREGATE_NA)
+        edge_bss_aggregate = new_maps.bss_aggregate_per_stratum.get("edge", BSS_AGGREGATE_NA)
+        logger.info(
+            "calibration_refit_complete n_buckets_fit=%d n_buckets_skipped=%d "
+            "tails_bss_aggregate=%s edge_bss_aggregate=%s "
+            "tails_holdout_bs_new=%s tails_holdout_bs_prev=%s "
+            "edge_holdout_bs_new=%s edge_holdout_bs_prev=%s",
+            n_fit,
+            n_skipped,
+            tails_bss_aggregate,
+            edge_bss_aggregate,
+            tails_bs_new,
+            tails_bs_prev,
+            edge_bs_new,
+            edge_bs_prev,
+        )
+
+    await run_loop(
+        name="calibration_loop",
+        body=body,
+        interval_seconds=CALIBRATION_INTERVAL_SECONDS,
+        stop=stop,
+        next_delay=lambda _: 0.0,
+    )
 
 
 async def _forecast_loop(app: App, stop: asyncio.Event) -> None:
-    last_succeeded = False
-    while not stop.is_set():
-        try:
-            await refresh_forecasts(app)
-            last_succeeded = True
-        except Exception:
-            last_succeeded = False
-            logger.exception("loop_iteration_failed name=forecast_loop")
-        if stop.is_set():
-            return
-        if last_succeeded:
-            next_cycle = _next_gfs_cycle(datetime.now(tz=_timezone.utc))
-            delay = (next_cycle - datetime.now(tz=_timezone.utc)).total_seconds()
-        else:
-            delay = FORECAST_RETRY_INTERVAL_SECONDS
-        if delay > 0:
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=delay)
-            except asyncio.TimeoutError:
-                pass
+    async def body() -> None:
+        await refresh_forecasts(app)
+
+    def _next_success_delay(_succeeded: bool) -> float:
+        next_cycle = _next_gfs_cycle(datetime.now(tz=_timezone.utc))
+        return (next_cycle - datetime.now(tz=_timezone.utc)).total_seconds()
+
+    await run_loop(
+        name="forecast_loop",
+        body=body,
+        interval_seconds=FORECAST_RETRY_INTERVAL_SECONDS,
+        stop=stop,
+        next_delay=_next_success_delay,
+        failure_delay=lambda: FORECAST_RETRY_INTERVAL_SECONDS,
+    )
 
 
 async def run(app: App, duration: timedelta) -> None:

@@ -7293,3 +7293,87 @@ async def test_expire_all_makes_same_session_read_see_updated_pnl(_rsa_pem: Path
         assert stale.realized_pnl_dollars is None
 
     await client.aclose()
+
+
+def _body_calls_run_loop(func_def: ast.AsyncFunctionDef, expected_log_name: str) -> bool:
+    for stmt in func_def.body:
+        if not isinstance(stmt, ast.Expr):
+            continue
+        await_node = stmt.value
+        if not isinstance(await_node, ast.Await):
+            continue
+        call = await_node.value
+        if not isinstance(call, ast.Call):
+            continue
+        if not (isinstance(call.func, ast.Name) and call.func.id == "run_loop"):
+            continue
+        for kw in call.keywords:
+            if kw.arg != "name":
+                continue
+            if isinstance(kw.value, ast.Constant) and kw.value.value == expected_log_name:
+                return True
+    return False
+
+
+def _find_async_func(tree: ast.Module, name: str) -> ast.AsyncFunctionDef:
+    for node in tree.body:
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"async def {name} not found")
+
+
+def test_every_loop_calls_run_loop_at_top_level() -> None:
+    from bot.observability.loop_runner import _LOOP_PAIRS
+
+    src = Path(bot_main.__file__).read_text()
+    tree = ast.parse(src)
+    for func_name, expected_log_name in _LOOP_PAIRS:
+        func_def = _find_async_func(tree, func_name)
+        assert _body_calls_run_loop(func_def, expected_log_name), (
+            f"{func_name} must call run_loop(name={expected_log_name!r}) at top level"
+        )
+
+
+def test_guard_rejects_aliased_run_loop_import() -> None:
+    src = (
+        "from bot.observability.loop_runner import run_loop as _runner\n"
+        "async def _market_loop(app, stop):\n"
+        "    await _runner(name='market_loop', body=body, interval_seconds=60, stop=stop)\n"
+    )
+    tree = ast.parse(src)
+    func_def = _find_async_func(tree, "_market_loop")
+    assert not _body_calls_run_loop(func_def, "market_loop")
+
+
+def test_guard_rejects_name_via_module_constant() -> None:
+    src = (
+        "_NAME = 'market_loop'\n"
+        "async def _market_loop(app, stop):\n"
+        "    await run_loop(name=_NAME, body=body, interval_seconds=60, stop=stop)\n"
+    )
+    tree = ast.parse(src)
+    func_def = _find_async_func(tree, "_market_loop")
+    assert not _body_calls_run_loop(func_def, "market_loop")
+
+
+def test_guard_rejects_run_loop_nested_in_inner_body() -> None:
+    src = (
+        "async def _market_loop(app, stop):\n"
+        "    async def body():\n"
+        "        await run_loop(name='market_loop', body=body, interval_seconds=60, stop=stop)\n"
+        "    await body()\n"
+    )
+    tree = ast.parse(src)
+    func_def = _find_async_func(tree, "_market_loop")
+    assert not _body_calls_run_loop(func_def, "market_loop")
+
+
+def test_guard_rejects_run_loop_as_attribute() -> None:
+    src = (
+        "import bot.observability.loop_runner as runner\n"
+        "async def _market_loop(app, stop):\n"
+        "    await runner.run_loop(name='market_loop', body=body, interval_seconds=60, stop=stop)\n"
+    )
+    tree = ast.parse(src)
+    func_def = _find_async_func(tree, "_market_loop")
+    assert not _body_calls_run_loop(func_def, "market_loop")
