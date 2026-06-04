@@ -1,0 +1,12 @@
+1:0:d=2024112000:PRES:surface:24 hour fcst:ENS=+1
+2:412345:d=2024112000:TMAX:2 m above ground:18-24 hour max fcst:ENS=+1
+3:1234567:d=2024112000:TMIN:2 m above ground:18-24 hour min fcst:ENS=+1
+4:2345678:d=2024112000:UGRD:10 m above ground:24 hour fcst:ENS=+1
+5:2987654:d=2024112000:VGRD:10 m above ground:24 hour fcst:ENS=+1
+6:3000000:d=2024112000:CAPE:surface:24 hour fcst:ENS=+1
+7:3500000:d=2024112000:CIN:surface:180-0 mb above ground:24 hour fcst:ENS=+1
+8:3700000:d=2024112000:HGT:cloud ceiling:24 hour fcst:ENS=+1
+9:3900000:d=2024112000:WEASD:surface:24 hour fcst:ENS=+1
+10:4066078:d=2024112000:TMP:2 m above ground:24 hour fcst:ENS=+1
+11:4820323:d=2024112000:DPT:2 m above ground:24 hour fcst:ENS=+1
+12:5500000:d=2024112000:RH:2 m above ground:24 hour fcst:ENS=+1

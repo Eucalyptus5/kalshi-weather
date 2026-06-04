@@ -5,6 +5,7 @@ description = "Paper trading bot for Kalshi weather markets."
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.18.4",
+    "cfgrib>=0.9.15",
     "httpx>=0.28.1",
     "kalshi-python-async==3.2.0",
     "numpy>=2.4.4",
