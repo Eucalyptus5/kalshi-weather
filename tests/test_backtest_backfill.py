@@ -65,9 +65,7 @@ async def test_fetch_settled_sends_settled_status_and_window_params() -> None:
     handler, seen = _scripted_handler([_PAGE2_EMPTY.read_text()])
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        await fetch_settled(
-            "KXHIGHDEN", min_ts=1700000000, max_ts=1800000000, client=client
-        )
+        await fetch_settled("KXHIGHDEN", min_ts=1700000000, max_ts=1800000000, client=client)
 
     params = seen[0].url.params
     assert params["status"] == "settled"
@@ -75,6 +73,4 @@ async def test_fetch_settled_sends_settled_status_and_window_params() -> None:
     assert params["min_close_ts"] == "1700000000"
     assert params["max_close_ts"] == "1800000000"
     assert params["limit"] == "200"
-    assert str(seen[0].url).startswith(
-        "https://api.elections.kalshi.com/trade-api/v2/markets"
-    )
+    assert str(seen[0].url).startswith("https://api.elections.kalshi.com/trade-api/v2/markets")

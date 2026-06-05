@@ -15,5 +15,4 @@ def test_pyarrow_parquet_roundtrip(tmp_path: Path) -> None:
 
     read = pq.read_table(path)
 
-    assert read.num_rows == 3
-    assert read.column_names == table.column_names
+    assert read.equals(table)
