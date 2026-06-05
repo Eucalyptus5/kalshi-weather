@@ -10,7 +10,6 @@ import pytz
 from pydantic import BaseModel, ConfigDict
 
 from bot.backtest import gefs_grib
-from bot.backtest.daily_high import daily_high_members
 from bot.forecast.cdf import EnsembleCDF
 
 logger = logging.getLogger(__name__)
@@ -77,22 +76,27 @@ class GefsGribForecastReplay:
             candidate = candidate - timedelta(hours=6)
         return candidate
 
-    def _fxx_list_for(self, init_time: datetime, valid_date: date, station_tz: str) -> list[int]:
+    def _window_hours(
+        self, init_time: datetime, valid_date: date, station_tz: str
+    ) -> tuple[int, int]:
         tz = pytz.timezone(station_tz)
         local_start = tz.localize(datetime.combine(valid_date, time(0, 0)))
         local_end = tz.localize(datetime.combine(valid_date + timedelta(days=1), time(0, 0)))
-        utc_start = local_start.astimezone(timezone.utc)
-        utc_end = local_end.astimezone(timezone.utc)
-
-        delta_start_h = (utc_start - init_time).total_seconds() / 3600.0
-        delta_end_h = (utc_end - init_time).total_seconds() / 3600.0
-        fxx_start = max(0, int(delta_start_h))
-        fxx_end = int(delta_end_h) + 1
-        if fxx_end <= fxx_start:
+        start_h = int((local_start.astimezone(timezone.utc) - init_time).total_seconds() // 3600)
+        end_h = int((local_end.astimezone(timezone.utc) - init_time).total_seconds() // 3600)
+        if end_h <= 0:
             raise ValueError(
                 f"valid_date {valid_date} ({station_tz}) is before init {init_time.isoformat()}"
             )
-        return list(range(fxx_start, fxx_end))
+        return start_h, end_h
+
+    def _tmp_fxx(self, start_h: int, end_h: int) -> list[int]:
+        first = max(0, -(-start_h // 3) * 3)
+        return list(range(first, end_h, 3))
+
+    def _tmax_fxx(self, start_h: int, end_h: int) -> list[int]:
+        first = max(6, -(-start_h // 6) * 6 + 6)
+        return list(range(first, end_h + 1, 6))
 
     async def _build_member_highs(
         self,
@@ -100,13 +104,16 @@ class GefsGribForecastReplay:
         init_time: datetime,
         valid_date: date,
     ) -> np.ndarray:
-        fxx_list = self._fxx_list_for(init_time, valid_date, station.timezone)
-        times = [init_time + timedelta(hours=f) for f in fxx_list]
+        start_h, end_h = self._window_hours(init_time, valid_date, station.timezone)
+        # TMAX windows are UTC-aligned, so they cannot tile a local civil day; the in-window
+        # 3-hourly TMP point samples cover the boundary hours the contained windows miss
+        tmp_fxx = self._tmp_fxx(start_h, end_h)
+        tmax_fxx = self._tmax_fxx(start_h, end_h)
 
-        rows: list[list[float]] = []
+        highs: list[float] = []
         for member in GEFS_MEMBERS:
-            series: list[float] = []
-            for fxx in fxx_list:
+            samples: list[float] = []
+            for fxx in tmp_fxx:
                 grib_bytes = await gefs_grib.fetch_member_field(
                     init_time.date(),
                     cycle=init_time.hour,
@@ -114,16 +121,30 @@ class GefsGribForecastReplay:
                     fxx=fxx,
                     client=self._client,
                 )
-                series.append(
+                samples.append(
                     gefs_grib.decode_point(
                         grib_bytes,
                         latitude=station.latitude,
                         longitude=station.longitude,
                     )
                 )
-            rows.append(series)
-        matrix = np.asarray(rows, dtype=np.float64)
-        return daily_high_members(times, matrix, station.timezone, valid_date)
+            for fxx in tmax_fxx:
+                grib_bytes = await gefs_grib.fetch_member_tmax(
+                    init_time.date(),
+                    cycle=init_time.hour,
+                    member=member,
+                    fxx=fxx,
+                    client=self._client,
+                )
+                samples.append(
+                    gefs_grib.decode_point(
+                        grib_bytes,
+                        latitude=station.latitude,
+                        longitude=station.longitude,
+                    )
+                )
+            highs.append(max(samples))
+        return np.asarray(highs, dtype=np.float64)
 
     def _cache_path(self, station: StationSpec, init_time: datetime, valid_date: date) -> Path:
         stamp = init_time.strftime("%Y%m%dT%HZ")

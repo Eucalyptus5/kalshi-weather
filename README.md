@@ -11,6 +11,8 @@ cp .env.example .env
 
 Edit `.env` to point at your demo Kalshi key and PEM file before running anything under `scripts/` or `bot/`.
 
+GRIB decoding (the GEFS backtest replay) needs the eccodes C library, which is a system package: `conda install -c conda-forge eccodes`, `apt install libeccodes-dev`, or `brew install eccodes`. The Python bindings come in with `uv sync`; tests that decode GRIB skip when the library is missing.
+
 ## Demo credentials
 
 The smoke script and bot both run against `demo-api.kalshi.co`. To get keys:

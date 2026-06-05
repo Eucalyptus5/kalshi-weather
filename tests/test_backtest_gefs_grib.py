@@ -1,3 +1,4 @@
+import importlib
 import math
 from datetime import date
 from pathlib import Path
@@ -9,11 +10,21 @@ from bot.backtest.gefs_grib import (
     build_grib_url,
     decode_point,
     fetch_member_field,
+    fetch_member_tmax,
+    tmax2m_byte_range,
     tmp2m_byte_range,
 )
 
 _IDX_FIXTURE = Path(__file__).parent / "data" / "gefs_gep01_f024.idx"
 _GRIB_FIXTURE = Path(__file__).parent / "data" / "gefs_tmp2m_msg.grib2"
+
+
+def _eccodes_available() -> bool:
+    try:
+        importlib.import_module("cfgrib")
+    except RuntimeError:
+        return False
+    return True
 
 
 def test_tmp2m_byte_range_returns_record_to_next_record_offsets() -> None:
@@ -37,6 +48,31 @@ def test_tmp2m_byte_range_raises_when_record_missing() -> None:
 
     with pytest.raises(ValueError):
         tmp2m_byte_range(idx_text, fxx=24)
+
+
+def test_tmax2m_byte_range_returns_record_to_next_record_offsets() -> None:
+    idx_text = _IDX_FIXTURE.read_text()
+
+    start, end = tmax2m_byte_range(idx_text, fxx=24)
+
+    assert start == 412345
+    assert end == 1234566
+
+
+def test_tmax2m_byte_range_uses_six_hour_reset_window_marker() -> None:
+    idx_text = (
+        "1:0:d=2024112000:TMAX:2 m above ground:18-21 hour max fcst:ENS=+1\n"
+        "2:700000:d=2024112000:TMIN:2 m above ground:18-21 hour min fcst:ENS=+1\n"
+    )
+
+    assert tmax2m_byte_range(idx_text, fxx=21) == (0, 699999)
+
+
+def test_tmax2m_byte_range_raises_when_window_mismatch() -> None:
+    idx_text = _IDX_FIXTURE.read_text()
+
+    with pytest.raises(ValueError):
+        tmax2m_byte_range(idx_text, fxx=30)
 
 
 def test_build_grib_url_matches_noaa_layout() -> None:
@@ -71,16 +107,33 @@ async def test_fetch_member_field_issues_range_header_for_tmp_record() -> None:
     assert seen[1].headers["Range"] == "bytes=4066078-4820322"
 
 
-@pytest.mark.skipif(
-    not _GRIB_FIXTURE.exists(),
-    reason="recorded GRIB2 fixture not bundled; populate tests/data/gefs_tmp2m_msg.grib2",
-)
+async def test_fetch_member_tmax_issues_range_header_for_tmax_record() -> None:
+    idx_body = _IDX_FIXTURE.read_text().encode()
+    grib_body = b"\x00" * 822222
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if str(request.url).endswith(".idx"):
+            return httpx.Response(200, content=idx_body)
+        return httpx.Response(206, content=grib_body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        out = await fetch_member_tmax(
+            date(2024, 11, 20), cycle=0, member="gep01", fxx=24, client=client
+        )
+
+    assert out == grib_body
+    assert len(seen) == 2
+    assert seen[1].headers["Range"] == "bytes=412345-1234566"
+
+
+@pytest.mark.skipif(not _eccodes_available(), reason="eccodes library not installed")
 def test_decode_point_returns_finite_float_for_recorded_grib2() -> None:
-    cfgrib = pytest.importorskip("cfgrib")
-    assert cfgrib is not None
     grib_bytes = _GRIB_FIXTURE.read_bytes()
 
     value = decode_point(grib_bytes, latitude=39.86, longitude=-104.67)
 
     assert isinstance(value, float)
     assert math.isfinite(value)
+    assert 180.0 < value < 330.0
