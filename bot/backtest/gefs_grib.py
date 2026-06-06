@@ -81,6 +81,10 @@ async def fetch_member_tmax(
     return grib_response.content
 
 
+def kelvin_to_fahrenheit(kelvin: float) -> float:
+    return (kelvin - 273.15) * 9.0 / 5.0 + 32.0
+
+
 def decode_point(grib_bytes: bytes, latitude: float, longitude: float) -> float:
     import cfgrib
 
@@ -96,6 +100,6 @@ def decode_point(grib_bytes: bytes, latitude: float, longitude: float) -> float:
         lons = np.asarray(ds.variables["longitude"].data)
         lat_i = int(np.abs(lats - latitude).argmin())
         lon_i = int(np.abs(lons - (longitude % 360.0)).argmin())
-        return float(field.data[lat_i, lon_i])
+        return kelvin_to_fahrenheit(float(field.data[lat_i, lon_i]))
     finally:
         tmp_path.unlink(missing_ok=True)

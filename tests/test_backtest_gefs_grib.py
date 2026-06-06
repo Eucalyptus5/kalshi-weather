@@ -11,6 +11,7 @@ from bot.backtest.gefs_grib import (
     decode_point,
     fetch_member_field,
     fetch_member_tmax,
+    kelvin_to_fahrenheit,
     tmax2m_byte_range,
     tmp2m_byte_range,
 )
@@ -128,12 +129,25 @@ async def test_fetch_member_tmax_issues_range_header_for_tmax_record() -> None:
     assert seen[1].headers["Range"] == "bytes=412345-1234566"
 
 
+@pytest.mark.parametrize(
+    ("kelvin", "fahrenheit"),
+    [
+        (273.15, 32.0),
+        (276.96, 38.858),
+        (310.15, 98.6),
+        (233.15, -40.0),
+    ],
+)
+def test_kelvin_to_fahrenheit_golden_values(kelvin: float, fahrenheit: float) -> None:
+    assert kelvin_to_fahrenheit(kelvin) == pytest.approx(fahrenheit, abs=1e-9)
+
+
 @pytest.mark.skipif(not _eccodes_available(), reason="eccodes library not installed")
-def test_decode_point_returns_finite_float_for_recorded_grib2() -> None:
+def test_decode_point_returns_fahrenheit_for_recorded_grib2() -> None:
     grib_bytes = _GRIB_FIXTURE.read_bytes()
 
     value = decode_point(grib_bytes, latitude=39.86, longitude=-104.67)
 
     assert isinstance(value, float)
     assert math.isfinite(value)
-    assert 180.0 < value < 330.0
+    assert value == pytest.approx(38.861, abs=0.01)
