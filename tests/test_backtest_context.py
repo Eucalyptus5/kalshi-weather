@@ -3,6 +3,7 @@ from decimal import Decimal
 
 import numpy as np
 import pytest
+from scipy.stats import norm
 
 from bot.backtest.context import BacktestBudgets, build_edge_context, build_tails_context
 from bot.backtest.normalize import CanonicalSnapshot
@@ -20,40 +21,35 @@ _BUDGETS = BacktestBudgets(
     market_budget_remaining=Decimal("300"),
 )
 _SPREAD = Decimal("2.5")
+_FAIR_QUANTUM = Decimal("0.000001")
 
 
-def make_canonical_snapshot(
-    ticker: str,
-    *,
-    yes_ask: Decimal,
-    yes_bid: Decimal,
-    no_bid: Decimal,
-    no_ask: Decimal | None = None,
-) -> CanonicalSnapshot:
-    return CanonicalSnapshot(
-        ticker=ticker,
-        event_ticker=ticker.rsplit("-", 1)[0],
-        series_ticker=ticker.split("-", 1)[0],
-        status="active",
-        result="",
-        yes_ask=yes_ask,
-        yes_bid=yes_bid,
-        no_ask=no_ask if no_ask is not None else Decimal("1") - yes_bid,
-        no_bid=no_bid,
-        last_price=yes_bid,
-        volume=Decimal(0),
-        volume_24h=Decimal(0),
-        open_interest=Decimal(0),
-        close_time=_CLOSE_TIME,
-    )
+def make_canonical_snapshot(**overrides: object) -> CanonicalSnapshot:
+    ticker = str(overrides.get("ticker", "KXHIGHDEN-26JAN15-T75"))
+    yes_bid = overrides.get("yes_bid", Decimal("0.12"))
+    fields: dict[str, object] = {
+        "ticker": ticker,
+        "event_ticker": ticker.rsplit("-", 1)[0],
+        "series_ticker": ticker.split("-", 1)[0],
+        "status": "active",
+        "result": "",
+        "yes_ask": Decimal("0.15"),
+        "yes_bid": yes_bid,
+        "no_ask": Decimal("1") - yes_bid,
+        "no_bid": Decimal("0.85"),
+        "last_price": yes_bid,
+        "volume": Decimal(0),
+        "volume_24h": Decimal(0),
+        "open_interest": Decimal(0),
+        "close_time": _CLOSE_TIME,
+    }
+    fields.update(overrides)
+    return CanonicalSnapshot(**fields)
 
 
-def make_above_cdf(target_above: float) -> EnsembleCDF:
-    if target_above < 0.05:
-        members = np.array([72.5, 73.0, 73.5])
-    else:
-        members = np.array([73.5, 73.7, 73.8])
-    return EnsembleCDF.from_members(members, smoothing=1.0)
+def make_fixed_cdf(fair: Decimal) -> EnsembleCDF:
+    member = 75.0 + float(norm.ppf(float(fair)))
+    return EnsembleCDF.from_members(np.array([member]), smoothing=1.0)
 
 
 def make_bracket_cdf_centered_on(center: float, smoothing: float = 0.65) -> EnsembleCDF:
@@ -62,12 +58,12 @@ def make_bracket_cdf_centered_on(center: float, smoothing: float = 0.65) -> Ense
 
 def test_build_tails_context_drives_sell_yes() -> None:
     snap = make_canonical_snapshot(
-        "KXHIGHDEN-26JAN15-T75",
+        ticker="KXHIGHDEN-26JAN15-T75",
         yes_ask=Decimal("0.15"),
         yes_bid=Decimal("0.12"),
         no_bid=Decimal("0.85"),
     )
-    cdf = make_above_cdf(target_above=0.04)
+    cdf = make_fixed_cdf(Decimal("0.04"))
 
     ctx = build_tails_context(
         snap,
@@ -83,7 +79,7 @@ def test_build_tails_context_drives_sell_yes() -> None:
     assert ctx.yes_ask == Decimal("0.15")
     assert ctx.yes_bid == Decimal("0.12")
     assert ctx.no_bid == Decimal("0.85")
-    assert ctx.fair_yes < Decimal("0.07")
+    assert ctx.fair_yes.quantize(_FAIR_QUANTUM) == Decimal("0.04")
     assert ctx.close_time == _CLOSE_TIME
     assert ctx.now == _AS_OF
     assert ctx.is_same_day is False
@@ -99,12 +95,12 @@ def test_build_tails_context_drives_sell_yes() -> None:
 
 def test_build_tails_context_high_fair_skips() -> None:
     snap = make_canonical_snapshot(
-        "KXHIGHDEN-26JAN15-T75",
+        ticker="KXHIGHDEN-26JAN15-T75",
         yes_ask=Decimal("0.15"),
         yes_bid=Decimal("0.12"),
         no_bid=Decimal("0.85"),
     )
-    cdf = make_above_cdf(target_above=0.09)
+    cdf = make_fixed_cdf(Decimal("0.09"))
 
     ctx = build_tails_context(
         snap,
@@ -117,7 +113,7 @@ def test_build_tails_context_high_fair_skips() -> None:
         station_tz=_STATION_TZ,
     )
 
-    assert ctx.fair_yes >= Decimal("0.07")
+    assert ctx.fair_yes.quantize(_FAIR_QUANTUM) == Decimal("0.09")
     sig = tails_strategy.evaluate(ctx)
     assert sig.action is tails_strategy.TailsAction.SKIP
     assert sig.reason == "fair_too_high"
@@ -125,7 +121,7 @@ def test_build_tails_context_high_fair_skips() -> None:
 
 def test_build_edge_context_drives_buy_yes() -> None:
     snap = make_canonical_snapshot(
-        "KXHIGHDEN-26JAN15-B61.5",
+        ticker="KXHIGHDEN-26JAN15-B61.5",
         yes_ask=Decimal("0.40"),
         yes_bid=Decimal("0.38"),
         no_bid=Decimal("0.60"),
@@ -159,7 +155,7 @@ def test_build_edge_context_drives_buy_yes() -> None:
 
 def test_build_edge_context_sell_yes_direction_picks_sell_depth() -> None:
     snap = make_canonical_snapshot(
-        "KXHIGHDEN-26JAN15-B61.5",
+        ticker="KXHIGHDEN-26JAN15-B61.5",
         yes_ask=Decimal("0.60"),
         yes_bid=Decimal("0.58"),
         no_bid=Decimal("0.40"),
@@ -185,7 +181,7 @@ def test_build_edge_context_sell_yes_direction_picks_sell_depth() -> None:
 
 def test_build_edge_context_propagates_blacklist() -> None:
     snap = make_canonical_snapshot(
-        "KXHIGHLAX-26JAN15-B61.5",
+        ticker="KXHIGHLAX-26JAN15-B61.5",
         yes_ask=Decimal("0.40"),
         yes_bid=Decimal("0.38"),
         no_bid=Decimal("0.60"),
@@ -212,13 +208,8 @@ def test_build_edge_context_propagates_blacklist() -> None:
 
 
 def test_build_tails_context_sigma_t_median_keys_off_lead() -> None:
-    snap = make_canonical_snapshot(
-        "KXHIGHDEN-26JAN15-T75",
-        yes_ask=Decimal("0.15"),
-        yes_bid=Decimal("0.12"),
-        no_bid=Decimal("0.85"),
-    )
-    cdf = make_above_cdf(target_above=0.04)
+    snap = make_canonical_snapshot()
+    cdf = make_fixed_cdf(Decimal("0.04"))
 
     ctx_short = build_tails_context(
         snap,
@@ -232,7 +223,7 @@ def test_build_tails_context_sigma_t_median_keys_off_lead() -> None:
     )
     assert ctx_short.sigma_T_median == Decimal("1.60")
 
-    snap_far = CanonicalSnapshot(**{**snap.model_dump(), "close_time": _AS_OF.replace(day=21)})
+    snap_far = make_canonical_snapshot(close_time=_AS_OF.replace(day=21))
     ctx_far = build_tails_context(
         snap_far,
         cdf,
@@ -247,23 +238,8 @@ def test_build_tails_context_sigma_t_median_keys_off_lead() -> None:
 
 
 def test_build_tails_context_requires_close_time() -> None:
-    snap = CanonicalSnapshot(
-        ticker="KXHIGHDEN-26JAN15-T75",
-        event_ticker="KXHIGHDEN-26JAN15",
-        series_ticker="KXHIGHDEN",
-        status="active",
-        result="",
-        yes_ask=Decimal("0.15"),
-        yes_bid=Decimal("0.12"),
-        no_ask=Decimal("0.16"),
-        no_bid=Decimal("0.85"),
-        last_price=Decimal("0.13"),
-        volume=Decimal(0),
-        volume_24h=Decimal(0),
-        open_interest=Decimal(0),
-        close_time=None,
-    )
-    cdf = make_above_cdf(target_above=0.04)
+    snap = make_canonical_snapshot(close_time=None)
+    cdf = make_fixed_cdf(Decimal("0.04"))
 
     with pytest.raises(ValueError, match="close_time"):
         build_tails_context(
