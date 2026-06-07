@@ -22,7 +22,9 @@ def _fair_yes(parsed: ParsedTicker, cdf: EnsembleCDF) -> Decimal:
         lo = float(parsed.strikes[0])
         hi = float(parsed.strikes[1])
         return Decimal(str(cdf.prob_range(lo, hi)))
-    return Decimal(str(1.0 - cdf.cdf(float(parsed.strikes[0]))))
+    if parsed.kind == "above":
+        return Decimal(str(1.0 - cdf.cdf(float(parsed.strikes[0]))))
+    return Decimal(str(cdf.cdf(float(parsed.strikes[0]))))
 
 
 def _is_same_day(parsed: ParsedTicker, station_tz: str, now: datetime) -> bool:

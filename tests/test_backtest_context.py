@@ -1,13 +1,14 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 import numpy as np
 import pytest
 from scipy.stats import norm
 
-from bot.backtest.context import BacktestBudgets, build_edge_context, build_tails_context
+from bot.backtest.context import BacktestBudgets, _fair_yes, build_edge_context, build_tails_context
 from bot.backtest.normalize import CanonicalSnapshot
 from bot.forecast.cdf import EnsembleCDF
+from bot.markets.parser import ParsedTicker
 from bot.strategy import edge as edge_strategy
 from bot.strategy import tails as tails_strategy
 
@@ -117,6 +118,23 @@ def test_build_tails_context_high_fair_skips() -> None:
     sig = tails_strategy.evaluate(ctx)
     assert sig.action is tails_strategy.TailsAction.SKIP
     assert sig.reason == "fair_too_high"
+
+
+def test_fair_yes_below_kind_prices_cdf_not_complement() -> None:
+    parsed = ParsedTicker(
+        series="KXHIGHDEN",
+        event_date=date(2026, 1, 15),
+        is_monthly=False,
+        strikes=(Decimal("75"),),
+        kind="below",
+        raw="KXHIGHDEN-26JAN15-B75",
+    )
+    cdf = make_fixed_cdf(Decimal("0.04"))
+
+    fair = _fair_yes(parsed, cdf)
+
+    assert fair == Decimal(str(cdf.cdf(75.0)))
+    assert fair.quantize(_FAIR_QUANTUM) == Decimal("0.96")
 
 
 def test_build_edge_context_drives_buy_yes() -> None:
