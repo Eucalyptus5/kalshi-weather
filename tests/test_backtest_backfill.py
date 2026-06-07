@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 
@@ -15,7 +16,9 @@ _PAGE1 = _DATA / "kalshi_settled_page1.json"
 _PAGE2_EMPTY = _DATA / "kalshi_settled_page2_empty.json"
 
 
-def _scripted_handler(pages: list[str]) -> tuple[callable, list[httpx.Request]]:
+def _scripted_handler(
+    pages: list[str],
+) -> tuple[Callable[[httpx.Request], httpx.Response], list[httpx.Request]]:
     seen: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

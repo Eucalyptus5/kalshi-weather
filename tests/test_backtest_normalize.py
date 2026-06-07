@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from bot.backtest.normalize import from_kalshi_api, from_trevorjs
 
 
@@ -136,7 +139,6 @@ def test_trevorjs_lacks_floor_strike_and_observed_value() -> None:
 
 def test_canonical_snapshot_is_frozen() -> None:
     snap = from_trevorjs(_trevorjs_row())
-    import pytest
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         snap.yes_ask = Decimal("0.50")  # type: ignore[misc]

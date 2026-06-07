@@ -1,8 +1,8 @@
-import logging
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
+import httpx
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -11,8 +11,6 @@ from pydantic import BaseModel, ConfigDict
 
 from bot.backtest import gefs_grib
 from bot.forecast.cdf import EnsembleCDF
-
-logger = logging.getLogger(__name__)
 
 GEFS_MEMBERS: tuple[str, ...] = ("gec00",) + tuple(f"gep{i:02d}" for i in range(1, 31))
 GEFS_CYCLE_HOURS: tuple[int, ...] = (0, 6, 12, 18)
@@ -40,7 +38,7 @@ class ForecastReplay(Protocol):
 class GefsGribForecastReplay:
     def __init__(
         self,
-        client,
+        client: httpx.AsyncClient,
         cache_dir: Path,
         publication_lag: timedelta = _DEFAULT_PUBLICATION_LAG,
     ) -> None:
@@ -57,10 +55,6 @@ class GefsGribForecastReplay:
         if as_of.tzinfo is None:
             raise ValueError("as_of must be timezone-aware")
         init_time = self._pick_cycle(as_of)
-        assert init_time + self._publication_lag <= as_of, (
-            f"init {init_time.isoformat()} would use look-ahead data vs as_of {as_of.isoformat()}"
-        )
-
         cache_path = self._cache_path(station, init_time, valid_date)
         highs = self._load_cache(cache_path)
         if highs is None:

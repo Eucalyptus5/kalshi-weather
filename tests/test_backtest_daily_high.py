@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import pytz
 
 from bot.backtest.daily_high import MIN_HOURS_PER_DAY, daily_high_members
 from bot.forecast.open_meteo import _MEMBER_KEY, _daily_max_per_member
@@ -110,8 +111,6 @@ def test_spring_forward_window_is_23_hours() -> None:
     valid = date.fromisoformat(case["valid_date"])
     times, _ = _matrix_from_payload(case["payload"])
 
-    import pytz
-
     local_tz = pytz.timezone(tz)
     count = sum(1 for t in times if t.astimezone(local_tz).date() == valid)
     assert count == 23
@@ -123,8 +122,6 @@ def test_fall_back_window_is_25_hours() -> None:
     tz = case["tz"]
     valid = date.fromisoformat(case["valid_date"])
     times, _ = _matrix_from_payload(case["payload"])
-
-    import pytz
 
     local_tz = pytz.timezone(tz)
     count = sum(1 for t in times if t.astimezone(local_tz).date() == valid)

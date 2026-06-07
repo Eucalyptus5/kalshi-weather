@@ -1,12 +1,9 @@
-import logging
 import tempfile
 from datetime import date
 from pathlib import Path
 
 import httpx
 import numpy as np
-
-logger = logging.getLogger(__name__)
 
 _BUCKET = "https://noaa-gefs-pds.s3.amazonaws.com"
 _TMP_2M_MARKER = ":TMP:2 m above ground:"
