@@ -26,7 +26,7 @@ def lead_bucket_for(lead: timedelta) -> str:
     return ">72h"
 
 
-def _parse_dt(raw: str) -> datetime:
+def parse_dt(raw: str) -> datetime:
     if raw.endswith("Z"):
         raw = raw[:-1] + "+00:00"
     dt = datetime.fromisoformat(raw)
@@ -53,7 +53,7 @@ def load_depth_table(db_path: Path) -> dict[tuple[str, str], Decimal]:
             """
         )
         for series, close_raw, snapshot_raw, yes_depth, no_depth in cursor:
-            lead = _parse_dt(close_raw) - _parse_dt(snapshot_raw)
+            lead = parse_dt(close_raw) - parse_dt(snapshot_raw)
             if lead.total_seconds() < 0:
                 continue
             bucket = lead_bucket_for(lead)

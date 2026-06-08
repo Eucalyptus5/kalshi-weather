@@ -6,13 +6,17 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from datetime import timezone as _timezone
 from decimal import Decimal
 
 import numpy as np
 
-from bot.backtest.context import BacktestBudgets, build_edge_context, build_tails_context
-from bot.backtest.depth_table import ALL_SERIES, lead_bucket_for
+from bot.backtest.context import (
+    BacktestBudgets,
+    build_edge_context,
+    build_tails_context,
+    fair_yes_for,
+)
+from bot.backtest.depth_table import ALL_SERIES, lead_bucket_for, parse_dt
 from bot.backtest.forecast_replay import ForecastReplay, StationSpec, pick_cycle
 from bot.backtest.normalize import CanonicalSnapshot
 from bot.execution.gate_cost_basis import paper_collateral_per_contract
@@ -32,7 +36,7 @@ from bot.main import (
     STATIONS,
     STRATEGY_BLACKLIST,
 )
-from bot.markets.parser import ParsedTicker, event_id, parse_ticker
+from bot.markets.parser import event_id, parse_ticker
 from bot.risk.gates import (
     CAP_GATE_NAMES,
     GateContext,
@@ -166,15 +170,6 @@ class BacktestConfig:
     required_cushion: Decimal = REQUIRED_CUSHION
 
 
-def _parse_dt(raw: str) -> datetime:
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    dt = datetime.fromisoformat(raw)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=_timezone.utc)
-    return dt
-
-
 def fetch_trades(conn: sqlite3.Connection, cutoff: datetime) -> list[TradeRow]:
     rows = conn.execute(
         """
@@ -192,7 +187,7 @@ def fetch_trades(conn: sqlite3.Connection, cutoff: datetime) -> list[TradeRow]:
         out.append(
             TradeRow(
                 pt_id=int(r["id"]),
-                intended_at=_parse_dt(r["intended_at"]),
+                intended_at=parse_dt(r["intended_at"]),
                 market_ticker=r["market_ticker"],
                 side=r["side"],
                 contracts=int(r["contracts"]),
@@ -224,7 +219,7 @@ def fetch_forecast(
     members = np.asarray(json.loads(row["members_json"]), dtype=np.float64)
     return ForecastRow(
         station=row["station"],
-        run_time=_parse_dt(row["run_time"]),
+        run_time=parse_dt(row["run_time"]),
         valid_date=date.fromisoformat(row["valid_date"]),
         members=members,
     )
@@ -249,7 +244,7 @@ def fetch_book(
     if row is None:
         return None
     return BookRow(
-        snapshot_at=_parse_dt(row["snapshot_at"]),
+        snapshot_at=parse_dt(row["snapshot_at"]),
         yes_ask=Decimal(str(row["yes_ask"])),
         yes_bid=Decimal(str(row["yes_bid"])),
         no_ask=Decimal(str(row["no_ask"])),
@@ -268,17 +263,7 @@ def fetch_market_close(conn: sqlite3.Connection, ticker: str) -> datetime | None
     ).fetchone()
     if row is None or row["close_time"] is None:
         return None
-    return _parse_dt(row["close_time"])
-
-
-def fair_yes_for(parsed: ParsedTicker, cdf: EnsembleCDF) -> Decimal:
-    if parsed.kind == "bracket":
-        lo = float(parsed.strikes[0])
-        hi = float(parsed.strikes[1])
-        return Decimal(str(cdf.prob_range(lo, hi)))
-    if parsed.kind == "above":
-        return Decimal(str(1.0 - cdf.cdf(float(parsed.strikes[0]))))
-    return Decimal(str(cdf.cdf(float(parsed.strikes[0]))))
+    return parse_dt(row["close_time"])
 
 
 def run_edge(

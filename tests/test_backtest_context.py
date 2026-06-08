@@ -5,7 +5,12 @@ import numpy as np
 import pytest
 from scipy.stats import norm
 
-from bot.backtest.context import BacktestBudgets, _fair_yes, build_edge_context, build_tails_context
+from bot.backtest.context import (
+    BacktestBudgets,
+    build_edge_context,
+    build_tails_context,
+    fair_yes_for,
+)
 from bot.backtest.normalize import CanonicalSnapshot
 from bot.forecast.cdf import EnsembleCDF
 from bot.markets.parser import ParsedTicker
@@ -131,7 +136,7 @@ def test_fair_yes_below_kind_prices_cdf_not_complement() -> None:
     )
     cdf = make_fixed_cdf(Decimal("0.04"))
 
-    fair = _fair_yes(parsed, cdf)
+    fair = fair_yes_for(parsed, cdf)
 
     assert fair == Decimal(str(cdf.cdf(75.0)))
     assert fair.quantize(_FAIR_QUANTUM) == Decimal("0.96")

@@ -17,7 +17,7 @@ class BacktestBudgets:
     market_budget_remaining: Decimal
 
 
-def _fair_yes(parsed: ParsedTicker, cdf: EnsembleCDF) -> Decimal:
+def fair_yes_for(parsed: ParsedTicker, cdf: EnsembleCDF) -> Decimal:
     if parsed.kind == "bracket":
         lo = float(parsed.strikes[0])
         hi = float(parsed.strikes[1])
@@ -50,7 +50,7 @@ def build_tails_context(
     if snap.close_time is None:
         raise ValueError(f"close_time required to build tails context: {snap.ticker}")
     parsed = parse_ticker(snap.ticker)
-    fair_yes = _fair_yes(parsed, cdf)
+    fair_yes = fair_yes_for(parsed, cdf)
     is_same_day = _is_same_day(parsed, station_tz, as_of)
     sigma_T_median = sigma_t_median_for_lead(_lead_hours(snap.close_time, as_of))
     return TailsContext(
@@ -88,7 +88,7 @@ def build_edge_context(
     if snap.close_time is None:
         raise ValueError(f"close_time required to build edge context: {snap.ticker}")
     parsed = parse_ticker(snap.ticker)
-    fair_yes = _fair_yes(parsed, cdf)
+    fair_yes = fair_yes_for(parsed, cdf)
     is_same_day = _is_same_day(parsed, station_tz, as_of)
     sigma_T_median = sigma_t_median_for_lead(_lead_hours(snap.close_time, as_of))
 
