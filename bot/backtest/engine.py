@@ -7,8 +7,10 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import numpy as np
+import pyarrow.parquet as pq
 
 from bot.backtest.context import (
     BacktestBudgets,
@@ -264,6 +266,37 @@ def fetch_market_close(conn: sqlite3.Connection, ticker: str) -> datetime | None
     if row is None or row["close_time"] is None:
         return None
     return parse_dt(row["close_time"])
+
+
+def iter_canonical_snapshots(parquet_path: Path) -> Iterable[ReplaySnapshot]:
+    table = pq.read_table(parquet_path)
+    for row in table.to_pylist():
+        snap = CanonicalSnapshot(
+            ticker=row["ticker"],
+            event_ticker=row["event_ticker"],
+            series_ticker=row["series_ticker"],
+            status=row["status"],
+            result=row["result"] or "",
+            yes_ask=Decimal(row["yes_ask"]),
+            yes_bid=Decimal(row["yes_bid"]),
+            no_ask=Decimal(row["no_ask"]),
+            no_bid=Decimal(row["no_bid"]),
+            last_price=Decimal(row["last_price"]),
+            volume=Decimal(row["volume"]),
+            volume_24h=Decimal(row["volume_24h"]),
+            open_interest=Decimal(row["open_interest"]),
+            open_time=row["open_time"],
+            close_time=row["close_time"],
+            created_time=row["created_time"],
+            floor_strike=row["floor_strike"],
+            strike_type=row["strike_type"],
+            observed_value=(
+                None if row["observed_value"] is None else Decimal(row["observed_value"])
+            ),
+            yes_bid_size=(None if row["yes_bid_size"] is None else Decimal(row["yes_bid_size"])),
+            no_bid_size=(None if row["no_bid_size"] is None else Decimal(row["no_bid_size"])),
+        )
+        yield ReplaySnapshot(snapshot_at=row["snapshot_at"], snap=snap)
 
 
 def run_edge(
