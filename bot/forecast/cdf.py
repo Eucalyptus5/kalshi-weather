@@ -11,6 +11,10 @@ class EnsembleCDF:
         self._members = members
         self._sigma = smoothing
 
+    @property
+    def members(self) -> np.ndarray:
+        return self._members
+
     @classmethod
     def from_members(cls, members: np.ndarray, smoothing: float = 1.0) -> EnsembleCDF:
         if not isinstance(members, np.ndarray) or members.ndim != 1 or members.size == 0:

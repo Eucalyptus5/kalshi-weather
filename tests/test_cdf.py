@@ -69,6 +69,12 @@ def test_empty_members_rejected() -> None:
         EnsembleCDF.from_members(np.array([]), smoothing=1.0)
 
 
+def test_members_property_returns_input_array() -> None:
+    members = _ensemble()
+    cdf = EnsembleCDF.from_members(members, smoothing=1.0)
+    assert np.array_equal(cdf.members, members)
+
+
 def test_nonpositive_smoothing_rejected() -> None:
     with pytest.raises(ValueError):
         EnsembleCDF.from_members(np.array([72.0]), smoothing=0.0)

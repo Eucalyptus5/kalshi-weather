@@ -35,6 +35,15 @@ class ForecastReplay(Protocol):
     ) -> EnsembleCDF: ...
 
 
+def pick_cycle(as_of: datetime, publication_lag: timedelta = _DEFAULT_PUBLICATION_LAG) -> datetime:
+    as_of_utc = as_of.astimezone(timezone.utc)
+    floor_hour = (as_of_utc.hour // 6) * 6
+    candidate = as_of_utc.replace(hour=floor_hour, minute=0, second=0, microsecond=0)
+    while candidate + publication_lag > as_of_utc:
+        candidate = candidate - timedelta(hours=6)
+    return candidate
+
+
 class GefsGribForecastReplay:
     def __init__(
         self,
@@ -63,12 +72,7 @@ class GefsGribForecastReplay:
         return EnsembleCDF.from_members(highs, smoothing=1.0)
 
     def _pick_cycle(self, as_of: datetime) -> datetime:
-        as_of_utc = as_of.astimezone(timezone.utc)
-        floor_hour = (as_of_utc.hour // 6) * 6
-        candidate = as_of_utc.replace(hour=floor_hour, minute=0, second=0, microsecond=0)
-        while candidate + self._publication_lag > as_of_utc:
-            candidate = candidate - timedelta(hours=6)
-        return candidate
+        return pick_cycle(as_of, self._publication_lag)
 
     def _window_hours(
         self, init_time: datetime, valid_date: date, station_tz: str

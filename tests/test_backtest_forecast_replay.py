@@ -10,6 +10,7 @@ from bot.backtest.forecast_replay import (
     GEFS_MEMBERS,
     GefsGribForecastReplay,
     StationSpec,
+    pick_cycle,
 )
 from bot.forecast.cdf import EnsembleCDF
 
@@ -55,6 +56,14 @@ def test_gefs_members_constant_has_31_unique_names() -> None:
     assert GEFS_MEMBERS[0] == "gec00"
     assert "gep01" in GEFS_MEMBERS
     assert "gep30" in GEFS_MEMBERS
+
+
+def test_pick_cycle_module_function_uses_default_publication_lag() -> None:
+    as_of = datetime(2024, 11, 21, 10, 30, tzinfo=timezone.utc)
+    assert pick_cycle(as_of) == datetime(2024, 11, 21, 6, 0, tzinfo=timezone.utc)
+    assert pick_cycle(as_of, timedelta(hours=20)) == datetime(
+        2024, 11, 20, 12, 0, tzinfo=timezone.utc
+    )
 
 
 def test_pick_cycle_returns_latest_cycle_satisfying_publication_lag(tmp_path) -> None:
