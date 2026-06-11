@@ -12,6 +12,7 @@ from bot.backtest.normalize import from_kalshi_api, from_trevorjs
 
 
 _FIXTURE = Path(__file__).parent / "data" / "kalshi_settled_market.json"
+_MIA_FIXTURE = Path(__file__).parent / "data" / "kalshi_settled_market_mia_no.json"
 
 
 def _trevorjs_row(**overrides: object) -> dict:
@@ -127,6 +128,20 @@ def test_kalshi_api_settled_fixture_carries_strike_and_observed_value() -> None:
     assert snap.ticker == "KXHIGHDEN-26APR03-T58"
     assert snap.event_ticker == "KXHIGHDEN-26APR03"
     assert snap.close_time == datetime(2026, 4, 4, 6, 59, tzinfo=timezone.utc)
+
+
+def test_kalshi_api_non_numeric_expiration_value_normalizes_to_none() -> None:
+    market = json.loads(_MIA_FIXTURE.read_text())
+
+    snap = from_kalshi_api(market)
+
+    assert snap.observed_value is None
+    assert snap.ticker == "KXHIGHMIA-26APR11-T83"
+    assert snap.result == "no"
+    assert snap.status == "finalized"
+    assert snap.floor_strike == 83
+    assert snap.strike_type == "greater"
+    assert snap.last_price == Decimal("0.01")
 
 
 def test_trevorjs_lacks_floor_strike_and_observed_value() -> None:

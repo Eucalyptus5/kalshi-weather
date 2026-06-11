@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from pydantic import BaseModel, ConfigDict
 
@@ -48,7 +48,11 @@ def _api_decimal(market: dict, key: str) -> Decimal | None:
     value = market.get(key)
     if value is None or value == "":
         return None
-    return Decimal(str(value))
+    try:
+        return Decimal(str(value))
+    except InvalidOperation:
+        # some settled binaries carry the literal "No" in expiration_value
+        return None
 
 
 def _api_price(market: dict, key: str) -> Decimal:
