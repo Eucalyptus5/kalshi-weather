@@ -1,0 +1,30 @@
+{
+  "model": "gfs_seamless",
+  "built_at": "2026-06-10T19:50:24.346110+00:00",
+  "buckets": [
+    {
+      "bucket": "8-24h",
+      "min_hours": 8,
+      "max_hours": 24,
+      "sigma": 3.0148021921951225,
+      "pairs": 20,
+      "points": 620
+    },
+    {
+      "bucket": "24-72h",
+      "min_hours": 24,
+      "max_hours": 72,
+      "sigma": 4.232898229269733,
+      "pairs": 40,
+      "points": 1240
+    },
+    {
+      "bucket": ">72h",
+      "min_hours": 72,
+      "max_hours": null,
+      "sigma": 8.294657911929253,
+      "pairs": 260,
+      "points": 8060
+    }
+  ]
+}
