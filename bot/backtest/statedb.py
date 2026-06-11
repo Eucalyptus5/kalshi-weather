@@ -19,7 +19,14 @@ from bot.backtest.engine import (
 from bot.backtest.forecast_replay import ForecastReplay, StationSpec
 from bot.backtest.normalize import CanonicalSnapshot
 from bot.backtest.pnl import BacktestFill
-from bot.backtest.report import ReportVerdict, ScoredRun, evaluate_runs, write_report
+from bot.backtest.report import (
+    REFERENCE_BANKROLL,
+    SENSITIVITY_BANKROLL,
+    ReportVerdict,
+    ScoredRun,
+    evaluate_runs,
+    write_report,
+)
 from bot.backtest.scoring import score_run
 from bot.forecast.cdf import EnsembleCDF
 from bot.markets.parser import event_id
@@ -110,16 +117,13 @@ async def run_survival(
     forecast: ForecastReplay,
     lead: timedelta,
     out_dir: Path,
-    *,
-    bankrolls: tuple[Decimal, ...] = (Decimal("20000"), Decimal("500")),
-    strategies: tuple[str, ...] = ("tails", "edge"),
 ) -> tuple[ReportVerdict, Path, list[ScoredRun], dict[str, ReplayLog]]:
     runs: list[ScoredRun] = []
     logs: dict[str, ReplayLog] = {}
     reference_orders: list[BacktestOrder] = []
     reference_fills: list[BacktestFill] = []
-    for strategy in strategies:
-        for bankroll in bankrolls:
+    for strategy in ("tails", "edge"):
+        for bankroll in (REFERENCE_BANKROLL, SENSITIVITY_BANKROLL):
             log = ReplayLog()
             config = BacktestConfig(lead=lead, bankroll=bankroll, depth_table={})
             orders = await run_replay(snapshots, forecast, strategy, config, log=log)
@@ -135,7 +139,7 @@ async def run_survival(
                 )
             )
             logs[f"{strategy}:{bankroll}"] = log
-            if bankroll == bankrolls[0]:
+            if bankroll == REFERENCE_BANKROLL:
                 reference_orders.extend(settled)
                 reference_fills.extend(fills)
     verdict = evaluate_runs(runs)
