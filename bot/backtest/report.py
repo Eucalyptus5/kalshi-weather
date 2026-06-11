@@ -341,10 +341,19 @@ def evaluate_runs(runs: list[ScoredRun], fidelity: FidelityInputs | None = None)
                 )
             )
 
+    window_orders = {
+        window: sum(score.n_orders for r in runs if r.window == window for score in r.report.cities)
+        for window in windows
+    }
+
     by_key = {(h.bankroll, h.window): h for h in headline}
     window_verdicts: dict[str, str] = {}
     friction_floor: dict[str, bool] = {}
     for window in windows:
+        if window_orders[window] == 0:
+            window_verdicts[window] = "insufficient_data"
+            friction_floor[window] = False
+            continue
         base = by_key.get((REFERENCE_BANKROLL, window))
         if base is None:
             continue
@@ -377,6 +386,7 @@ def evaluate_runs(runs: list[ScoredRun], fidelity: FidelityInputs | None = None)
     era_flip = (
         reference[0] is not None
         and reference[1] is not None
+        and all(window_orders[w] > 0 for w in WINDOWS)
         and reference[0].all_cities_negative != reference[1].all_cities_negative
     )
 
@@ -390,6 +400,8 @@ def evaluate_runs(runs: list[ScoredRun], fidelity: FidelityInputs | None = None)
         final = "strategy_era_flip"
     elif "stop" in window_verdicts.values():
         final = "stop"
+    elif "insufficient_data" in window_verdicts.values():
+        final = "insufficient_data"
     elif "friction_floor_driven" in window_verdicts.values():
         final = "friction_floor_driven"
     else:

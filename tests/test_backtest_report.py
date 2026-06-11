@@ -10,6 +10,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
+from bot.backtest.cli import PASSING_VERDICTS
 from bot.backtest.engine import BacktestOrder
 from bot.backtest.pnl import BacktestFill
 from bot.backtest.report import (
@@ -482,3 +483,72 @@ def test_fidelity_not_run_is_surfaced(tmp_path: Path) -> None:
     assert verdict.fidelity_ran is False
     assert verdict.invalidated is False
     assert "fidelity cross-check not run" in md
+
+
+def test_zero_order_window_is_insufficient_data_not_survive() -> None:
+    runs = [
+        run(
+            "tails",
+            "out_of_sample",
+            "20000",
+            [city("KXHIGHDEN", None, skips={"strategy:depth_zero_clamp": 6})],
+        )
+    ]
+
+    verdict = evaluate_runs(runs)
+
+    assert verdict.window_verdicts["out_of_sample"] == "insufficient_data"
+    assert verdict.friction_floor["out_of_sample"] is False
+    assert verdict.final == "insufficient_data"
+
+
+def test_zero_order_window_overrides_surviving_window() -> None:
+    runs = [
+        run(
+            "edge",
+            "in_sample",
+            "20000",
+            [city("KXHIGHDEN", "1.50"), city("KXHIGHAUS", "0.40")],
+        ),
+        run(
+            "tails",
+            "out_of_sample",
+            "20000",
+            [city("KXHIGHDEN", None, skips={"strategy:depth_zero_clamp": 6})],
+        ),
+    ]
+
+    verdict = evaluate_runs(runs)
+
+    assert verdict.window_verdicts["in_sample"] == "survive"
+    assert verdict.window_verdicts["out_of_sample"] == "insufficient_data"
+    assert verdict.final == "insufficient_data"
+    assert verdict.era_flip is False
+
+
+def test_stop_window_beats_zero_order_window() -> None:
+    runs = [
+        run(
+            "edge",
+            "in_sample",
+            "20000",
+            [city("KXHIGHDEN", "-2.00"), city("KXHIGHAUS", "-1.00")],
+        ),
+        run(
+            "tails",
+            "out_of_sample",
+            "20000",
+            [city("KXHIGHDEN", None, skips={"strategy:depth_zero_clamp": 6})],
+        ),
+    ]
+
+    verdict = evaluate_runs(runs)
+
+    assert verdict.window_verdicts["in_sample"] == "stop"
+    assert verdict.window_verdicts["out_of_sample"] == "insufficient_data"
+    assert verdict.final == "stop"
+    assert verdict.era_flip is False
+
+
+def test_insufficient_data_fails_cli_strict_path() -> None:
+    assert "insufficient_data" not in PASSING_VERDICTS
