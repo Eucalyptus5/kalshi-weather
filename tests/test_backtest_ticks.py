@@ -102,10 +102,12 @@ def test_output_sorted_by_ticker_then_created_time(tmp_path: Path) -> None:
     t1 = datetime(2025, 3, 1, 10, 0, tzinfo=timezone.utc)
     t2 = datetime(2025, 3, 1, 11, 0, tzinfo=timezone.utc)
     t3 = datetime(2025, 3, 1, 12, 0, tzinfo=timezone.utc)
+    t4 = datetime(2025, 3, 1, 9, 0, tzinfo=timezone.utc)
     rows = [
         _trade("a3", "KXHIGHNY-25MAR01-T55", created_time=t3),
         _trade("a1", "KXHIGHCHI-25MAR01-T50", created_time=t1),
         _trade("a2", "KXHIGHNY-25MAR01-T50", created_time=t2),
+        _trade("a4", "KXHIGHNY-25MAR01-T55", created_time=t4),
     ]
     shard = _write_shard(rows, tmp_path / "shard.parquet")
     out = tmp_path / "ticks.parquet"
@@ -113,8 +115,13 @@ def test_output_sorted_by_ticker_then_created_time(tmp_path: Path) -> None:
     ingest_ticks([shard], out, series=["KXHIGHNY", "KXHIGHCHI"])
 
     written = pq.read_table(out).to_pylist()
-    tickers = [r["ticker"] for r in written]
-    assert tickers == ["KXHIGHCHI-25MAR01-T50", "KXHIGHNY-25MAR01-T50", "KXHIGHNY-25MAR01-T55"]
+    result = [(r["ticker"], r["created_time"]) for r in written]
+    assert result == [
+        ("KXHIGHCHI-25MAR01-T50", t1),
+        ("KXHIGHNY-25MAR01-T50", t2),
+        ("KXHIGHNY-25MAR01-T55", t4),
+        ("KXHIGHNY-25MAR01-T55", t3),
+    ]
 
 
 def test_price_normalization(tmp_path: Path) -> None:
@@ -157,6 +164,7 @@ def test_overmatch_prefixes_excluded(tmp_path: Path) -> None:
         _trade("m2", "KXHIGHHOU-25MAR01-T50"),
         _trade("m3", "KXHIGHT-25MAR01-T50"),
         _trade("m4", "KXHIGHNY-25MAR01-T50"),
+        _trade("m5", "KXHIGHNYFOO-25MAR01-T50"),
     ]
     shard = _write_shard(rows, tmp_path / "shard.parquet")
     out = tmp_path / "ticks.parquet"
