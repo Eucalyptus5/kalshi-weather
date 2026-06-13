@@ -99,7 +99,6 @@ def tick_decision_snapshots(
 
     for snap in market_state:
         if snap.close_time is None:
-            omitted += 1
             continue
         as_of = snap.close_time - lead
         staleness_floor = as_of - staleness
@@ -147,7 +146,7 @@ def tick_decision_snapshots(
             event_ticker=event_id(snap.ticker),
             series_ticker=snap.ticker.split("-", 1)[0],
             status=snap.status,
-            result=snap.result,
+            result="",
             yes_ask=last_price,
             yes_bid=last_price,
             no_ask=no_price,

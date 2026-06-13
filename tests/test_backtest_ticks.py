@@ -10,11 +10,16 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bot.backtest.context import BacktestBudgets, build_edge_context
+from bot.backtest.engine import build_gate_ctx
 from bot.backtest.normalize import CanonicalSnapshot
 from bot.backtest.ticks import ingest_ticks, tick_decision_snapshots
-from bot.strategy.edge import evaluate as evaluate_edge
+from bot.backtest.forecast_replay import StationSpec, pick_cycle
+from bot.execution.paper import TradeSide, TradeIntent
 from bot.forecast.cdf import EnsembleCDF
-from bot.backtest.forecast_replay import StationSpec
+from bot.risk.gates import GateMode
+from bot.risk.gates import evaluate as evaluate_gates
+from bot.strategy.edge import EdgeAction
+from bot.strategy.edge import evaluate as evaluate_edge
 
 
 _TRADES_SCHEMA = pa.schema(
@@ -208,7 +213,11 @@ _STALENESS = timedelta(hours=6)
 _DEPTH_WINDOW = timedelta(hours=6)
 
 
-def _canonical_snap(ticker: str, close_time: datetime, result: str = "") -> CanonicalSnapshot:
+def _canonical_snap(
+    ticker: str,
+    close_time: datetime | None,
+    result: str = "",
+) -> CanonicalSnapshot:
     return CanonicalSnapshot(
         ticker=ticker,
         event_ticker="-".join(ticker.split("-")[:2]),
@@ -415,19 +424,57 @@ def test_depth_window_inclusive_upper_bound(tmp_path: Path) -> None:
     assert snap.yes_bid_size == Decimal("2")
 
 
-def test_lookahead_invariance(tmp_path: Path) -> None:
-    close_a = datetime(2025, 3, 3, 12, 0, tzinfo=timezone.utc)
-    close_b = datetime(2025, 3, 4, 12, 0, tzinfo=timezone.utc)
-    close_c = datetime(2025, 3, 5, 12, 0, tzinfo=timezone.utc)
-    ticker_a = "KXHIGHNY-25MAR02-T50"
-    ticker_b = "KXHIGHNY-25MAR03-T50"
-    ticker_c = "KXHIGHNY-25MAR04-T50"
-    as_of_a = close_a - _LEAD
-    as_of_b = close_b - _LEAD
-    as_of_c = close_c - _LEAD
+def test_null_close_time_not_counted_in_omitted(tmp_path: Path) -> None:
+    ticker_valid = "KXHIGHNY-25MAR01-T50"
+    ticker_null = "KXHIGHNY-25MAR02-T50"
+    as_of = _CLOSE - _LEAD
+    rows = [
+        _tick_row("t1", ticker_valid, Decimal("0.50"), as_of - timedelta(hours=7)),
+    ]
+    tick_path = _write_tick_parquet(rows, tmp_path / "ticks.parquet")
+    market_state: Sequence[CanonicalSnapshot] = [
+        _canonical_snap(ticker_valid, _CLOSE, result="yes"),
+        _canonical_snap(ticker_null, None),
+    ]
 
-    # a and b have identical pre-as_of history; b has extra post-as_of prints
-    # c differs only in (as_of - depth_window, as_of] volume
+    _, omitted = tick_decision_snapshots(tick_path, market_state, _LEAD, _STALENESS, _DEPTH_WINDOW)
+
+    assert omitted == 1
+
+
+def test_decision_row_result_pinned_empty(tmp_path: Path) -> None:
+    ticker = "KXHIGHNY-25MAR01-T50"
+    as_of = _CLOSE - _LEAD
+    rows = [
+        _tick_row("t1", ticker, Decimal("0.40"), as_of - timedelta(hours=2)),
+    ]
+    tick_path = _write_tick_parquet(rows, tmp_path / "ticks.parquet")
+    market_state: Sequence[CanonicalSnapshot] = [_canonical_snap(ticker, _CLOSE, result="yes")]
+
+    snaps, _ = tick_decision_snapshots(tick_path, market_state, _LEAD, _STALENESS, _DEPTH_WINDOW)
+
+    decision_rows = [s for s in snaps if s.snapshot_at < _CLOSE]
+    assert len(decision_rows) == 1
+    assert decision_rows[0].snap.result == ""
+
+
+_LOOKAHEAD_LEAD = timedelta(hours=30)
+
+
+def test_lookahead_invariance(tmp_path: Path) -> None:
+    # as_of lands before the observation window for each event date so edge.evaluate
+    # passes the same_day gate and reaches compute_stake_contracts with nonzero contracts.
+    # NY window for Mar 4 starts 2025-03-04 05:00 UTC; as_of_a = 2025-03-03 18:00 UTC.
+    close_a = datetime(2025, 3, 5, 0, 0, tzinfo=timezone.utc)
+    close_b = datetime(2025, 3, 6, 0, 0, tzinfo=timezone.utc)
+    close_c = datetime(2025, 3, 7, 0, 0, tzinfo=timezone.utc)
+    ticker_a = "KXHIGHNY-25MAR04-T50"
+    ticker_b = "KXHIGHNY-25MAR05-T50"
+    ticker_c = "KXHIGHNY-25MAR06-T50"
+    as_of_a = close_a - _LOOKAHEAD_LEAD
+    as_of_b = close_b - _LOOKAHEAD_LEAD
+    as_of_c = close_c - _LOOKAHEAD_LEAD
+
     rows = [
         _tick_row("a1", ticker_a, Decimal("0.30"), as_of_a - timedelta(hours=2)),
         _tick_row("a2", ticker_a, Decimal("0.31"), as_of_a - timedelta(hours=1)),
@@ -447,7 +494,9 @@ def test_lookahead_invariance(tmp_path: Path) -> None:
         _canonical_snap(ticker_c, close_c),
     ]
 
-    snaps, _ = tick_decision_snapshots(tick_path, market_state, _LEAD, _STALENESS, _DEPTH_WINDOW)
+    snaps, _ = tick_decision_snapshots(
+        tick_path, market_state, _LOOKAHEAD_LEAD, _STALENESS, _DEPTH_WINDOW
+    )
 
     by_ticker = {s.snap.ticker: s.snap for s in snaps if s.snapshot_at < s.snap.close_time}
     snap_a = by_ticker[ticker_a]
@@ -458,7 +507,6 @@ def test_lookahead_invariance(tmp_path: Path) -> None:
     assert snap_a.yes_bid_size == snap_b.yes_bid_size
     assert snap_c.yes_bid_size > snap_a.yes_bid_size
 
-    # drive the real sizing/gate seams
     members = np.full(31, 52.0)
     cdf = EnsembleCDF.from_members(members, smoothing=1.0)
     station = StationSpec(name="JFK", latitude=40.64, longitude=-73.78, timezone="America/New_York")
@@ -466,26 +514,67 @@ def test_lookahead_invariance(tmp_path: Path) -> None:
         event_budget_remaining=Decimal("1000"),
         market_budget_remaining=Decimal("1000"),
     )
+    bankroll = Decimal("10000")
+    spread = Decimal("2.5")
 
     def _contracts_and_verdict(snap: CanonicalSnapshot, as_of: datetime) -> tuple[int, bool]:
         ctx = build_edge_context(
             snap,
             cdf,
             as_of,
-            Decimal("10000"),
+            bankroll,
             budgets,
-            ensemble_spread=Decimal("2.5"),
+            ensemble_spread=spread,
             buy_yes_depth=int(snap.no_bid_size or 0),
             sell_yes_depth=int(snap.yes_bid_size or 0),
             station_tz=station.timezone,
         )
         sig = evaluate_edge(ctx, mode="paper")
-        return sig.contracts, sig.contracts > 0
+        if sig.action is EdgeAction.SKIP:
+            return sig.contracts, False
+        side = TradeSide.BUY_YES if sig.action is EdgeAction.BUY_YES else TradeSide.SELL_YES
+        intent = TradeIntent(
+            market_ticker=snap.ticker,
+            side=side,
+            contracts=sig.contracts,
+            fair_yes=ctx.fair_yes,
+            q_raw=ctx.fair_yes,
+            strategy="edge",
+            ensemble_spread_sigma_t=spread,
+            lead_time_hours=Decimal(
+                str((snap.close_time - as_of).total_seconds() / 3600)  # type: ignore[operator]
+            ),
+        )
+        gate_ctx = build_gate_ctx(
+            intent=intent,
+            fair_yes=ctx.fair_yes,
+            spread=spread,
+            run_time=pick_cycle(as_of),
+            now=as_of,
+            book=snap,
+            close_time=snap.close_time,
+            buy_yes_depth=int(snap.no_bid_size or 0),
+            sell_yes_depth=int(snap.yes_bid_size or 0),
+            market_existing_dollars=Decimal("0"),
+            market_position_cap=Decimal("500"),
+            event_existing_dollars=Decimal("0"),
+            event_position_cap=Decimal("500"),
+            series_existing_dollars=Decimal("0"),
+            series_position_cap=Decimal("500"),
+            aggregate_existing_dollars=Decimal("0"),
+            aggregate_exposure_cap=Decimal("5000"),
+            account_balance=bankroll,
+            required_cushion=Decimal("0"),
+            market_status=snap.status,
+        )
+        check = evaluate_gates(gate_ctx, GateMode.PAPER)
+        return sig.contracts, check.overall_passed
 
     contracts_a, verdict_a = _contracts_and_verdict(snap_a, as_of_a)
     contracts_b, verdict_b = _contracts_and_verdict(snap_b, as_of_b)
     contracts_c, verdict_c = _contracts_and_verdict(snap_c, as_of_c)
 
+    assert contracts_a > 0
     assert contracts_a == contracts_b
     assert verdict_a == verdict_b
-    assert contracts_c != contracts_a or snap_c.yes_bid_size != snap_a.yes_bid_size
+    assert contracts_c != contracts_a
