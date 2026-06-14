@@ -205,8 +205,6 @@ def test_output_schema_columns(tmp_path: Path) -> None:
     }
 
 
-# ---- tick_decision_snapshots tests ----------------------------------------
-
 _CLOSE = datetime(2025, 3, 2, 12, 0, tzinfo=timezone.utc)
 _LEAD = timedelta(hours=24)
 _STALENESS = timedelta(hours=6)
@@ -271,8 +269,6 @@ def _tick_row(
 
 
 def test_decision_price_picks_last_print_before_as_of(tmp_path: Path) -> None:
-    # spec verbatim: prints at close-26h (12c) and close-23h (9c), lead=24h
-    # close-26h = as_of - 2h (within staleness cap); close-23h = as_of + 1h (after as_of)
     ticker = "KXHIGHNY-25MAR01-T50"
     rows = [
         _tick_row("t1", ticker, Decimal("0.12"), _CLOSE - timedelta(hours=26)),
@@ -365,8 +361,6 @@ def test_trailing_depth_uses_depth_window_before_as_of(tmp_path: Path) -> None:
     decision_rows = [s for s in snaps if s.snapshot_at < _CLOSE]
     assert len(decision_rows) == 1
     snap = decision_rows[0].snap
-    # t2 (5h before), t3 (3h before), t4 (1h before) are within depth_window (6h]
-    # t1 is outside (7h before), t5 is post-as_of
     assert snap.yes_bid_size == Decimal("3")
     assert snap.no_bid_size == Decimal("3")
 
@@ -390,7 +384,6 @@ def test_settlement_rows_pinned_to_close_time(tmp_path: Path) -> None:
 def test_depth_window_exclusive_lower_bound(tmp_path: Path) -> None:
     ticker = "KXHIGHNY-25MAR01-T50"
     as_of = _CLOSE - _LEAD
-    # exactly at as_of - depth_window boundary (exclusive)
     rows = [
         _tick_row("t1", ticker, Decimal("0.40"), as_of - _DEPTH_WINDOW),
         _tick_row("t2", ticker, Decimal("0.42"), as_of - timedelta(hours=1)),
@@ -402,7 +395,6 @@ def test_depth_window_exclusive_lower_bound(tmp_path: Path) -> None:
 
     decision_rows = [s for s in snaps if s.snapshot_at < _CLOSE]
     snap = decision_rows[0].snap
-    # t1 at exactly as_of - depth_window is excluded (exclusive lower bound)
     assert snap.yes_bid_size == Decimal("1")
 
 
@@ -420,7 +412,6 @@ def test_depth_window_inclusive_upper_bound(tmp_path: Path) -> None:
 
     decision_rows = [s for s in snaps if s.snapshot_at < _CLOSE]
     snap = decision_rows[0].snap
-    # t1 at exactly as_of is included (inclusive upper bound)
     assert snap.yes_bid_size == Decimal("2")
 
 
@@ -533,6 +524,7 @@ def test_lookahead_invariance(tmp_path: Path) -> None:
         if sig.action is EdgeAction.SKIP:
             return sig.contracts, False
         side = TradeSide.BUY_YES if sig.action is EdgeAction.BUY_YES else TradeSide.SELL_YES
+        assert snap.close_time is not None
         intent = TradeIntent(
             market_ticker=snap.ticker,
             side=side,
@@ -541,9 +533,7 @@ def test_lookahead_invariance(tmp_path: Path) -> None:
             q_raw=ctx.fair_yes,
             strategy="edge",
             ensemble_spread_sigma_t=spread,
-            lead_time_hours=Decimal(
-                str((snap.close_time - as_of).total_seconds() / 3600)  # type: ignore[operator]
-            ),
+            lead_time_hours=Decimal(str((snap.close_time - as_of).total_seconds() / 3600)),
         )
         gate_ctx = build_gate_ctx(
             intent=intent,
@@ -572,7 +562,7 @@ def test_lookahead_invariance(tmp_path: Path) -> None:
 
     contracts_a, verdict_a = _contracts_and_verdict(snap_a, as_of_a)
     contracts_b, verdict_b = _contracts_and_verdict(snap_b, as_of_b)
-    contracts_c, verdict_c = _contracts_and_verdict(snap_c, as_of_c)
+    contracts_c, _ = _contracts_and_verdict(snap_c, as_of_c)
 
     assert contracts_a > 0
     assert contracts_a == contracts_b

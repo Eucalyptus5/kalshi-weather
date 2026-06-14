@@ -4,18 +4,14 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
+from bot.backtest.engine import ReplaySnapshot
 from bot.backtest.normalize import CanonicalSnapshot, _cents_to_dollars
-from bot.markets.parser import event_id
-
-if TYPE_CHECKING:
-    from bot.backtest.engine import ReplaySnapshot
 
 
 _TICK_SCHEMA = pa.schema(
@@ -85,8 +81,6 @@ def tick_decision_snapshots(
     staleness: timedelta,
     depth_window: timedelta,
 ) -> tuple[list[ReplaySnapshot], int]:
-    from bot.backtest.engine import ReplaySnapshot as _RS
-
     table = pq.read_table(tick_path)
     rows = table.to_pylist()
 
@@ -94,7 +88,7 @@ def tick_decision_snapshots(
     for row in rows:
         by_ticker.setdefault(row["ticker"], []).append(row)
 
-    out: list[_RS] = []
+    out: list[ReplaySnapshot] = []
     omitted = 0
 
     for snap in market_state:
@@ -114,75 +108,27 @@ def tick_decision_snapshots(
 
         if candidate is None:
             omitted += 1
-            settlement = CanonicalSnapshot(
-                ticker=snap.ticker,
-                event_ticker=event_id(snap.ticker),
-                series_ticker=snap.ticker.split("-", 1)[0],
-                status=snap.status,
-                result=snap.result,
-                yes_ask=snap.yes_ask,
-                yes_bid=snap.yes_bid,
-                no_ask=snap.no_ask,
-                no_bid=snap.no_bid,
-                last_price=snap.last_price,
-                volume=snap.volume,
-                volume_24h=snap.volume_24h,
-                open_interest=snap.open_interest,
-                close_time=snap.close_time,
-                floor_strike=snap.floor_strike,
-                strike_type=snap.strike_type,
-                observed_value=snap.observed_value,
-            )
-            out.append(_RS(snapshot_at=snap.close_time, snap=settlement))
+            out.append(ReplaySnapshot(snapshot_at=snap.close_time, snap=snap))
             continue
 
-        last_price = Decimal(str(candidate["yes_price"]))
+        last_price = candidate["yes_price"]
         no_price = Decimal("1") - last_price
 
         trailing_count = sum(1 for row in ticker_rows if depth_floor < row["created_time"] <= as_of)
 
-        decision_snap = CanonicalSnapshot(
-            ticker=snap.ticker,
-            event_ticker=event_id(snap.ticker),
-            series_ticker=snap.ticker.split("-", 1)[0],
-            status=snap.status,
-            result="",
-            yes_ask=last_price,
-            yes_bid=last_price,
-            no_ask=no_price,
-            no_bid=no_price,
-            last_price=last_price,
-            volume=snap.volume,
-            volume_24h=snap.volume_24h,
-            open_interest=snap.open_interest,
-            close_time=snap.close_time,
-            floor_strike=snap.floor_strike,
-            strike_type=snap.strike_type,
-            observed_value=snap.observed_value,
-            yes_bid_size=Decimal(trailing_count),
-            no_bid_size=Decimal(trailing_count),
+        decision_snap = snap.model_copy(
+            update={
+                "result": "",
+                "yes_ask": last_price,
+                "yes_bid": last_price,
+                "no_ask": no_price,
+                "no_bid": no_price,
+                "last_price": last_price,
+                "yes_bid_size": Decimal(trailing_count),
+                "no_bid_size": Decimal(trailing_count),
+            }
         )
-        out.append(_RS(snapshot_at=as_of, snap=decision_snap))
-
-        settlement_snap = CanonicalSnapshot(
-            ticker=snap.ticker,
-            event_ticker=event_id(snap.ticker),
-            series_ticker=snap.ticker.split("-", 1)[0],
-            status=snap.status,
-            result=snap.result,
-            yes_ask=snap.yes_ask,
-            yes_bid=snap.yes_bid,
-            no_ask=snap.no_ask,
-            no_bid=snap.no_bid,
-            last_price=snap.last_price,
-            volume=snap.volume,
-            volume_24h=snap.volume_24h,
-            open_interest=snap.open_interest,
-            close_time=snap.close_time,
-            floor_strike=snap.floor_strike,
-            strike_type=snap.strike_type,
-            observed_value=snap.observed_value,
-        )
-        out.append(_RS(snapshot_at=snap.close_time, snap=settlement_snap))
+        out.append(ReplaySnapshot(snapshot_at=as_of, snap=decision_snap))
+        out.append(ReplaySnapshot(snapshot_at=snap.close_time, snap=snap))
 
     return out, omitted
