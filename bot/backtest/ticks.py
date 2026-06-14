@@ -4,14 +4,19 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
-from bot.backtest.engine import ReplaySnapshot
+from bot.backtest.engine import BacktestOrder, ReplayFailure, ReplaySnapshot
 from bot.backtest.normalize import CanonicalSnapshot, _cents_to_dollars
+from bot.backtest.pnl import BacktestFill
+from bot.execution.fees import taker_fee
+from bot.execution.paper import TradeSide
+from bot.validation.scoring import realized_pnl_for_trade
 
 
 _TICK_SCHEMA = pa.schema(
@@ -132,3 +137,64 @@ def tick_decision_snapshots(
         out.append(ReplaySnapshot(snapshot_at=snap.close_time, snap=snap))
 
     return out, omitted
+
+
+def fill_against_prints(
+    order: BacktestOrder,
+    prints: Sequence[dict],
+    close: datetime,
+    rule: Literal["conservative", "inclusive"],
+) -> int:
+    p = (
+        order.price_per_contract
+        if order.action is TradeSide.BUY_YES
+        else Decimal("1") - order.price_per_contract
+    )
+    as_of = order.as_of
+    total = 0
+    for row in prints:
+        t: datetime = row["created_time"]
+        if t <= as_of or t > close:
+            continue
+        yes_price: Decimal = row["yes_price"]
+        if order.action is TradeSide.SELL_YES:
+            qualifies = yes_price > p if rule == "conservative" else yes_price >= p
+        else:
+            qualifies = yes_price < p if rule == "conservative" else yes_price <= p
+        if qualifies:
+            total += int(row["count"])
+    return min(total, order.contracts)
+
+
+def make_no_prints_failure(order: BacktestOrder) -> ReplayFailure:
+    return ReplayFailure(
+        market_ticker=order.market_ticker,
+        as_of=order.as_of,
+        strategy=order.strategy,
+        layer="fill",
+        name="no_qualifying_prints",
+        reason="no_qualifying_prints",
+    )
+
+
+def settle_filled_order(
+    order: BacktestOrder,
+    filled_contracts: int,
+    executed_yes_price: Decimal,
+    result: str,
+) -> BacktestFill:
+    if filled_contracts == 0:
+        return BacktestFill(
+            gross_pnl=Decimal("0"),
+            fee_dollars=Decimal("0"),
+            net_pnl=Decimal("0"),
+        )
+    won = (result == "yes") == (order.action is TradeSide.BUY_YES)
+    fee_dollars = taker_fee(filled_contracts, executed_yes_price)
+    gross_pnl = realized_pnl_for_trade(
+        order.action, executed_yes_price, filled_contracts, Decimal("0"), won
+    )
+    net_pnl = realized_pnl_for_trade(
+        order.action, executed_yes_price, filled_contracts, fee_dollars, won
+    )
+    return BacktestFill(gross_pnl=gross_pnl, fee_dollars=fee_dollars, net_pnl=net_pnl)

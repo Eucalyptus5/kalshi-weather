@@ -10,16 +10,25 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from bot.backtest.context import BacktestBudgets, build_edge_context
-from bot.backtest.engine import build_gate_ctx
+from bot.backtest.engine import BacktestOrder, ReplayFailure, build_gate_ctx
 from bot.backtest.normalize import CanonicalSnapshot
-from bot.backtest.ticks import ingest_ticks, tick_decision_snapshots
+from bot.backtest.pnl import BacktestFill
+from bot.backtest.ticks import (
+    fill_against_prints,
+    ingest_ticks,
+    make_no_prints_failure,
+    settle_filled_order,
+    tick_decision_snapshots,
+)
 from bot.backtest.forecast_replay import StationSpec, pick_cycle
+from bot.execution.fees import taker_fee
 from bot.execution.paper import TradeSide, TradeIntent
 from bot.forecast.cdf import EnsembleCDF
 from bot.risk.gates import GateMode
 from bot.risk.gates import evaluate as evaluate_gates
 from bot.strategy.edge import EdgeAction
 from bot.strategy.edge import evaluate as evaluate_edge
+from bot.validation.scoring import realized_pnl_for_trade
 
 
 _TRADES_SCHEMA = pa.schema(
@@ -568,3 +577,219 @@ def test_lookahead_invariance(tmp_path: Path) -> None:
     assert contracts_a == contracts_b
     assert verdict_a == verdict_b
     assert contracts_c != contracts_a
+
+
+_AS_OF = datetime(2025, 6, 1, 12, 0, tzinfo=timezone.utc)
+_CLOSE_FILL = datetime(2025, 6, 1, 14, 0, tzinfo=timezone.utc)
+
+
+def _print_row(
+    yes_price: Decimal,
+    count: int,
+    offset: timedelta,
+) -> dict:
+    return {
+        "yes_price": yes_price,
+        "count": count,
+        "created_time": _AS_OF + offset,
+    }
+
+
+def _sell_yes_order(
+    contracts: int = 100,
+    yes_bid: Decimal = Decimal("0.10"),
+) -> BacktestOrder:
+    return BacktestOrder(
+        market_ticker="KXHIGHNY-25JUN01-T50",
+        as_of=_AS_OF,
+        strategy="tails",
+        action=TradeSide.SELL_YES,
+        contracts=contracts,
+        fair_yes=Decimal("0.05"),
+        price_per_contract=Decimal("1") - yes_bid,
+        order_dollars=(Decimal("1") - yes_bid) * Decimal(contracts),
+        depth_at_price=50,
+        depth_source="snapshot",
+        lead_bucket="2h",
+    )
+
+
+def _buy_yes_order(
+    contracts: int = 100,
+    yes_ask: Decimal = Decimal("0.30"),
+) -> BacktestOrder:
+    return BacktestOrder(
+        market_ticker="KXHIGHNY-25JUN01-T50",
+        as_of=_AS_OF,
+        strategy="edge",
+        action=TradeSide.BUY_YES,
+        contracts=contracts,
+        fair_yes=Decimal("0.50"),
+        price_per_contract=yes_ask,
+        order_dollars=yes_ask * Decimal(contracts),
+        depth_at_price=50,
+        depth_source="snapshot",
+        lead_bucket="2h",
+    )
+
+
+def test_fill_sell_yes_conservative_golden() -> None:
+    order = _sell_yes_order(contracts=100, yes_bid=Decimal("0.10"))
+    prints = [
+        _print_row(Decimal("0.11"), 30, timedelta(minutes=5)),
+        _print_row(Decimal("0.10"), 50, timedelta(minutes=10)),
+        _print_row(Decimal("0.12"), 40, timedelta(minutes=15)),
+    ]
+    filled = fill_against_prints(order, prints, _CLOSE_FILL, "conservative")
+    assert filled == 70
+
+
+def test_fill_sell_yes_inclusive_golden() -> None:
+    order = _sell_yes_order(contracts=100, yes_bid=Decimal("0.10"))
+    prints = [
+        _print_row(Decimal("0.11"), 30, timedelta(minutes=5)),
+        _print_row(Decimal("0.10"), 50, timedelta(minutes=10)),
+        _print_row(Decimal("0.12"), 40, timedelta(minutes=15)),
+    ]
+    filled = fill_against_prints(order, prints, _CLOSE_FILL, "inclusive")
+    assert filled == 100
+
+
+def test_fill_zero_qualifying_prints() -> None:
+    order = _sell_yes_order(contracts=100, yes_bid=Decimal("0.15"))
+    prints = [
+        _print_row(Decimal("0.10"), 50, timedelta(minutes=5)),
+        _print_row(Decimal("0.12"), 40, timedelta(minutes=10)),
+    ]
+    filled = fill_against_prints(order, prints, _CLOSE_FILL, "conservative")
+    assert filled == 0
+
+
+def test_fill_zero_produces_no_prints_failure() -> None:
+    order = _sell_yes_order(contracts=100, yes_bid=Decimal("0.15"))
+    prints: list[dict] = []
+    filled = fill_against_prints(order, prints, _CLOSE_FILL, "conservative")
+    assert filled == 0
+
+    failure = make_no_prints_failure(order)
+    assert isinstance(failure, ReplayFailure)
+    assert failure.market_ticker == order.market_ticker
+    assert failure.as_of == order.as_of
+    assert failure.strategy == order.strategy
+    assert failure.layer == "fill"
+    assert failure.name == "no_qualifying_prints"
+
+
+def test_settle_zero_fill_returns_flat() -> None:
+    order = _sell_yes_order(contracts=100)
+    fill = settle_filled_order(order, 0, Decimal("0.10"), "no")
+    assert fill.gross_pnl == Decimal("0")
+    assert fill.fee_dollars == Decimal("0")
+    assert fill.net_pnl == Decimal("0")
+    assert isinstance(fill, BacktestFill)
+
+
+def test_price_sign_golden_no_settled() -> None:
+    order = _sell_yes_order(contracts=100, yes_bid=Decimal("0.10"))
+    executed_yes_price = Decimal("0.10")
+    fill = settle_filled_order(order, 70, executed_yes_price, "no")
+
+    expected_fee = taker_fee(70, executed_yes_price)
+    expected_net = realized_pnl_for_trade(
+        TradeSide.SELL_YES, executed_yes_price, 70, expected_fee, won=True
+    )
+    assert fill.net_pnl == expected_net
+    assert fill.net_pnl > Decimal("0")
+
+    collateral_price = Decimal("1") - executed_yes_price
+    wrong_fee = taker_fee(70, collateral_price)
+    wrong_net = realized_pnl_for_trade(
+        TradeSide.SELL_YES, collateral_price, 70, wrong_fee, won=True
+    )
+    assert fill.net_pnl != wrong_net
+
+
+def test_price_sign_golden_yes_settled() -> None:
+    order = _sell_yes_order(contracts=100, yes_bid=Decimal("0.10"))
+    executed_yes_price = Decimal("0.10")
+    fill = settle_filled_order(order, 70, executed_yes_price, "yes")
+
+    expected_fee = taker_fee(70, executed_yes_price)
+    expected_net = realized_pnl_for_trade(
+        TradeSide.SELL_YES, executed_yes_price, 70, expected_fee, won=False
+    )
+    assert fill.net_pnl == expected_net
+    assert fill.net_pnl < Decimal("0")
+
+    collateral_price = Decimal("1") - executed_yes_price
+    wrong_fee = taker_fee(70, collateral_price)
+    wrong_net = realized_pnl_for_trade(
+        TradeSide.SELL_YES, collateral_price, 70, wrong_fee, won=False
+    )
+    assert fill.net_pnl != wrong_net
+
+
+def test_fill_buy_yes_conservative() -> None:
+    order = _buy_yes_order(contracts=50, yes_ask=Decimal("0.30"))
+    prints = [
+        _print_row(Decimal("0.29"), 20, timedelta(minutes=5)),
+        _print_row(Decimal("0.30"), 30, timedelta(minutes=10)),
+        _print_row(Decimal("0.28"), 15, timedelta(minutes=15)),
+    ]
+    filled = fill_against_prints(order, prints, _CLOSE_FILL, "conservative")
+    assert filled == 35
+
+
+def test_fill_buy_yes_inclusive() -> None:
+    order = _buy_yes_order(contracts=50, yes_ask=Decimal("0.30"))
+    prints = [
+        _print_row(Decimal("0.29"), 20, timedelta(minutes=5)),
+        _print_row(Decimal("0.30"), 30, timedelta(minutes=10)),
+        _print_row(Decimal("0.28"), 15, timedelta(minutes=15)),
+    ]
+    filled = fill_against_prints(order, prints, _CLOSE_FILL, "inclusive")
+    assert filled == 50
+
+
+def test_fill_horizon_excludes_print_at_as_of() -> None:
+    order = _sell_yes_order(contracts=100, yes_bid=Decimal("0.10"))
+    prints = [
+        _print_row(Decimal("0.15"), 50, timedelta(0)),
+    ]
+    filled = fill_against_prints(order, prints, _CLOSE_FILL, "conservative")
+    assert filled == 0
+
+
+def test_fill_horizon_includes_print_at_close() -> None:
+    order = _sell_yes_order(contracts=100, yes_bid=Decimal("0.10"))
+    close = _AS_OF + timedelta(hours=2)
+    prints = [
+        {"yes_price": Decimal("0.15"), "count": 50, "created_time": close},
+    ]
+    filled = fill_against_prints(order, prints, close, "conservative")
+    assert filled == 50
+
+
+def test_fill_horizon_excludes_print_after_close() -> None:
+    order = _sell_yes_order(contracts=100, yes_bid=Decimal("0.10"))
+    close = _AS_OF + timedelta(hours=2)
+    prints = [
+        {"yes_price": Decimal("0.15"), "count": 50, "created_time": close + timedelta(seconds=1)},
+    ]
+    filled = fill_against_prints(order, prints, close, "conservative")
+    assert filled == 0
+
+
+def test_settle_partial_fill_scales_fees() -> None:
+    intended = 100
+    filled = 40
+    yes_price = Decimal("0.20")
+    order = _sell_yes_order(contracts=intended, yes_bid=yes_price)
+
+    fill = settle_filled_order(order, filled, yes_price, "no")
+
+    expected_fee = taker_fee(filled, yes_price)
+    assert fill.fee_dollars == expected_fee
+
+    wrong_fee = taker_fee(intended, yes_price)
+    assert fill.fee_dollars != wrong_fee
