@@ -14,9 +14,10 @@ import pyarrow.parquet as pq
 from bot.backtest.engine import BacktestOrder, ReplayFailure, ReplaySnapshot
 from bot.backtest.normalize import CanonicalSnapshot, _cents_to_dollars
 from bot.backtest.pnl import BacktestFill
+from bot.backtest.scoring import OrderSettlement
 from bot.execution.fees import taker_fee
 from bot.execution.paper import TradeSide
-from bot.validation.scoring import realized_pnl_for_trade
+from bot.validation.scoring import BRIER_QUANTUM, realized_pnl_for_trade
 
 
 _TICK_SCHEMA = pa.schema(
@@ -198,3 +199,63 @@ def settle_filled_order(
         order.action, executed_yes_price, filled_contracts, fee_dollars, won
     )
     return BacktestFill(gross_pnl=gross_pnl, fee_dollars=fee_dollars, net_pnl=net_pnl)
+
+
+def tick_settle_orders(
+    orders: list[BacktestOrder],
+    snapshots: list[ReplaySnapshot],
+    lead: timedelta,
+) -> list[OrderSettlement]:
+    results: dict[str, str] = {}
+    decisions: dict[tuple[str, datetime], ReplaySnapshot] = {}
+    for row in snapshots:
+        if row.snap.result in ("yes", "no"):
+            results[row.snap.ticker] = row.snap.result
+        close = row.snap.close_time
+        if close is None or row.snapshot_at >= close:
+            continue
+        key = (row.snap.ticker, close)
+        best = decisions.get(key)
+        if best is None or row.snapshot_at > best.snapshot_at:
+            decisions[key] = row
+
+    out: list[OrderSettlement] = []
+    for order in orders:
+        result = results[order.market_ticker]
+        close = order.as_of + lead
+        snap = decisions[(order.market_ticker, close)].snap
+        out.append(OrderSettlement(result=result, market_mid=snap.yes_bid))
+    return out
+
+
+def tick_baseline_brier(
+    snapshots: list[ReplaySnapshot],
+    lead: timedelta,
+) -> tuple[Decimal, int]:
+    results: dict[str, str] = {}
+    decisions: dict[str, ReplaySnapshot] = {}
+    for row in snapshots:
+        if row.snap.result in ("yes", "no"):
+            results[row.snap.ticker] = row.snap.result
+        close = row.snap.close_time
+        if close is None or row.snapshot_at >= close:
+            continue
+        ticker = row.snap.ticker
+        best = decisions.get(ticker)
+        if best is None or row.snapshot_at > best.snapshot_at:
+            decisions[ticker] = row
+
+    total = Decimal("0")
+    n = 0
+    for ticker, dec_snap in decisions.items():
+        result = results.get(ticker)
+        if result not in ("yes", "no"):
+            continue
+        price = dec_snap.snap.yes_bid
+        outcome = Decimal("1") if result == "yes" else Decimal("0")
+        total += (price - outcome) ** 2
+        n += 1
+
+    if n == 0:
+        return Decimal("0"), 0
+    return (total / Decimal(n)).quantize(BRIER_QUANTUM), n

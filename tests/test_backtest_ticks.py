@@ -13,12 +13,15 @@ from bot.backtest.context import BacktestBudgets, build_edge_context
 from bot.backtest.engine import BacktestOrder, ReplayFailure, build_gate_ctx
 from bot.backtest.normalize import CanonicalSnapshot
 from bot.backtest.pnl import BacktestFill
+from bot.backtest.scoring import OrderSettlement
 from bot.backtest.ticks import (
     fill_against_prints,
     ingest_ticks,
     make_no_prints_failure,
     settle_filled_order,
+    tick_baseline_brier,
     tick_decision_snapshots,
+    tick_settle_orders,
 )
 from bot.backtest.forecast_replay import StationSpec, pick_cycle
 from bot.execution.fees import taker_fee
@@ -793,3 +796,281 @@ def test_settle_partial_fill_scales_fees() -> None:
 
     wrong_fee = taker_fee(intended, yes_price)
     assert fill.fee_dollars != wrong_fee
+
+
+_SETTLE_LEAD = timedelta(hours=24)
+
+
+def _make_decision_and_settlement_snaps(
+    ticker: str,
+    close: datetime,
+    decision_price: Decimal,
+    result: str,
+) -> tuple[list, list]:
+    from bot.backtest.engine import ReplaySnapshot
+
+    as_of = close - _SETTLE_LEAD
+    no_price = Decimal("1") - decision_price
+
+    decision_canonical = CanonicalSnapshot(
+        ticker=ticker,
+        event_ticker="-".join(ticker.split("-")[:2]),
+        series_ticker=ticker.split("-")[0],
+        status="active",
+        result="",
+        yes_ask=decision_price,
+        yes_bid=decision_price,
+        no_ask=no_price,
+        no_bid=no_price,
+        last_price=decision_price,
+        volume=Decimal("0"),
+        volume_24h=Decimal("0"),
+        open_interest=Decimal("0"),
+        close_time=close,
+    )
+    settlement_canonical = CanonicalSnapshot(
+        ticker=ticker,
+        event_ticker="-".join(ticker.split("-")[:2]),
+        series_ticker=ticker.split("-")[0],
+        status="settled",
+        result=result,
+        yes_ask=Decimal("0"),
+        yes_bid=Decimal("0"),
+        no_ask=Decimal("0"),
+        no_bid=Decimal("0"),
+        last_price=Decimal("0"),
+        volume=Decimal("0"),
+        volume_24h=Decimal("0"),
+        open_interest=Decimal("0"),
+        close_time=close,
+    )
+    decision_snap = ReplaySnapshot(snapshot_at=as_of, snap=decision_canonical)
+    settlement_snap = ReplaySnapshot(snapshot_at=close, snap=settlement_canonical)
+    return [decision_snap], [settlement_snap]
+
+
+def test_tick_settle_orders_market_mid_is_decision_price() -> None:
+    ticker = "KXHIGHNY-25MAR01-T50"
+    close = datetime(2025, 3, 2, 12, 0, tzinfo=timezone.utc)
+    decision_price = Decimal("0.12")
+
+    decision_snaps, settlement_snaps = _make_decision_and_settlement_snaps(
+        ticker, close, decision_price, "no"
+    )
+
+    order = BacktestOrder(
+        market_ticker=ticker,
+        as_of=close - _SETTLE_LEAD,
+        strategy="tails",
+        action=TradeSide.SELL_YES,
+        contracts=10,
+        fair_yes=Decimal("0.05"),
+        price_per_contract=Decimal("0.88"),
+        order_dollars=Decimal("8.80"),
+        depth_at_price=5,
+        depth_source="snapshot",
+        lead_bucket="24h",
+    )
+
+    settlements = tick_settle_orders([order], decision_snaps + settlement_snaps, _SETTLE_LEAD)
+
+    assert len(settlements) == 1
+    assert settlements[0] == OrderSettlement(result="no", market_mid=Decimal("0.12"))
+
+
+def test_tick_settle_orders_market_mid_is_decision_time_not_settlement_time() -> None:
+    ticker = "KXHIGHNY-25MAR01-T55"
+    close = datetime(2025, 3, 2, 12, 0, tzinfo=timezone.utc)
+    decision_price = Decimal("0.12")
+
+    from bot.backtest.engine import ReplaySnapshot
+
+    decision_canonical = CanonicalSnapshot(
+        ticker=ticker,
+        event_ticker="-".join(ticker.split("-")[:2]),
+        series_ticker=ticker.split("-")[0],
+        status="active",
+        result="",
+        yes_ask=decision_price,
+        yes_bid=decision_price,
+        no_ask=Decimal("1") - decision_price,
+        no_bid=Decimal("1") - decision_price,
+        last_price=decision_price,
+        volume=Decimal("0"),
+        volume_24h=Decimal("0"),
+        open_interest=Decimal("0"),
+        close_time=close,
+    )
+    settlement_canonical = CanonicalSnapshot(
+        ticker=ticker,
+        event_ticker="-".join(ticker.split("-")[:2]),
+        series_ticker=ticker.split("-")[0],
+        status="settled",
+        result="yes",
+        yes_ask=Decimal("0.99"),
+        yes_bid=Decimal("0.99"),
+        no_ask=Decimal("0.01"),
+        no_bid=Decimal("0.01"),
+        last_price=Decimal("0.99"),
+        volume=Decimal("0"),
+        volume_24h=Decimal("0"),
+        open_interest=Decimal("0"),
+        close_time=close,
+    )
+    snaps = [
+        ReplaySnapshot(snapshot_at=close - _SETTLE_LEAD, snap=decision_canonical),
+        ReplaySnapshot(snapshot_at=close, snap=settlement_canonical),
+    ]
+
+    order = BacktestOrder(
+        market_ticker=ticker,
+        as_of=close - _SETTLE_LEAD,
+        strategy="tails",
+        action=TradeSide.BUY_YES,
+        contracts=10,
+        fair_yes=Decimal("0.90"),
+        price_per_contract=Decimal("0.12"),
+        order_dollars=Decimal("1.20"),
+        depth_at_price=5,
+        depth_source="snapshot",
+        lead_bucket="24h",
+    )
+
+    settlements = tick_settle_orders([order], snaps, _SETTLE_LEAD)
+
+    assert len(settlements) == 1
+    assert settlements[0].market_mid == Decimal("0.12")
+    assert settlements[0].market_mid != Decimal("0.99")
+
+
+def test_tick_baseline_brier_golden_three_markets() -> None:
+    from bot.backtest.engine import ReplaySnapshot
+
+    close_a = datetime(2025, 3, 2, 12, 0, tzinfo=timezone.utc)
+    close_b = datetime(2025, 3, 3, 12, 0, tzinfo=timezone.utc)
+    close_c = datetime(2025, 3, 4, 12, 0, tzinfo=timezone.utc)
+    lead = timedelta(hours=24)
+
+    def _snaps(ticker: str, close: datetime, price: Decimal, result: str) -> list:
+        no_p = Decimal("1") - price
+        dec = CanonicalSnapshot(
+            ticker=ticker,
+            event_ticker="-".join(ticker.split("-")[:2]),
+            series_ticker=ticker.split("-")[0],
+            status="active",
+            result="",
+            yes_ask=price,
+            yes_bid=price,
+            no_ask=no_p,
+            no_bid=no_p,
+            last_price=price,
+            volume=Decimal("0"),
+            volume_24h=Decimal("0"),
+            open_interest=Decimal("0"),
+            close_time=close,
+        )
+        sett = CanonicalSnapshot(
+            ticker=ticker,
+            event_ticker="-".join(ticker.split("-")[:2]),
+            series_ticker=ticker.split("-")[0],
+            status="settled",
+            result=result,
+            yes_ask=Decimal("0"),
+            yes_bid=Decimal("0"),
+            no_ask=Decimal("0"),
+            no_bid=Decimal("0"),
+            last_price=Decimal("0"),
+            volume=Decimal("0"),
+            volume_24h=Decimal("0"),
+            open_interest=Decimal("0"),
+            close_time=close,
+        )
+        return [
+            ReplaySnapshot(snapshot_at=close - lead, snap=dec),
+            ReplaySnapshot(snapshot_at=close, snap=sett),
+        ]
+
+    all_snaps = (
+        _snaps("KXHIGHNY-25MAR01-T50", close_a, Decimal("0.10"), "no")
+        + _snaps("KXHIGHNY-25MAR02-T50", close_b, Decimal("0.50"), "yes")
+        + _snaps("KXHIGHNY-25MAR03-T50", close_c, Decimal("0.90"), "yes")
+    )
+
+    brier, n = tick_baseline_brier(all_snaps, lead)
+
+    expected = (
+        (Decimal("0.10") - Decimal("0")) ** 2
+        + (Decimal("0.50") - Decimal("1")) ** 2
+        + (Decimal("0.90") - Decimal("1")) ** 2
+    ) / Decimal("3")
+    assert n == 3
+    assert brier == expected.quantize(Decimal("0.000001"))
+
+
+def test_tick_baseline_brier_excludes_market_without_decision_snap() -> None:
+    from bot.backtest.engine import ReplaySnapshot
+
+    close = datetime(2025, 3, 2, 12, 0, tzinfo=timezone.utc)
+    lead = timedelta(hours=24)
+
+    ticker_with = "KXHIGHNY-25MAR01-T50"
+    ticker_without = "KXHIGHNY-25MAR01-T55"
+
+    dec = CanonicalSnapshot(
+        ticker=ticker_with,
+        event_ticker="KXHIGHNY-25MAR01",
+        series_ticker="KXHIGHNY",
+        status="active",
+        result="",
+        yes_ask=Decimal("0.40"),
+        yes_bid=Decimal("0.40"),
+        no_ask=Decimal("0.60"),
+        no_bid=Decimal("0.60"),
+        last_price=Decimal("0.40"),
+        volume=Decimal("0"),
+        volume_24h=Decimal("0"),
+        open_interest=Decimal("0"),
+        close_time=close,
+    )
+    sett_with = CanonicalSnapshot(
+        ticker=ticker_with,
+        event_ticker="KXHIGHNY-25MAR01",
+        series_ticker="KXHIGHNY",
+        status="settled",
+        result="yes",
+        yes_ask=Decimal("0"),
+        yes_bid=Decimal("0"),
+        no_ask=Decimal("0"),
+        no_bid=Decimal("0"),
+        last_price=Decimal("0"),
+        volume=Decimal("0"),
+        volume_24h=Decimal("0"),
+        open_interest=Decimal("0"),
+        close_time=close,
+    )
+    sett_without = CanonicalSnapshot(
+        ticker=ticker_without,
+        event_ticker="KXHIGHNY-25MAR01",
+        series_ticker="KXHIGHNY",
+        status="settled",
+        result="no",
+        yes_ask=Decimal("0"),
+        yes_bid=Decimal("0"),
+        no_ask=Decimal("0"),
+        no_bid=Decimal("0"),
+        last_price=Decimal("0"),
+        volume=Decimal("0"),
+        volume_24h=Decimal("0"),
+        open_interest=Decimal("0"),
+        close_time=close,
+    )
+
+    snaps = [
+        ReplaySnapshot(snapshot_at=close - lead, snap=dec),
+        ReplaySnapshot(snapshot_at=close, snap=sett_with),
+        ReplaySnapshot(snapshot_at=close, snap=sett_without),
+    ]
+
+    brier, n = tick_baseline_brier(snaps, lead)
+
+    assert n == 1
