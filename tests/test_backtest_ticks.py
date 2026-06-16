@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -15,9 +16,13 @@ from bot.backtest.normalize import CanonicalSnapshot
 from bot.backtest.pnl import BacktestFill
 from bot.backtest.scoring import OrderSettlement
 from bot.backtest.ticks import (
+    DecileRow,
+    build_decile_rows,
+    conservative_execution_bound,
     fill_against_prints,
     ingest_ticks,
     make_no_prints_failure,
+    run_tick_survival,
     settle_filled_order,
     tick_baseline_brier,
     tick_decision_snapshots,
@@ -964,3 +969,248 @@ def test_tick_baseline_brier_excludes_market_without_decision_snap() -> None:
     brier, n = tick_baseline_brier(snaps)
 
     assert n == 1
+
+
+_SURV_LEAD = timedelta(hours=30)
+_SURV_CLOSE = datetime(2025, 3, 5, 0, 0, tzinfo=timezone.utc)
+_SURV_TICKER = "KXHIGHNY-25MAR04-T50-55"
+_SURV_EVENT = "KXHIGHNY-25MAR04"
+_SURV_AS_OF = _SURV_CLOSE - _SURV_LEAD
+_SURV_PRICE = Decimal("0.30")
+_SURV_MEMBERS = np.linspace(48.0, 56.0, 31)
+
+
+class _SurvivalReplay:
+    def __init__(self, members: np.ndarray) -> None:
+        self._cdf = EnsembleCDF.from_members(members, smoothing=1.0)
+
+    async def replay(self, station: StationSpec, valid_date, as_of: datetime) -> EnsembleCDF:
+        return self._cdf
+
+
+def _survival_snap(
+    ticker: str,
+    event: str,
+    series: str,
+    price: Decimal,
+    close: datetime,
+    as_of: datetime,
+    result: str,
+) -> list[ReplaySnapshot]:
+    no = Decimal("1") - price
+    decision = CanonicalSnapshot(
+        ticker=ticker,
+        event_ticker=event,
+        series_ticker=series,
+        status="active",
+        result="",
+        yes_ask=price,
+        yes_bid=price,
+        no_ask=no,
+        no_bid=no,
+        last_price=price,
+        volume=Decimal("0"),
+        volume_24h=Decimal("0"),
+        open_interest=Decimal("0"),
+        close_time=close,
+        yes_bid_size=Decimal("100"),
+        no_bid_size=Decimal("100"),
+    )
+    settlement = CanonicalSnapshot(
+        ticker=ticker,
+        event_ticker=event,
+        series_ticker=series,
+        status="settled",
+        result=result,
+        yes_ask=Decimal("0"),
+        yes_bid=Decimal("0"),
+        no_ask=Decimal("0"),
+        no_bid=Decimal("0"),
+        last_price=Decimal("0"),
+        volume=Decimal("0"),
+        volume_24h=Decimal("0"),
+        open_interest=Decimal("0"),
+        close_time=close,
+    )
+    return [
+        ReplaySnapshot(snapshot_at=as_of, snap=decision),
+        ReplaySnapshot(snapshot_at=close, snap=settlement),
+    ]
+
+
+async def test_run_tick_survival_two_reports_acceptance(tmp_path: Path) -> None:
+    qualifying = _SURV_AS_OF + timedelta(hours=2)
+    rows = [
+        _tick_row("p1", _SURV_TICKER, _SURV_PRICE, qualifying, count=40),
+        _tick_row("p2", _SURV_TICKER, _SURV_PRICE, qualifying + timedelta(hours=1), count=30),
+    ]
+    tick_path = _write_tick_parquet(rows, tmp_path / "ticks.parquet")
+    snapshots = _survival_snap(
+        _SURV_TICKER, _SURV_EVENT, "KXHIGHNY", _SURV_PRICE, _SURV_CLOSE, _SURV_AS_OF, "yes"
+    )
+    out_dir = tmp_path / "report"
+
+    verdict, summary, runs, logs = await run_tick_survival(
+        tick_path, snapshots, _SurvivalReplay(_SURV_MEMBERS), _SURV_LEAD, out_dir
+    )
+
+    cons = out_dir / "conservative" / "summary.md"
+    inc = out_dir / "inclusive" / "summary.md"
+    assert cons.exists()
+    assert inc.exists()
+
+    cons_text = cons.read_text()
+    assert "verdict: insufficient_data" in cons_text
+    assert "## headline" in cons_text
+
+    inc_text = inc.read_text()
+    assert "verdict: insufficient_data" not in inc_text
+
+    assert summary == cons
+    assert verdict.final == "insufficient_data"
+    assert verdict.window_verdicts["in_sample"] == "insufficient_data"
+    assert all(r.window == "in_sample" for r in runs)
+    assert set(logs) == {"tails:20000", "tails:500", "edge:20000", "edge:500"}
+
+
+async def test_run_tick_survival_conservative_runs_have_no_scored_orders(tmp_path: Path) -> None:
+    qualifying = _SURV_AS_OF + timedelta(hours=2)
+    rows = [_tick_row("p1", _SURV_TICKER, _SURV_PRICE, qualifying, count=40)]
+    tick_path = _write_tick_parquet(rows, tmp_path / "ticks.parquet")
+    snapshots = _survival_snap(
+        _SURV_TICKER, _SURV_EVENT, "KXHIGHNY", _SURV_PRICE, _SURV_CLOSE, _SURV_AS_OF, "yes"
+    )
+
+    _, _, runs, _ = await run_tick_survival(
+        tick_path, snapshots, _SurvivalReplay(_SURV_MEMBERS), _SURV_LEAD, tmp_path / "r"
+    )
+
+    assert all(score.n_orders == 0 for r in runs for score in r.report.cities)
+    skip_labels = {label for r in runs for score in r.report.cities for label in score.skips}
+    assert "fill:no_qualifying_prints" in skip_labels
+
+
+_DEC_LEAD = timedelta(hours=24)
+_DEC_CLOSE = datetime(2026, 1, 16, 6, 0, tzinfo=timezone.utc)
+_DEC_TICKER = "KXHIGHDEN-26JAN15-T85"
+_DEC_EVENT = "KXHIGHDEN-26JAN15"
+_DEC_AS_OF = _DEC_CLOSE - _DEC_LEAD
+_DEC_PRICE = Decimal("0.12")
+_DEC_MEMBERS = np.array([59.5, 61.5, 63.5])
+
+
+class _TailsReplay:
+    def __init__(self) -> None:
+        self._cdf = EnsembleCDF.from_members(_DEC_MEMBERS, smoothing=0.65)
+
+    async def replay(self, station: StationSpec, valid_date, as_of: datetime) -> EnsembleCDF:
+        return self._cdf
+
+
+async def test_run_tick_survival_decile_two_rows(tmp_path: Path) -> None:
+    near = _DEC_CLOSE - timedelta(hours=1)
+    far = _DEC_CLOSE - timedelta(hours=10)
+    rows = [
+        _tick_row("p1", _DEC_TICKER, Decimal("0.15"), near, count=20),
+        _tick_row("p2", _DEC_TICKER, Decimal("0.15"), far, count=30),
+    ]
+    tick_path = _write_tick_parquet(rows, tmp_path / "ticks.parquet")
+    snapshots = _survival_snap(
+        _DEC_TICKER, _DEC_EVENT, "KXHIGHDEN", _DEC_PRICE, _DEC_CLOSE, _DEC_AS_OF, "no"
+    )
+
+    await run_tick_survival(tick_path, snapshots, _TailsReplay(), _DEC_LEAD, tmp_path / "report")
+
+    inc = (tmp_path / "report" / "inclusive" / "fills_by_decile.md").read_text()
+    assert "| 0 | [0.0, 2.4) | 20 | 20 | 0 | 1 |" in inc
+    assert "| 4 | [9.6, 12.0) | 30 | 30 | 0 | 1 |" in inc
+
+
+def test_build_decile_rows_two_deciles() -> None:
+    order = _sell_yes_order(contracts=1000, yes_bid=Decimal("0.12"))
+    close = order.as_of + _DEC_LEAD
+    near = {"yes_price": Decimal("0.15"), "count": 20, "created_time": close - timedelta(hours=1)}
+    far = {"yes_price": Decimal("0.15"), "count": 30, "created_time": close - timedelta(hours=10)}
+
+    rows = build_decile_rows([(order, [near, far])], _DEC_LEAD)
+
+    assert [r.decile for r in rows] == [0, 4]
+    by_decile = {r.decile: r for r in rows}
+    assert by_decile[0] == DecileRow(
+        decile=0,
+        lo_hours=Decimal("0"),
+        hi_hours=Decimal("24") / Decimal("10"),
+        contracts=20,
+        sell_yes_contracts=20,
+        buy_yes_contracts=0,
+        n_prints=1,
+    )
+    assert by_decile[4].contracts == 30
+    assert by_decile[4].sell_yes_contracts == 30
+    assert by_decile[4].buy_yes_contracts == 0
+
+
+def test_conservative_execution_bound_golden() -> None:
+    assert conservative_execution_bound(10, 7) == (Decimal("0.7"), True)
+    assert conservative_execution_bound(10, 5) == (Decimal("0.5"), False)
+    assert conservative_execution_bound(0, 0) == (Decimal("0"), False)
+
+
+async def test_run_tick_survival_execution_bound_line_present(tmp_path: Path) -> None:
+    rows = [_tick_row("p1", _DEC_TICKER, Decimal("0.05"), _DEC_AS_OF + timedelta(hours=2), count=5)]
+    tick_path = _write_tick_parquet(rows, tmp_path / "ticks.parquet")
+    snapshots = _survival_snap(
+        _DEC_TICKER, _DEC_EVENT, "KXHIGHDEN", _DEC_PRICE, _DEC_CLOSE, _DEC_AS_OF, "no"
+    )
+
+    await run_tick_survival(tick_path, snapshots, _TailsReplay(), _DEC_LEAD, tmp_path / "report")
+
+    cons = (tmp_path / "report" / "conservative" / "fills_by_decile.md").read_text()
+    assert "execution-bound, not edge-bound" in cons
+
+
+async def test_run_tick_survival_no_execution_bound_when_filled(tmp_path: Path) -> None:
+    rows = [
+        _tick_row("p1", _DEC_TICKER, Decimal("0.20"), _DEC_AS_OF + timedelta(hours=2), count=200)
+    ]
+    tick_path = _write_tick_parquet(rows, tmp_path / "ticks.parquet")
+    snapshots = _survival_snap(
+        _DEC_TICKER, _DEC_EVENT, "KXHIGHDEN", _DEC_PRICE, _DEC_CLOSE, _DEC_AS_OF, "no"
+    )
+
+    await run_tick_survival(tick_path, snapshots, _TailsReplay(), _DEC_LEAD, tmp_path / "report")
+
+    cons = (tmp_path / "report" / "conservative" / "fills_by_decile.md").read_text()
+    assert "execution-bound, not edge-bound" not in cons
+
+
+async def test_run_tick_survival_sell_yes_booked_at_limit(tmp_path: Path) -> None:
+    rows = [
+        _tick_row("p1", _DEC_TICKER, Decimal("0.20"), _DEC_AS_OF + timedelta(hours=2), count=200)
+    ]
+    tick_path = _write_tick_parquet(rows, tmp_path / "ticks.parquet")
+    snapshots = _survival_snap(
+        _DEC_TICKER, _DEC_EVENT, "KXHIGHDEN", _DEC_PRICE, _DEC_CLOSE, _DEC_AS_OF, "no"
+    )
+
+    await run_tick_survival(tick_path, snapshots, _TailsReplay(), _DEC_LEAD, tmp_path / "report")
+
+    with (tmp_path / "report" / "inclusive" / "orders.csv").open(newline="") as f:
+        order_rows = list(csv.DictReader(f))
+    assert order_rows
+    row = order_rows[0]
+    assert row["action"] == "sell_yes"
+    filled = int(row["contracts"])
+    executed_yes_price = Decimal("0.12")
+    expected_fee = taker_fee(filled, executed_yes_price)
+    expected_net = realized_pnl_for_trade(
+        TradeSide.SELL_YES, executed_yes_price, filled, expected_fee, won=True
+    )
+    assert Decimal(row["net_pnl"]) == expected_net
+
+    collateral_price = Decimal("1") - executed_yes_price
+    wrong_fee = taker_fee(filled, collateral_price)
+    wrong_net = realized_pnl_for_trade(
+        TradeSide.SELL_YES, collateral_price, filled, wrong_fee, won=True
+    )
+    assert Decimal(row["net_pnl"]) != wrong_net
