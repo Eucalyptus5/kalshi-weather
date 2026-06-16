@@ -406,6 +406,19 @@ def _load_prints_by_ticker(tick_path: Path) -> dict[str, list[dict]]:
     return by_ticker
 
 
+def write_combined_report(
+    tick_runs: list[ScoredRun],
+    statedb_runs: list[ScoredRun],
+    out_dir: Path,
+    orders: list[BacktestOrder] | None = None,
+    fills: list[BacktestFill] | None = None,
+) -> tuple[ReportVerdict, Path]:
+    combined = tick_runs + statedb_runs
+    verdict = evaluate_runs(combined)
+    path = write_report(combined, orders or [], fills or [], out_dir)
+    return verdict, path
+
+
 async def run_tick_survival(
     tick_path: Path,
     snapshots: list[ReplaySnapshot],

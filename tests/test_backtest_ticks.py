@@ -15,6 +15,8 @@ from bot.backtest.engine import BacktestOrder, ReplayFailure, ReplaySnapshot, bu
 from bot.backtest.normalize import CanonicalSnapshot
 from bot.backtest.pnl import BacktestFill
 from bot.backtest.scoring import OrderSettlement
+from bot.backtest.report import REFERENCE_BANKROLL, ScoredRun, SENSITIVITY_BANKROLL
+from bot.backtest.scoring import CityScore, MetricRow, ScoreReport
 from bot.backtest.ticks import (
     DecileRow,
     build_decile_rows,
@@ -27,6 +29,7 @@ from bot.backtest.ticks import (
     tick_baseline_brier,
     tick_decision_snapshots,
     tick_settle_orders,
+    write_combined_report,
 )
 from bot.backtest.forecast_replay import StationSpec, pick_cycle
 from bot.execution.fees import taker_fee
@@ -1214,3 +1217,149 @@ async def test_run_tick_survival_sell_yes_booked_at_limit(tmp_path: Path) -> Non
         TradeSide.SELL_YES, collateral_price, filled, wrong_fee, won=True
     )
     assert Decimal(row["net_pnl"]) != wrong_net
+
+
+def _metric(net_pnl: str) -> MetricRow:
+    return MetricRow(
+        brier=Decimal("0.10"),
+        log_loss=Decimal("0.30"),
+        hit_rate=Decimal("0.50"),
+        net_pnl=Decimal(net_pnl),
+        baseline_brier=Decimal("0.20"),
+        beats_baseline=True,
+    )
+
+
+def _city(name: str, net_pnl: str | None) -> CityScore:
+    return CityScore(
+        city=name,
+        n_orders=0 if net_pnl is None else 1,
+        skips={} if net_pnl is not None else {"fill:no_qualifying_prints": 1},
+        metrics=None if net_pnl is None else _metric(net_pnl),
+    )
+
+
+def _run(strategy: str, window: str, bankroll: Decimal, cities: list[CityScore]) -> ScoredRun:
+    return ScoredRun(
+        strategy=strategy,
+        window=window,
+        bankroll=bankroll,
+        depth_multiplier=Decimal("1.0"),
+        sigma_multiplier=Decimal("1.0"),
+        report=ScoreReport(groups=[], cities=cities),
+    )
+
+
+def _grid(window: str, cities_for: dict[Decimal, list[CityScore]]) -> list[ScoredRun]:
+    return [
+        _run(strategy, window, bankroll, cities_for[bankroll])
+        for strategy in ("tails", "edge")
+        for bankroll in (REFERENCE_BANKROLL, SENSITIVITY_BANKROLL)
+    ]
+
+
+def _headline_data_rows(summary: str) -> list[str]:
+    lines = summary.splitlines()
+    start = lines.index("## headline")
+    sep = lines.index("| --- | --- | --- | --- | --- | --- |", start)
+    rows: list[str] = []
+    for line in lines[sep + 1 :]:
+        if not line.startswith("|"):
+            break
+        rows.append(line)
+    return rows
+
+
+def test_combined_report_renders_four_headline_rows(tmp_path: Path) -> None:
+    cities = {
+        REFERENCE_BANKROLL: [_city("KXHIGHNY", "1.00"), _city("KXHIGHCHI", "0.50")],
+        SENSITIVITY_BANKROLL: [_city("KXHIGHNY", "0.30")],
+    }
+    tick_runs = _grid("in_sample", cities)
+    statedb_runs = _grid("out_of_sample", cities)
+
+    verdict, path = write_combined_report(tick_runs, statedb_runs, tmp_path / "combined")
+
+    assert path == tmp_path / "combined" / "summary.md"
+    assert path.exists()
+
+    rows = _headline_data_rows(path.read_text())
+    assert len(rows) == 4
+    assert any("| $20000 | in_sample |" in r for r in rows)
+    assert any("| $20000 | out_of_sample |" in r for r in rows)
+    assert any("| $500 | in_sample |" in r for r in rows)
+    assert any("| $500 | out_of_sample |" in r for r in rows)
+    assert {(h.bankroll, h.window) for h in verdict.headline} == {
+        (REFERENCE_BANKROLL, "in_sample"),
+        (REFERENCE_BANKROLL, "out_of_sample"),
+        (SENSITIVITY_BANKROLL, "in_sample"),
+        (SENSITIVITY_BANKROLL, "out_of_sample"),
+    }
+
+
+def test_combined_report_no_era_flip_on_agreement(tmp_path: Path) -> None:
+    cities = {
+        REFERENCE_BANKROLL: [_city("KXHIGHNY", "1.00"), _city("KXHIGHCHI", "-0.20")],
+        SENSITIVITY_BANKROLL: [_city("KXHIGHNY", "0.30")],
+    }
+    tick_runs = _grid("in_sample", cities)
+    statedb_runs = _grid("out_of_sample", cities)
+
+    verdict, path = write_combined_report(tick_runs, statedb_runs, tmp_path / "combined")
+
+    assert verdict.era_flip is False
+    assert "strategy-era flip:" not in path.read_text()
+
+
+def test_combined_report_era_flip_on_genuine_disagreement(tmp_path: Path) -> None:
+    tick_cities = {
+        REFERENCE_BANKROLL: [_city("KXHIGHNY", "-1.00"), _city("KXHIGHCHI", "-0.50")],
+        SENSITIVITY_BANKROLL: [_city("KXHIGHNY", "-0.30")],
+    }
+    statedb_cities = {
+        REFERENCE_BANKROLL: [_city("KXHIGHNY", "1.00"), _city("KXHIGHCHI", "-0.20")],
+        SENSITIVITY_BANKROLL: [_city("KXHIGHNY", "0.30")],
+    }
+    tick_runs = _grid("in_sample", tick_cities)
+    statedb_runs = _grid("out_of_sample", statedb_cities)
+
+    verdict, path = write_combined_report(tick_runs, statedb_runs, tmp_path / "combined")
+
+    assert verdict.era_flip is True
+    assert "strategy-era flip:" in path.read_text()
+
+
+def test_combined_report_vacuous_window_does_not_flip(tmp_path: Path) -> None:
+    tick_cities = {
+        REFERENCE_BANKROLL: [_city("KXHIGHNY", None), _city("KXHIGHCHI", None)],
+        SENSITIVITY_BANKROLL: [_city("KXHIGHNY", None)],
+    }
+    statedb_cities = {
+        REFERENCE_BANKROLL: [_city("KXHIGHNY", "1.00"), _city("KXHIGHCHI", "-0.20")],
+        SENSITIVITY_BANKROLL: [_city("KXHIGHNY", "0.30")],
+    }
+    tick_runs = _grid("in_sample", tick_cities)
+    statedb_runs = _grid("out_of_sample", statedb_cities)
+
+    verdict, path = write_combined_report(tick_runs, statedb_runs, tmp_path / "combined")
+
+    assert verdict.era_flip is False
+    assert "strategy-era flip:" not in path.read_text()
+
+
+def test_combined_report_empty_order_ledger_is_well_formed(tmp_path: Path) -> None:
+    cities = {
+        REFERENCE_BANKROLL: [_city("KXHIGHNY", "1.00")],
+        SENSITIVITY_BANKROLL: [_city("KXHIGHNY", "0.30")],
+    }
+    tick_runs = _grid("in_sample", cities)
+    statedb_runs = _grid("out_of_sample", cities)
+
+    _, path = write_combined_report(tick_runs, statedb_runs, tmp_path / "combined")
+
+    assert path.exists()
+    orders_csv = tmp_path / "combined" / "orders.csv"
+    assert orders_csv.exists()
+    with orders_csv.open(newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert rows == []
