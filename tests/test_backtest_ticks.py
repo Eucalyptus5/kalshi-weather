@@ -1335,13 +1335,18 @@ def test_combined_report_vacuous_window_does_not_flip(tmp_path: Path) -> None:
         SENSITIVITY_BANKROLL: [_city("KXHIGHNY", None)],
     }
     statedb_cities = {
-        REFERENCE_BANKROLL: [_city("KXHIGHNY", "1.00"), _city("KXHIGHCHI", "-0.20")],
-        SENSITIVITY_BANKROLL: [_city("KXHIGHNY", "0.30")],
+        REFERENCE_BANKROLL: [_city("KXHIGHNY", "-1.00"), _city("KXHIGHCHI", "-0.50")],
+        SENSITIVITY_BANKROLL: [_city("KXHIGHNY", "-0.30")],
     }
     tick_runs = _grid("in_sample", tick_cities)
     statedb_runs = _grid("out_of_sample", statedb_cities)
 
     verdict, path = write_combined_report(tick_runs, statedb_runs, tmp_path / "combined")
+
+    in_sample = next(h for h in verdict.headline if h.window == "in_sample")
+    out_of_sample = next(h for h in verdict.headline if h.window == "out_of_sample")
+    assert in_sample.all_cities_negative is False
+    assert out_of_sample.all_cities_negative is True
 
     assert verdict.era_flip is False
     assert "strategy-era flip:" not in path.read_text()
