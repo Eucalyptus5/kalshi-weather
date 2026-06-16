@@ -17,7 +17,7 @@ from bot.backtest.pnl import BacktestFill
 from bot.backtest.scoring import OrderSettlement
 from bot.execution.fees import taker_fee
 from bot.execution.paper import TradeSide
-from bot.validation.scoring import BRIER_QUANTUM, realized_pnl_for_trade
+from bot.validation.scoring import brier_score, realized_pnl_for_trade
 
 
 _TICK_SCHEMA = pa.schema(
@@ -224,13 +224,12 @@ def tick_settle_orders(
         result = results[order.market_ticker]
         close = order.as_of + lead
         snap = decisions[(order.market_ticker, close)].snap
-        out.append(OrderSettlement(result=result, market_mid=snap.yes_bid))
+        out.append(OrderSettlement(result=result, market_mid=(snap.yes_bid + snap.yes_ask) / 2))
     return out
 
 
 def tick_baseline_brier(
     snapshots: list[ReplaySnapshot],
-    lead: timedelta,
 ) -> tuple[Decimal, int]:
     results: dict[str, str] = {}
     decisions: dict[str, ReplaySnapshot] = {}
@@ -245,17 +244,15 @@ def tick_baseline_brier(
         if best is None or row.snapshot_at > best.snapshot_at:
             decisions[ticker] = row
 
-    total = Decimal("0")
-    n = 0
+    mids: list[Decimal] = []
+    outcomes: list[int] = []
     for ticker, dec_snap in decisions.items():
         result = results.get(ticker)
         if result not in ("yes", "no"):
             continue
-        price = dec_snap.snap.yes_bid
-        outcome = Decimal("1") if result == "yes" else Decimal("0")
-        total += (price - outcome) ** 2
-        n += 1
+        mids.append((dec_snap.snap.yes_bid + dec_snap.snap.yes_ask) / 2)
+        outcomes.append(1 if result == "yes" else 0)
 
-    if n == 0:
+    if not mids:
         return Decimal("0"), 0
-    return (total / Decimal(n)).quantize(BRIER_QUANTUM), n
+    return brier_score(mids, outcomes), len(mids)
