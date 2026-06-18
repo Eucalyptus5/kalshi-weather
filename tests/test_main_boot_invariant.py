@@ -64,6 +64,7 @@ def _make_app(pem_path: Path, kalshi: KalshiDemoClient) -> App:
         session_factory=sf,
         meteo=None,  # type: ignore[arg-type]
         kalshi=kalshi,  # type: ignore[arg-type]
+        kalshi_read=kalshi,  # type: ignore[arg-type]
         acis=None,  # type: ignore[arg-type]
         series_list=("KXHIGHNY",),
     )
@@ -324,6 +325,8 @@ def _drive_main_with_args(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> d
         log_level = "INFO"
         kalshi_demo_key_id = "k"
         kalshi_demo_private_key_path = Path("/dev/null")
+        kalshi_prod_key_id = "p"
+        kalshi_prod_private_key_path = Path("/dev/null")
 
         def model_dump(self):
             return {"mode": self.mode}
@@ -344,6 +347,7 @@ def _drive_main_with_args(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> d
         return _FakeKalshi()
 
     monkeypatch.setattr(bot_main, "KalshiDemoClient", _kalshi_factory)
+    monkeypatch.setattr(bot_main, "KalshiReadClient", _kalshi_factory)
 
     async def _noop_backfill(app):
         return None

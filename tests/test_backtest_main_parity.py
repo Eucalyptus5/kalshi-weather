@@ -140,6 +140,7 @@ async def _live_tuples(
         session_factory=make_session_factory(engine),
         meteo=None,  # type: ignore[arg-type]
         kalshi=None,  # type: ignore[arg-type]
+        kalshi_read=None,  # type: ignore[arg-type]
         acis=None,  # type: ignore[arg-type]
         series_list=(_SERIES,),
         bankroll=_BANKROLL,

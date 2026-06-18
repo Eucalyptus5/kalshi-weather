@@ -746,6 +746,7 @@ def _make_calibration_app(monkeypatch: pytest.MonkeyPatch) -> object:
         session_factory=sf,
         meteo=_Noop(),  # type: ignore[arg-type]
         kalshi=_Noop(),  # type: ignore[arg-type]
+        kalshi_read=_Noop(),  # type: ignore[arg-type]
         acis=_Noop(),  # type: ignore[arg-type]
         series_list=("KXHIGHDEN",),
     )

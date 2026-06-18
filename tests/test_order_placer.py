@@ -20,11 +20,12 @@ from bot.execution.order_placer import (
     _build_body,
     _client_order_id,
     _parse_order,
+    cancel_order,
     parse_avg_yes_fill_price,
     place_order_demo,
 )
 from bot.execution.paper import TradeIntent, TradeSide
-from bot.kalshi_client import KalshiDemoClient, KalshiOrderbook
+from bot.kalshi_client import KalshiDemoClient, KalshiOrderbook, KalshiReadClient
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +48,15 @@ def _settings(pem_path: Path) -> Settings:
         mode="paper",
         kalshi_demo_key_id="demo-key-id",
         kalshi_demo_private_key_path=pem_path,
+    )
+
+
+def _prod_settings(pem_path: Path) -> Settings:
+    return Settings(
+        mode="paper",
+        kalshi_prod_api_base="https://api.elections.kalshi.com/trade-api/v2",
+        kalshi_prod_key_id="prod-key-id",
+        kalshi_prod_private_key_path=pem_path,
     )
 
 
@@ -126,6 +136,23 @@ def _make_order_response(
         "maker_fill_cost_dollars": "0.000000",
     }
     return {"order": order}
+
+
+async def test_place_order_demo_refuses_prod_read_client(rsa_pem: Path) -> None:
+    read_client = KalshiReadClient(_prod_settings(rsa_pem))
+    with pytest.raises(RuntimeError, match="prod read client"):
+        await place_order_demo(
+            _intent(),
+            _book(),
+            read_client,  # type: ignore[arg-type]
+            now=_now(),
+        )
+
+
+async def test_cancel_order_refuses_prod_read_client(rsa_pem: Path) -> None:
+    read_client = KalshiReadClient(_prod_settings(rsa_pem))
+    with pytest.raises(RuntimeError, match="prod read client"):
+        await cancel_order(read_client, "order-id")  # type: ignore[arg-type]
 
 
 async def _client_with_handler(rsa_pem: Path, handler) -> KalshiDemoClient:

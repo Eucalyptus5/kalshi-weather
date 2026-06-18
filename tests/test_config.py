@@ -15,6 +15,9 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         "KALSHI_DEMO_API_BASE",
         "KALSHI_DEMO_KEY_ID",
         "KALSHI_DEMO_PRIVATE_KEY_PATH",
+        "KALSHI_PROD_API_BASE",
+        "KALSHI_PROD_KEY_ID",
+        "KALSHI_PROD_PRIVATE_KEY_PATH",
         "LOG_LEVEL",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -72,3 +75,18 @@ def test_env_var_mode_demo_with_key_passes(monkeypatch: pytest.MonkeyPatch) -> N
     s = Settings()
 
     assert s.mode == "demo"
+
+
+def test_prod_read_defaults() -> None:
+    s = Settings(mode="paper")
+
+    assert s.kalshi_prod_api_base == "https://api.elections.kalshi.com/trade-api/v2"
+    assert s.kalshi_prod_key_id is None
+    assert s.kalshi_prod_private_key_path is None
+
+
+def test_paper_constructs_without_prod_creds() -> None:
+    s = Settings(mode="paper")
+
+    assert s.mode == "paper"
+    assert s.kalshi_prod_key_id is None

@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from bot.execution.paper import TradeIntent, TradeSide
 from bot.execution.price_format import format_price_dollars
-from bot.kalshi_client import KalshiDemoClient, KalshiOrderbook
+from bot.kalshi_client import KalshiDemoClient, KalshiOrderbook, KalshiReadClient
 from bot.markets.parser import parse_ticker
 
 logger = logging.getLogger(__name__)
@@ -211,6 +211,8 @@ async def place_order_demo(
     *,
     now: datetime,
 ) -> DemoOrder | DemoOrderIdempotent | None:
+    if isinstance(client, KalshiReadClient):
+        raise RuntimeError("orders must not reach a prod read client")
     parsed = parse_ticker(intent.market_ticker)
     cid = _client_order_id(intent.strategy, intent.side, intent.market_ticker, parsed.event_date)
     body = _build_body(intent, book, cid)
@@ -274,6 +276,8 @@ async def place_order_demo(
 
 
 async def cancel_order(client: KalshiDemoClient, order_id: str) -> bool:
+    if isinstance(client, KalshiReadClient):
+        raise RuntimeError("orders must not reach a prod read client")
     response = await client.delete_signed(f"/portfolio/orders/{order_id}")
     if response.status_code == 404:
         logger.info("demo_order_cancel_not_found order_id=%s", order_id)

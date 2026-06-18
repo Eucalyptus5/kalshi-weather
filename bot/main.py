@@ -56,7 +56,7 @@ from bot.execution.paper import (
 )
 from bot.forecast.cdf import EnsembleCDF
 from bot.forecast.open_meteo import OpenMeteoClient, StationForecast
-from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook
+from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook, KalshiReadClient
 from bot.markets.observation_window import observation_window
 from bot.markets.parser import ParsedTicker, parse_ticker
 from bot.observability.loop_runner import LoopSkipped, _sleep_or_stop, run_loop
@@ -323,6 +323,7 @@ class App:
     session_factory: sessionmaker[Session]
     meteo: OpenMeteoClient
     kalshi: KalshiDemoClient
+    kalshi_read: KalshiReadClient
     acis: ACISClient
     series_list: tuple[str, ...]
     bankroll: Decimal | None = None
@@ -345,6 +346,7 @@ class App:
     async def aclose(self) -> None:
         await self.meteo.aclose()
         await self.kalshi.aclose()
+        await self.kalshi_read.aclose()
         await self.acis.aclose()
         _checkpoint_wal(self.engine)
         self.engine.dispose()
@@ -422,7 +424,7 @@ async def refresh_markets(app: App) -> int:
     total = 0
     for series in app.series_list:
         try:
-            markets = await app.kalshi.list_open_markets_for_series(series)
+            markets = await app.kalshi_read.list_open_markets_for_series(series)
         except (httpx.HTTPError, json.JSONDecodeError, KeyError) as err:
             logger.warning("kalshi_list_markets_failed series=%s err=%s", series, err)
             continue
@@ -431,7 +433,7 @@ async def refresh_markets(app: App) -> int:
         seen_tickers: set[str] = set()
         for m in markets:
             try:
-                book = await app.kalshi.get_orderbook(m.ticker)
+                book = await app.kalshi_read.get_orderbook(m.ticker)
             except (httpx.HTTPError, json.JSONDecodeError, KeyError) as err:
                 logger.warning("kalshi_orderbook_fetch_failed ticker=%s err=%s", m.ticker, err)
                 continue
@@ -1564,6 +1566,7 @@ def main() -> None:
     session_factory = make_session_factory(engine)
     meteo = OpenMeteoClient()
     kalshi = KalshiDemoClient(settings)
+    kalshi_read = KalshiReadClient(settings)
     acis = ACISClient()
 
     app = App(
@@ -1572,12 +1575,14 @@ def main() -> None:
         session_factory=session_factory,
         meteo=meteo,
         kalshi=kalshi,
+        kalshi_read=kalshi_read,
         acis=acis,
         series_list=series_list,
     )
 
     async def _go() -> None:
         await app.kalshi.aopen()
+        await app.kalshi_read.aopen()
         if app.settings.mode == "demo":
             await _demo_startup_backfill(app)
             await _assert_boot_position_invariant(app, require_parity=args.require_position_parity)

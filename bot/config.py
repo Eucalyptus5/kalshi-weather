@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     kalshi_demo_api_base: str = "https://demo-api.kalshi.co/trade-api/v2"
     kalshi_demo_key_id: str | None = None
     kalshi_demo_private_key_path: Path | None = None
+    kalshi_prod_api_base: str = "https://api.elections.kalshi.com/trade-api/v2"
+    kalshi_prod_key_id: str | None = None
+    kalshi_prod_private_key_path: Path | None = None
     log_level: str = "INFO"
 
     @model_validator(mode="after")

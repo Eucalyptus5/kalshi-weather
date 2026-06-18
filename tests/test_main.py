@@ -150,6 +150,7 @@ def _make_app(
         session_factory=sf,
         meteo=meteo,  # type: ignore[arg-type]
         kalshi=kalshi,  # type: ignore[arg-type]
+        kalshi_read=kalshi,  # type: ignore[arg-type]
         acis=acis if acis is not None else _StubACIS(None),  # type: ignore[arg-type]
         series_list=series_list,
     )
@@ -394,6 +395,27 @@ async def test_refresh_markets_persists_markets_and_orderbooks() -> None:
     assert app.latest_orderbooks[market_b.ticker] is book_b
 
 
+async def test_refresh_markets_persists_populated_ask_side_from_read_client() -> None:
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    market = _market_from("KXHIGHDEN-26MAY07-T70-75", "0.45", "0.43", close_at)
+    book = _book_from(market.ticker, "0.45", "0.43", no_bid_depth=50)
+    assert book.no_bid > Decimal("0")
+    assert book.yes_ask < Decimal("1")
+    assert book.no_bid_depth > 0
+
+    kalshi = _StubKalshi(markets=[market], orderbooks={market.ticker: book})
+    app = _make_app(kalshi=kalshi)
+
+    await refresh_markets(app)
+
+    with app.session_factory() as session:
+        row = session.scalars(select(OrderbookSnapshot)).one()
+    assert row.ticker == market.ticker
+    assert row.no_bid > Decimal("0")
+    assert row.yes_ask < Decimal("1")
+    assert row.no_bid_depth > 0
+
+
 async def test_refresh_markets_persists_per_series() -> None:
     close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
     den = _market_from("KXHIGHDEN-26MAY07-T70-75", "0.45", "0.43", close_at)
@@ -592,6 +614,7 @@ async def test_refresh_markets_isolates_orderbook_json_error(
             session_factory=sf,
             meteo=None,  # type: ignore[arg-type]
             kalshi=client,
+            kalshi_read=client,
             acis=_StubACIS(None),  # type: ignore[arg-type]
             series_list=("KXHIGHDEN",),
         )
@@ -666,7 +689,7 @@ async def test_refresh_markets_keeps_cache_when_list_fetch_fails(
     assert nyc.ticker in app.latest_markets
 
     failing = _ListFailKalshi(markets=[den, nyc], orderbooks=books, fail_series="KXHIGHNY")
-    app.kalshi = failing  # type: ignore[assignment]
+    app.kalshi_read = failing  # type: ignore[assignment]
     caplog.set_level(logging.WARNING, logger="bot.main")
     await refresh_markets(app)
 
@@ -3376,6 +3399,7 @@ async def test_run_checkpoints_wal_on_shutdown(monkeypatch) -> None:
         session_factory=sf,
         meteo=_NoopMeteo(),  # type: ignore[arg-type]
         kalshi=_NoopKalshi(),  # type: ignore[arg-type]
+        kalshi_read=_NoopKalshi(),  # type: ignore[arg-type]
         acis=_NoopACIS(),  # type: ignore[arg-type]
         series_list=("KXHIGHDEN",),
     )
@@ -4034,6 +4058,7 @@ def _make_demo_app(
         session_factory=sf,
         meteo=meteo,  # type: ignore[arg-type]
         kalshi=kalshi,  # type: ignore[arg-type]
+        kalshi_read=kalshi,  # type: ignore[arg-type]
         acis=_StubACIS(None),  # type: ignore[arg-type]
         series_list=series_list,
         bankroll=bankroll,
@@ -5344,6 +5369,7 @@ async def test_startup_backfill_runs_before_eval_loop(
         session_factory=sf,
         meteo=_StubMeteo({}),  # type: ignore[arg-type]
         kalshi=kalshi,
+        kalshi_read=kalshi,
         acis=_StubACIS(None),  # type: ignore[arg-type]
         series_list=("KXHIGHDEN",),
     )
@@ -5489,6 +5515,7 @@ async def test_demo_integration_one_cycle_via_mock_transport(
             session_factory=sf,
             meteo=meteo,  # type: ignore[arg-type]
             kalshi=client,
+            kalshi_read=client,
             acis=_StubACIS(None),  # type: ignore[arg-type]
             series_list=("KXHIGHDEN",),
         )
@@ -6750,6 +6777,7 @@ def _make_snapshot_demo_app(_rsa_pem: Path, kalshi) -> App:
         session_factory=sf,
         meteo=None,  # type: ignore[arg-type]
         kalshi=kalshi,
+        kalshi_read=kalshi,
         acis=None,  # type: ignore[arg-type]
         series_list=("KXHIGHDEN",),
     )

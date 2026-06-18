@@ -59,6 +59,7 @@ def _make_app(rsa_pem: Path, kalshi: KalshiDemoClient) -> App:
         session_factory=sf,
         meteo=None,  # type: ignore[arg-type]
         kalshi=kalshi,  # type: ignore[arg-type]
+        kalshi_read=kalshi,  # type: ignore[arg-type]
         acis=None,  # type: ignore[arg-type]
         series_list=("KXHIGHDEN",),
     )

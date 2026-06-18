@@ -17,10 +17,14 @@ from bot.kalshi_client import (
     KalshiDemoClient,
     KalshiMarket,
     KalshiOrderbook,
+    KalshiReadClient,
     _assert_demo_host,
     _resolved_request_url,
 )
 from bot.markets.parser import event_id
+
+
+_PROD_BASE = "https://api.elections.kalshi.com/trade-api/v2"
 
 
 _BALANCE_FIXTURE_PATH = Path(__file__).parent / "data" / "portfolio_balance_demo.json"
@@ -975,6 +979,141 @@ async def test_get_balance_full_round_trips_captured_payload(rsa_pem: Path) -> N
     assert isinstance(payload, BalancePayload)
     assert payload.balance_dollars == Decimal("788.3901")
     assert balance == Decimal("788.3901")
+
+
+def _prod_settings_with_pem(pem_path: Path) -> Settings:
+    return Settings(
+        mode="paper",
+        kalshi_prod_key_id="prod-key-id",
+        kalshi_prod_private_key_path=pem_path,
+    )
+
+
+def _prod_settings_no_key() -> Settings:
+    return Settings(mode="paper", kalshi_prod_key_id=None)
+
+
+def _prod_settings_missing_pem(tmp_path: Path) -> Settings:
+    return Settings(
+        mode="paper",
+        kalshi_prod_key_id="prod-key-id",
+        kalshi_prod_private_key_path=tmp_path / "does-not-exist.pem",
+    )
+
+
+def _prod_settings_demo_base(pem_path: Path) -> Settings:
+    return Settings(
+        mode="paper",
+        kalshi_prod_api_base="https://demo-api.kalshi.co/trade-api/v2",
+        kalshi_prod_key_id="prod-key-id",
+        kalshi_prod_private_key_path=pem_path,
+    )
+
+
+async def test_read_client_aopen_raises_when_key_id_missing(rsa_pem: Path) -> None:
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={}))
+    async with httpx.AsyncClient(transport=transport, base_url=_PROD_BASE) as http:
+        client = KalshiReadClient(_prod_settings_no_key(), http_client=http)
+        with pytest.raises(RuntimeError, match="kalshi_prod_key_id"):
+            await client.aopen()
+
+
+async def test_read_client_aopen_raises_when_pem_file_missing(tmp_path: Path) -> None:
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={}))
+    async with httpx.AsyncClient(transport=transport, base_url=_PROD_BASE) as http:
+        client = KalshiReadClient(_prod_settings_missing_pem(tmp_path), http_client=http)
+        with pytest.raises(RuntimeError, match="prod private key"):
+            await client.aopen()
+
+
+async def test_read_client_aopen_refuses_demo_host_in_settings(rsa_pem: Path) -> None:
+    client = KalshiReadClient(_prod_settings_demo_base(rsa_pem))
+    with pytest.raises(RuntimeError, match="demo-api.kalshi.co"):
+        await client.aopen()
+
+
+async def test_read_client_aopen_refuses_injected_demo_base_url(rsa_pem: Path) -> None:
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={}))
+    async with httpx.AsyncClient(
+        transport=transport, base_url="https://demo-api.kalshi.co/trade-api/v2"
+    ) as http:
+        client = KalshiReadClient(_prod_settings_with_pem(rsa_pem), http_client=http)
+        with pytest.raises(RuntimeError, match="demo-api.kalshi.co"):
+            await client.aopen()
+
+
+async def test_read_client_aopen_succeeds_and_aclose_idempotent(rsa_pem: Path) -> None:
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json={}))
+    async with httpx.AsyncClient(transport=transport, base_url=_PROD_BASE) as http:
+        client = KalshiReadClient(_prod_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        await client.aclose()
+        await client.aclose()
+
+
+async def test_read_client_list_open_markets_parses_and_signs(rsa_pem: Path) -> None:
+    captured: dict[str, httpx.Request] = {}
+    payload = {
+        "markets": [
+            _market_dict("KXHIGHDEN-26MAY06-T70-75", "0.4500", "0.4300"),
+            _market_dict("KXHIGHDEN-26MAY06-T75-80", None, "0.1000"),
+        ],
+        "cursor": "",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["req"] = request
+        return httpx.Response(200, json=payload)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url=_PROD_BASE) as http:
+        client = KalshiReadClient(_prod_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        markets = await client.list_open_markets_for_series("KXHIGHDEN")
+
+    req = captured["req"]
+    assert req.url.params.get("series_ticker") == "KXHIGHDEN"
+    assert req.url.params.get("status") == "open"
+    assert req.url.params.get("limit") == "1000"
+    assert req.headers.get("KALSHI-ACCESS-KEY") == "prod-key-id"
+    assert req.headers.get("KALSHI-ACCESS-SIGNATURE")
+
+    assert len(markets) == 1
+    assert markets[0].ticker == "KXHIGHDEN-26MAY06-T70-75"
+    assert markets[0].yes_ask == Decimal("0.4500")
+
+
+async def test_read_client_get_orderbook_reconstructs_populated_ask_side(rsa_pem: Path) -> None:
+    payload = {
+        "orderbook_fp": {
+            "yes_dollars": [["0.30", "100"]],
+            "no_dollars": [["0.55", "50"]],
+        }
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url=_PROD_BASE) as http:
+        client = KalshiReadClient(_prod_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        book = await client.get_orderbook("KXHIGHDEN-26MAY06-T70-75")
+
+    assert book.no_bid == Decimal("0.55")
+    assert book.yes_ask == Decimal("0.45")
+    assert book.no_bid_depth == 50
+    assert book.yes_ask_depth == 50
+    assert book.yes_ask > Decimal("0")
+    assert book.yes_ask_depth > 0
+
+
+def test_read_client_is_read_only(rsa_pem: Path) -> None:
+    client = KalshiReadClient(_prod_settings_with_pem(rsa_pem))
+    assert not hasattr(client, "post_signed")
+    assert not hasattr(client, "delete_signed")
+    assert not hasattr(client, "get_signed")
+    assert not hasattr(client, "get_balance")
 
 
 def test_signing_golden_pss_verifies(rsa_pem: Path) -> None:
