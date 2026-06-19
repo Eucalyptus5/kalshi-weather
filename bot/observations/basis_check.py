@@ -8,6 +8,7 @@ from typing import Literal
 
 import httpx
 
+from bot.main import STATIONS
 from bot.markets.observation_window import observation_window
 from bot.observations.metar import MetarClient, StationObservation
 from bot.validation.reconcile import ACISClient
@@ -16,20 +17,6 @@ from bot.validation.reconcile import ACISClient
 logger = logging.getLogger(__name__)
 
 IOWA_ASOS_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
-
-_STATION_TIMEZONES: dict[str, str] = {
-    "KDEN": "America/Denver",
-    "KAUS": "America/Chicago",
-    "KMDW": "America/Chicago",
-    "KNYC": "America/New_York",
-    "KPHL": "America/New_York",
-    "KATL": "America/New_York",
-    "KBOS": "America/New_York",
-    "KDFW": "America/Chicago",
-    "KDCA": "America/New_York",
-    "KMIA": "America/New_York",
-    "KLAX": "America/Los_Angeles",
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,11 +49,14 @@ async def compare_basis(
     source: Literal["live_metar", "iowa_asos_archive"] = "live_metar",
     http_client: httpx.AsyncClient | None = None,
 ) -> list[BasisCompareRow]:
-    tz_name = _STATION_TIMEZONES.get(station)
-    if tz_name is None:
-        raise ValueError(f"no timezone mapping for station {station}")
     if not station.startswith("K"):
         raise ValueError(f"expected ICAO station (leading K), got {station}")
+    tz_name = next(
+        (cfg.timezone for cfg in STATIONS.values() if cfg.station == station),
+        None,
+    )
+    if tz_name is None:
+        raise ValueError(f"no timezone for station {station}")
     acis_sid = station[1:]
 
     if source == "iowa_asos_archive":
@@ -148,14 +138,8 @@ def summarize_basis(rows: list[BasisCompareRow]) -> list[BasisSummary]:
 
 def _quantile(sorted_values: list[Decimal], q: Decimal) -> Decimal:
     n = len(sorted_values)
-    if n == 1:
-        return sorted_values[0]
     rank = q * Decimal(n - 1)
     idx = int(rank.to_integral_value(rounding="ROUND_HALF_UP"))
-    if idx < 0:
-        idx = 0
-    if idx > n - 1:
-        idx = n - 1
     return sorted_values[idx]
 
 

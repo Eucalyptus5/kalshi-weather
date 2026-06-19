@@ -375,6 +375,44 @@ def test_summarize_groups_by_station() -> None:
     assert by_station["KAUS"].fraction_invalid == Decimal("1")
 
 
+async def test_compare_basis_resolves_ksea_timezone() -> None:
+    csv = "station,valid,tmpc\nKSEA,2026-07-15 22:00,25.0\n"
+    acis = {date(2026, 7, 15): "77"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if host == "mesonet.agron.iastate.edu":
+            return httpx.Response(200, text=csv)
+        if host == "data.rcc-acis.org":
+            qs = parse_qs(urlparse(str(request.url)).query)
+            sdate = date.fromisoformat(qs["sdate"][0])
+            assert qs["sid"] == ["SEA"]
+            return httpx.Response(
+                200,
+                json={
+                    "meta": {"name": "SEATTLE", "sids": ["KSEA 1"]},
+                    "data": [[sdate.isoformat(), acis[sdate]]],
+                },
+            )
+        raise AssertionError(f"unexpected host {host}")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        rows = await compare_basis(
+            "KSEA",
+            date(2026, 7, 15),
+            date(2026, 7, 15),
+            acis_client,
+            None,
+            source="iowa_asos_archive",
+            http_client=http,
+        )
+
+    assert len(rows) == 1
+    assert rows[0].station == "KSEA"
+
+
 async def test_delta_f_is_decimal_end_to_end() -> None:
     csv = "station,valid,tmpc\nKDEN,2026-01-15 18:00,22.0\n"
     acis = {date(2026, 1, 15): "70"}
