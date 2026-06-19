@@ -8,7 +8,9 @@ import httpx
 
 from bot.observations.basis_check import (
     BasisCompareRow,
+    _fetch_iem_1min_asos_archive,
     _fetch_iowa_asos_archive,
+    _integer_tolerant_basis_valid,
     compare_basis,
     summarize_basis,
 )
@@ -88,11 +90,11 @@ async def test_iowa_archive_agree_golden() -> None:
     assert row.basis_valid is True
 
 
-async def test_iowa_archive_miss_by_1_5f() -> None:
+async def test_iowa_archive_miss_by_2_4f() -> None:
     csv = _iowa_csv(
         [
             ("KDEN", "2026-01-15 18:00", "20.0"),
-            ("KDEN", "2026-01-15 22:00", "22.5"),
+            ("KDEN", "2026-01-15 22:00", "23.0"),
         ]
     )
     acis = {date(2026, 1, 15): "71"}
@@ -111,9 +113,9 @@ async def test_iowa_archive_miss_by_1_5f() -> None:
 
     assert len(rows) == 1
     row = rows[0]
-    assert row.metar_max_f == Decimal("72.5")
+    assert row.metar_max_f == Decimal("73.4")
     assert row.acis_high_f == Decimal("71")
-    assert row.delta_f == Decimal("1.5")
+    assert row.delta_f == Decimal("2.4")
     assert row.basis_valid is False
 
 
@@ -328,7 +330,7 @@ def test_summarize_basis_aggregates() -> None:
             metar_max_f=Decimal("70") + d,
             acis_high_f=Decimal("70"),
             delta_f=d,
-            basis_valid=abs(d) < Decimal("1.0"),
+            basis_valid=_integer_tolerant_basis_valid(Decimal("70") + d, Decimal("70")),
         )
         for i, d in enumerate(deltas)
     ]
@@ -340,7 +342,7 @@ def test_summarize_basis_aggregates() -> None:
     assert s.median_delta_f == Decimal("0.2")
     assert s.p10_delta_f == Decimal("-1.5")
     assert s.p90_delta_f == Decimal("1.8")
-    assert s.fraction_invalid == Decimal("5") / Decimal("11")
+    assert s.fraction_invalid == Decimal("4") / Decimal("11")
     assert type(s.median_delta_f) is Decimal
     assert type(s.fraction_invalid) is Decimal
 
@@ -433,3 +435,232 @@ async def test_delta_f_is_decimal_end_to_end() -> None:
     assert type(rows[0].delta_f) is Decimal
     assert type(rows[0].metar_max_f) is Decimal
     assert type(rows[0].acis_high_f) is Decimal
+
+
+def _iem_1min_csv(rows: list[tuple[str, str, str, str]]) -> str:
+    body = "\n".join(f"{s},{n},{v},{t}" for s, n, v, t in rows)
+    return "station,station_name,valid(UTC),tmpf\n" + body + "\n"
+
+
+async def test_iem_1min_parser_skips_missing_and_bad_timestamps() -> None:
+    csv = _iem_1min_csv(
+        [
+            ("DEN", "DENVER INTL", "2026-05-18 18:00", "80.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 18:01", "M"),
+            ("DEN", "DENVER INTL", "not-a-date", "75.0"),
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "mesonet.agron.iastate.edu"
+        return httpx.Response(200, text=csv)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        obs = await _fetch_iem_1min_asos_archive(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            http,
+        )
+
+    assert len(obs) == 1
+    o = obs[0]
+    assert o.station == "KDEN"
+    assert o.temp_f == Decimal("80.0")
+    assert type(o.temp_f) is Decimal
+    assert o.valid_time == datetime(2026, 5, 18, 18, 0, tzinfo=UTC)
+    assert o.publication_time == o.valid_time
+    assert o.is_special is False
+    assert o.raw == ""
+    assert o.source == "iem_1min_asos_archive"
+
+
+async def test_iem_1min_request_shape() -> None:
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["req"] = request
+        return httpx.Response(200, text="station,station_name,valid(UTC),tmpf\n")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        await _fetch_iem_1min_asos_archive(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 20),
+            http,
+        )
+    req = captured["req"]
+    parsed = urlparse(str(req.url))
+    assert parsed.netloc == "mesonet.agron.iastate.edu"
+    assert parsed.path == "/cgi-bin/request/asos1min.py"
+    qs = parse_qs(parsed.query)
+    assert qs["station"] == ["DEN"]
+    assert qs["vars"] == ["tmpf"]
+    assert qs["sts"] == ["2026-05-18T00:00Z"]
+    assert qs["ets"] == ["2026-05-22T00:00Z"]
+    assert qs["sample"] == ["1min"]
+    assert qs["tz"] == ["UTC"]
+    assert qs["format"] == ["onlycomma"]
+
+
+async def test_iem_1min_unexpected_header_raises() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="foo,bar,baz,qux\n")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        try:
+            await _fetch_iem_1min_asos_archive(
+                "KDEN",
+                date(2026, 5, 18),
+                date(2026, 5, 18),
+                http,
+            )
+        except ValueError as exc:
+            assert "KDEN" in str(exc)
+        else:
+            raise AssertionError("expected ValueError on unexpected header")
+
+
+def _iem_route_transport(
+    iem_payload: str,
+    acis_by_date: dict[date, object],
+    iem_capture: list[httpx.Request] | None = None,
+) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if host == "mesonet.agron.iastate.edu":
+            if iem_capture is not None:
+                iem_capture.append(request)
+            return httpx.Response(200, text=iem_payload)
+        if host == "data.rcc-acis.org":
+            qs = parse_qs(urlparse(str(request.url)).query)
+            sdate = date.fromisoformat(qs["sdate"][0])
+            value = acis_by_date.get(sdate)
+            if value is None:
+                return httpx.Response(200, json={"meta": {}, "data": []})
+            return httpx.Response(200, json=_acis_resp(sdate, value))
+        raise AssertionError(f"unexpected host {host}")
+
+    return httpx.MockTransport(handler)
+
+
+async def test_iem_1min_integer_tolerant_equal() -> None:
+    csv = _iem_1min_csv(
+        [
+            ("DEN", "DENVER INTL", "2026-05-18 18:00", "78.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 22:00", "80.0"),
+        ]
+    )
+    transport = _iem_route_transport(csv, {date(2026, 5, 18): "80"})
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        rows = await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            acis_client,
+            None,
+            source="iem_1min_asos_archive",
+            http_client=http,
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.metar_max_f == Decimal("80.0")
+    assert row.acis_high_f == Decimal("80")
+    assert row.delta_f == Decimal("0.0")
+    assert row.basis_valid is True
+
+
+async def test_iem_1min_integer_tolerant_floor_accepts() -> None:
+    csv = _iem_1min_csv(
+        [
+            ("DEN", "DENVER INTL", "2026-05-18 18:00", "79.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 22:00", "81.0"),
+        ]
+    )
+    transport = _iem_route_transport(csv, {date(2026, 5, 18): "80"})
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        rows = await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            acis_client,
+            None,
+            source="iem_1min_asos_archive",
+            http_client=http,
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.metar_max_f == Decimal("81.0")
+    assert row.acis_high_f == Decimal("80")
+    assert row.delta_f == Decimal("1.0")
+    assert row.basis_valid is True
+
+
+async def test_iem_1min_integer_tolerant_rejects_above_floor() -> None:
+    csv = _iem_1min_csv(
+        [
+            ("DEN", "DENVER INTL", "2026-05-18 18:00", "79.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 22:00", "82.0"),
+        ]
+    )
+    transport = _iem_route_transport(csv, {date(2026, 5, 18): "80"})
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        rows = await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            acis_client,
+            None,
+            source="iem_1min_asos_archive",
+            http_client=http,
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.metar_max_f == Decimal("82.0")
+    assert row.acis_high_f == Decimal("80")
+    assert row.delta_f == Decimal("2.0")
+    assert row.basis_valid is False
+
+
+def test_integer_tolerant_basis_valid_half_even_accepts() -> None:
+    assert _integer_tolerant_basis_valid(Decimal("80.5"), Decimal("81")) is True
+
+
+def test_integer_tolerant_basis_valid_half_even_rejects() -> None:
+    assert _integer_tolerant_basis_valid(Decimal("82.5"), Decimal("80")) is False
+
+
+async def test_compare_basis_default_source_is_iem_1min() -> None:
+    csv = _iem_1min_csv(
+        [
+            ("DEN", "DENVER INTL", "2026-05-18 22:00", "80.0"),
+        ]
+    )
+    captured: list[httpx.Request] = []
+    transport = _iem_route_transport(
+        csv,
+        {date(2026, 5, 18): "80"},
+        iem_capture=captured,
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        rows = await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            acis_client,
+            None,
+            http_client=http,
+        )
+
+    assert len(rows) == 1
+    assert any(urlparse(str(req.url)).path == "/cgi-bin/request/asos1min.py" for req in captured)
