@@ -21,6 +21,12 @@ class OrderbookSnapshotRow:
     snapshot_at: datetime
     yes_bid: Decimal
     yes_ask: Decimal
+    no_bid: Decimal | None = None
+    no_ask: Decimal | None = None
+    yes_ask_depth: int | None = None
+    yes_bid_depth: int | None = None
+    no_ask_depth: int | None = None
+    no_bid_depth: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
