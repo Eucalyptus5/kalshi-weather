@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from datetime import timezone as _timezone
 from decimal import Decimal
+from typing import Literal
 
 from bot.lag.event_study import (
     LagBucket,
@@ -19,7 +20,7 @@ UTC = _timezone.utc
 def _event(
     ticker: str,
     *,
-    side: str = "yes",
+    side: Literal["yes", "no"] = "yes",
     t0: datetime,
     strike: Decimal | str | int = 85,
     crossing: Decimal | str | int | None = None,
@@ -29,7 +30,7 @@ def _event(
     crossing_d = Decimal(str(crossing)) if crossing is not None else strike_d + Decimal("2")
     return LockEvent(
         ticker=ticker,
-        side_locked=side,  # type: ignore[arg-type]
+        side_locked=side,
         t0=t0,
         strike=strike_d,
         crossing_temp_f=crossing_d,
