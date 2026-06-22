@@ -13,13 +13,18 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot.lag.capture_sim import CaptureResult, LatencyStack, simulate_capture  # noqa: E402
-from bot.lag.event_study import LagBucket, _filter_net_of_floor, study_lag  # noqa: E402
+from bot.lag.event_study import (  # noqa: E402
+    LagBucket,
+    OrderbookSnapshotRow,
+    filter_net_of_floor,
+    study_lag,
+)
 from bot.lag.lock_events import LockEvent, detect_lock_events  # noqa: E402
 from bot.lag.report import aggregate_captures, format_report  # noqa: E402
 from bot.lag.snapshot_loader import load_snapshots  # noqa: E402
 from bot.main import STATIONS  # noqa: E402
 from bot.markets.parser import parse_ticker, series_id  # noqa: E402
-from bot.observations.basis_check import _fetch_iem_1min_asos_archive  # noqa: E402
+from bot.observations.basis_check import fetch_iem_1min_asos_archive  # noqa: E402
 from bot.observations.metar import StationObservation  # noqa: E402
 from bot.validation.reconcile import ACISClient  # noqa: E402
 
@@ -109,7 +114,7 @@ async def _gather_events_for_series(
 
     obs_by_day: dict[date, list[StationObservation]] = {}
     for day in days:
-        obs = await _fetch_iem_1min_asos_archive(station, day, day, http)
+        obs = await fetch_iem_1min_asos_archive(station, day, day, http)
         obs_by_day[day] = obs
 
     events: list[LockEvent] = []
@@ -164,7 +169,7 @@ async def run(args: argparse.Namespace) -> int:
     )
 
     all_events: list[LockEvent] = []
-    all_snapshots = []
+    all_snapshots: list[OrderbookSnapshotRow] = []
 
     async with httpx.AsyncClient(timeout=60.0) as http:
         for series in series_kept:
@@ -188,11 +193,11 @@ async def run(args: argparse.Namespace) -> int:
     raw_buckets: dict[str, LagBucket] = {b.series: b for b in report.raw}
     net_buckets: dict[str, LagBucket] = {b.series: b for b in report.net_of_floor}
 
-    snaps_by_ticker: dict[str, list] = {}
+    snaps_by_ticker: dict[str, list[OrderbookSnapshotRow]] = {}
     for s in all_snapshots:
         snaps_by_ticker.setdefault(s.ticker, []).append(s)
 
-    net_events = _filter_net_of_floor(all_events, settle_by_event)
+    net_events = filter_net_of_floor(all_events, settle_by_event)
     net_event_ids = {(ev.ticker, ev.t0) for ev in net_events}
 
     captures_raw: list[CaptureResult] = []
@@ -203,7 +208,6 @@ async def run(args: argparse.Namespace) -> int:
             continue
         sid = series_id(ev.ticker)
         ticker_snaps = snaps_by_ticker.get(ev.ticker, [])
-        raw_flag = bool(raw_buckets[sid].snapshot_unreliable) if sid in raw_buckets else False
         captures_raw.append(
             simulate_capture(
                 ev,
@@ -211,11 +215,10 @@ async def run(args: argparse.Namespace) -> int:
                 settle_price=settle,
                 notional_cap=args.notional_cap,
                 latency_stack=latency_stack,
-                snapshot_unreliable=raw_flag,
+                snapshot_unreliable=raw_buckets[sid].snapshot_unreliable,
             )
         )
         if (ev.ticker, ev.t0) in net_event_ids:
-            net_flag = bool(net_buckets[sid].snapshot_unreliable) if sid in net_buckets else False
             captures_net.append(
                 simulate_capture(
                     ev,
@@ -223,7 +226,7 @@ async def run(args: argparse.Namespace) -> int:
                     settle_price=settle,
                     notional_cap=args.notional_cap,
                     latency_stack=latency_stack,
-                    snapshot_unreliable=net_flag,
+                    snapshot_unreliable=net_buckets[sid].snapshot_unreliable,
                 )
             )
 

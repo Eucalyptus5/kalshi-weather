@@ -63,7 +63,7 @@ def study_lag(
         rows.sort(key=lambda r: r.snapshot_at)
 
     raw = _aggregate(events, by_ticker, settle_by_event, day_window_seconds)
-    filtered = _filter_net_of_floor(events, settle_by_event)
+    filtered = filter_net_of_floor(events, settle_by_event)
     net = _aggregate(filtered, by_ticker, settle_by_event, day_window_seconds)
     return LagReport(raw=raw, net_of_floor=net)
 
@@ -165,7 +165,7 @@ def _is_mislock(ev: LockEvent, settle_by_event: Mapping[str, Decimal] | None) ->
     return settle <= ev.strike
 
 
-def _filter_net_of_floor(
+def filter_net_of_floor(
     events: list[LockEvent], settle_by_event: Mapping[str, Decimal] | None
 ) -> list[LockEvent]:
     kept: list[LockEvent] = []

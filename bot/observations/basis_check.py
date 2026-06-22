@@ -65,9 +65,7 @@ async def compare_basis(
     if source == "iem_1min_asos_archive":
         if http_client is None:
             raise ValueError("iem_1min_asos_archive source requires http_client")
-        observations = await _fetch_iem_1min_asos_archive(
-            station, start_date, end_date, http_client
-        )
+        observations = await fetch_iem_1min_asos_archive(station, start_date, end_date, http_client)
     elif source == "iowa_asos_archive":
         if http_client is None:
             raise ValueError("iowa_asos_archive source requires http_client")
@@ -215,7 +213,7 @@ async def _fetch_iowa_asos_archive(
     return out
 
 
-async def _fetch_iem_1min_asos_archive(
+async def fetch_iem_1min_asos_archive(
     station: str,
     start_date: date,
     end_date: date,

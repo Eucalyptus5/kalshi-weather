@@ -10,7 +10,6 @@ from bot.markets.parser import series_id
 
 
 _ZERO = Decimal("0")
-_PRICE_Q = Decimal("0.0001")
 _DOLLAR_Q = Decimal("0.01")
 _RATE_Q = Decimal("0.0001")
 

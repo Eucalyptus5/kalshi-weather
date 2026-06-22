@@ -8,7 +8,7 @@ import httpx
 
 from bot.observations.basis_check import (
     BasisCompareRow,
-    _fetch_iem_1min_asos_archive,
+    fetch_iem_1min_asos_archive,
     _fetch_iowa_asos_archive,
     _integer_tolerant_basis_valid,
     compare_basis,
@@ -457,7 +457,7 @@ async def test_iem_1min_parser_skips_missing_and_bad_timestamps() -> None:
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
-        obs = await _fetch_iem_1min_asos_archive(
+        obs = await fetch_iem_1min_asos_archive(
             "KDEN",
             date(2026, 5, 18),
             date(2026, 5, 18),
@@ -485,7 +485,7 @@ async def test_iem_1min_request_shape() -> None:
 
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
-        await _fetch_iem_1min_asos_archive(
+        await fetch_iem_1min_asos_archive(
             "KDEN",
             date(2026, 5, 18),
             date(2026, 5, 20),
@@ -512,7 +512,7 @@ async def test_iem_1min_unexpected_header_raises() -> None:
     transport = httpx.MockTransport(handler)
     async with httpx.AsyncClient(transport=transport) as http:
         try:
-            await _fetch_iem_1min_asos_archive(
+            await fetch_iem_1min_asos_archive(
                 "KDEN",
                 date(2026, 5, 18),
                 date(2026, 5, 18),

@@ -5,7 +5,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
@@ -192,15 +192,6 @@ async def test_run_empty_window_short_circuits(
         assert "empty window" in captured.out
     finally:
         db_path.unlink()
-
-
-def test_default_end_falls_to_yesterday_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    # parser default is None; the run loop resolves it. Verify the fallback.
-    today = datetime.now(timezone.utc).date()
-    yesterday = today - timedelta(days=1)
-    args = build_parser().parse_args([])
-    resolved = args.end_date if args.end_date is not None else yesterday
-    assert resolved == yesterday
 
 
 def test_decimal_notional_cap_passthrough() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Literal
 
 from bot.lag.capture_sim import CaptureResult
 from bot.lag.event_study import LagBucket, LagReport
@@ -14,7 +15,7 @@ UTC = timezone.utc
 def _capture(
     ticker: str,
     *,
-    side: str = "yes",
+    side: Literal["yes", "no"] = "yes",
     contracts_filled: int = 5,
     pnl: str = "1.50",
     notional: str = "2.00",
@@ -24,7 +25,7 @@ def _capture(
 ) -> CaptureResult:
     return CaptureResult(
         ticker=ticker,
-        side_locked=side,  # type: ignore[arg-type]
+        side_locked=side,
         stale_price=Decimal("0.40"),
         contracts_filled=contracts_filled,
         fillable_depth=fillable_depth,
