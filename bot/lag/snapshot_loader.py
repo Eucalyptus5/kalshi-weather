@@ -11,6 +11,10 @@ from bot.lag.event_study import OrderbookSnapshotRow
 PROD_ERA_START = datetime.fromisoformat("2026-06-13T00:00:18+00:00")
 
 
+def _format_db_ts(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")
+
+
 _QUERY = (
     "SELECT ticker, snapshot_at, yes_bid, yes_ask, no_bid, no_ask, "
     "yes_ask_depth, yes_bid_depth, no_ask_depth, no_bid_depth "
@@ -34,7 +38,7 @@ def load_snapshots(
     try:
         cursor = conn.execute(
             _QUERY,
-            (ticker, effective_start.isoformat(), end.isoformat()),
+            (ticker, _format_db_ts(effective_start), _format_db_ts(end)),
         )
         rows = cursor.fetchall()
     finally:

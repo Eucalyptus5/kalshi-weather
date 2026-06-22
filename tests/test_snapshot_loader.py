@@ -66,9 +66,10 @@ def _row(
     no_ask_depth: int | None = 10,
     no_bid_depth: int | None = 10,
 ) -> tuple:
+    stored = snapshot_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
     return (
         ticker,
-        snapshot_at.isoformat(),
+        stored,
         yes_ask,
         yes_bid,
         no_ask,
@@ -77,7 +78,7 @@ def _row(
         yes_bid_depth,
         no_ask_depth,
         no_bid_depth,
-        snapshot_at.isoformat(),
+        stored,
     )
 
 
@@ -202,6 +203,47 @@ def test_loader_does_not_hold_write_lock() -> None:
         conn.close()
     finally:
         db.unlink()
+
+
+def test_loader_handles_sqlalchemy_default_timestamp_format(tmp_path: Path) -> None:
+    db_path = tmp_path / "test_state.db"
+    conn = sqlite3.connect(str(db_path))
+    try:
+        conn.executescript(_SCHEMA)
+        conn.execute(
+            "INSERT INTO orderbook_snapshots "
+            "(ticker, snapshot_at, yes_ask, yes_bid, no_ask, no_bid, "
+            "yes_ask_depth, yes_bid_depth, no_ask_depth, no_bid_depth, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "KXHIGHDEN-26JUN15-T80",
+                "2026-06-15 12:30:00.123456",
+                "0.45",
+                "0.40",
+                "0.60",
+                "0.55",
+                5,
+                7,
+                9,
+                11,
+                "2026-06-15 12:30:00.123456",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    rows = load_snapshots(
+        db_path,
+        "KXHIGHDEN-26JUN15-T80",
+        datetime(2026, 6, 15, 12, 0, 0, tzinfo=UTC),
+        datetime(2026, 6, 15, 13, 0, 0, tzinfo=UTC),
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.ticker == "KXHIGHDEN-26JUN15-T80"
+    assert row.snapshot_at == datetime(2026, 6, 15, 12, 30, 0, 123456, tzinfo=UTC)
+    assert row.yes_ask == Decimal("0.45")
 
 
 def test_read_only_uri_rejects_writes_via_loader() -> None:
