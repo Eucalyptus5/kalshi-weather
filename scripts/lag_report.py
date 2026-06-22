@@ -36,6 +36,7 @@ DEFAULT_SERIES: tuple[str, ...] = ("KXHIGHDEN", "KXHIGHCHI")
 EXCLUDED_SERIES: frozenset[str] = frozenset({"KXHIGHMIA"})
 DEFAULT_LATENCY_TOTAL_S = 125
 DEFAULT_NOTIONAL_CAP = Decimal("100")
+STALE_QUOTE_BUFFER = timedelta(hours=1)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -186,7 +187,12 @@ async def run(args: argparse.Namespace) -> int:
             ticker_events = [ev for ev in all_events if ev.ticker == ticker]
             t0_floor = min(ev.t0 for ev in ticker_events)
             t0_ceiling = max(ev.t0 + timedelta(seconds=86400) for ev in ticker_events)
-            snaps = load_snapshots(args.db, ticker, t0_floor, t0_ceiling)
+            snaps = load_snapshots(
+                args.db,
+                ticker,
+                t0_floor - STALE_QUOTE_BUFFER,
+                t0_ceiling,
+            )
             all_snapshots.extend(snaps)
 
     report = study_lag(all_events, all_snapshots, settle_by_event=settle_by_event)

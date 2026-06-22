@@ -198,3 +198,73 @@ def test_decimal_notional_cap_passthrough() -> None:
     args = build_parser().parse_args(["--notional-cap", "50.5"])
     assert args.notional_cap == Decimal("50.5")
     assert type(args.notional_cap) is Decimal
+
+
+async def test_capture_finds_stale_quote_for_single_event_ticker(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ticker = "KXHIGHDEN-26JUN15-T70"
+    event_date = date(2026, 6, 15)
+    t0_iso = "2026-06-15 18:00:00.000000"
+    stale_iso = "2026-06-15 17:55:00.000000"
+    fillable_iso = "2026-06-15 18:02:10.000000"
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
+    db_path = Path(tmp.name)
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(_SCHEMA)
+    conn.execute(
+        "INSERT INTO markets "
+        "(ticker, series, event_date, is_monthly, is_tail, strike_low, status, "
+        "last_seen_at, created_at) VALUES (?, 'KXHIGHDEN', ?, 0, 1, '70', 'active', ?, ?)",
+        (ticker, event_date.isoformat(), t0_iso, t0_iso),
+    )
+    conn.executemany(
+        "INSERT INTO orderbook_snapshots "
+        "(ticker, snapshot_at, yes_ask, yes_bid, no_ask, no_bid, "
+        "yes_ask_depth, yes_bid_depth, no_ask_depth, no_bid_depth, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+            (ticker, stale_iso, "0.40", "0.38", "0.62", "0.60", 10, 10, 10, 10, stale_iso),
+            (ticker, fillable_iso, "0.95", "0.93", "0.07", "0.05", 3, 3, 3, 3, fillable_iso),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    iem_body = "station,station_name,valid(UTC),tmpf\nDEN,DENVER,2026-06-15 18:00,75.0\n"
+    acis_body = '{"data": [["2026-06-15", "78"]]}'
+
+    def _transport(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        if "mesonet.agron.iastate.edu" in host:
+            return httpx.Response(200, text=iem_body)
+        if "rcc-acis.org" in host:
+            return httpx.Response(200, text=acis_body)
+        raise AssertionError(f"unexpected host: {host}")
+
+    real_async_client = httpx.AsyncClient
+
+    def _factory(*args: object, **kwargs: object) -> httpx.AsyncClient:
+        kwargs.pop("timeout", None)
+        return real_async_client(transport=httpx.MockTransport(_transport))
+
+    monkeypatch.setattr("scripts.lag_report.httpx.AsyncClient", _factory)
+
+    try:
+        namespace = argparse.Namespace(
+            db=db_path,
+            start=event_date,
+            end_date=date(2026, 6, 16),
+            series=("KXHIGHDEN",),
+            latency_total_s=DEFAULT_LATENCY_TOTAL_S,
+            notional_cap=DEFAULT_NOTIONAL_CAP,
+        )
+        rc = await run(namespace)
+        assert rc == 0
+        captured = capsys.readouterr()
+        assert "KXHIGHDEN  n_filled=1" in captured.out
+    finally:
+        db_path.unlink()
