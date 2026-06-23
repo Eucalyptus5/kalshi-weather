@@ -5,7 +5,7 @@ from datetime import timezone as _timezone
 from decimal import Decimal
 
 from bot.lag.lock_events import LockEvent, detect_lock_events
-from bot.markets.parser import parse_ticker
+from bot.markets.parser import ParsedTicker, parse_ticker
 from bot.observations.metar import StationObservation
 
 
@@ -177,6 +177,69 @@ def test_all_obs_outside_window_returns_empty() -> None:
     ]
 
     assert detect_lock_events(market, obs, tz_name="America/Denver") == []
+
+
+def _below_market(strike: str = "80") -> ParsedTicker:
+    return parse_ticker(f"KXHIGHDEN-26JUN17-T{strike}").model_copy(update={"kind": "below"})
+
+
+def test_below_tail_clean_no_lock() -> None:
+    market = _below_market("80")
+    obs = [
+        _obs("KDEN", datetime(2026, 6, 17, 18, 0, tzinfo=UTC), 60),
+        _obs("KDEN", datetime(2026, 6, 17, 19, 0, tzinfo=UTC), 75),
+        _obs("KDEN", datetime(2026, 6, 17, 20, 0, tzinfo=UTC), 82),
+    ]
+
+    events = detect_lock_events(market, obs, tz_name="America/Denver")
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.side_locked == "no"
+    assert ev.t0 == obs[2].publication_time
+    assert ev.strike == Decimal("80")
+    assert ev.crossing_temp_f == Decimal("82")
+    assert ev.lock_ambiguous is False
+
+
+def test_below_tail_ambiguous_no_lock() -> None:
+    market = _below_market("80")
+    obs = [
+        _obs("KDEN", datetime(2026, 6, 17, 18, 0, tzinfo=UTC), 60),
+        _obs("KDEN", datetime(2026, 6, 17, 19, 0, tzinfo=UTC), 75),
+        _obs("KDEN", datetime(2026, 6, 17, 20, 0, tzinfo=UTC), "80.5"),
+        _obs("KDEN", datetime(2026, 6, 17, 21, 0, tzinfo=UTC), 90),
+    ]
+
+    events = detect_lock_events(market, obs, tz_name="America/Denver")
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.t0 == obs[2].publication_time
+    assert ev.crossing_temp_f == Decimal("80.5")
+    assert ev.lock_ambiguous is True
+
+
+def test_below_tail_no_event_when_max_at_or_below_strike() -> None:
+    market = _below_market("80")
+    obs = [
+        _obs("KDEN", datetime(2026, 6, 17, 18, 0, tzinfo=UTC), 60),
+        _obs("KDEN", datetime(2026, 6, 17, 19, 0, tzinfo=UTC), 75),
+        _obs("KDEN", datetime(2026, 6, 17, 20, 0, tzinfo=UTC), 80),
+    ]
+
+    assert detect_lock_events(market, obs, tz_name="America/Denver") == []
+
+
+def test_below_tail_decimal_strict() -> None:
+    market = _below_market("80")
+    obs = [_obs("KDEN", datetime(2026, 6, 17, 20, 0, tzinfo=UTC), 82)]
+
+    events = detect_lock_events(market, obs, tz_name="America/Denver")
+    assert len(events) == 1
+    ev = events[0]
+    assert type(ev.strike) is Decimal
+    assert type(ev.crossing_temp_f) is Decimal
 
 
 def test_single_event_rule_back_to_back_crossings() -> None:

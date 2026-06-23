@@ -11,6 +11,7 @@ from bot.markets.parser import (
     event_id,
     event_yes_sum_ok,
     parse_ticker,
+    resolve_event_kinds,
     series_id,
 )
 
@@ -261,3 +262,94 @@ def test_event_id_raises_on_malformed() -> None:
 def test_series_id_raises_on_malformed() -> None:
     with pytest.raises(ValueError):
         series_id("NOT-A-REAL-TICKER")
+
+
+def _event_ladder() -> list[ParsedTicker]:
+    return [
+        parse_ticker("KXHIGHDEN-26JUN17-T80"),
+        parse_ticker("KXHIGHDEN-26JUN17-B82.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-B84.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-B86.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-B88.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-T89"),
+    ]
+
+
+def test_resolve_event_kinds_re_tags_lowest_T_as_below() -> None:
+    parsed = _event_ladder()
+
+    out = resolve_event_kinds(parsed)
+
+    by_raw = {p.raw: p for p in out}
+    assert by_raw["KXHIGHDEN-26JUN17-T80"].kind == "below"
+    assert by_raw["KXHIGHDEN-26JUN17-T89"].kind == "above"
+    for b in ("B82.5", "B84.5", "B86.5", "B88.5"):
+        assert by_raw[f"KXHIGHDEN-26JUN17-{b}"].kind == "bracket"
+
+
+def test_resolve_event_kinds_single_T_unchanged() -> None:
+    parsed = [
+        parse_ticker("KXHIGHDEN-26JUN17-T89"),
+        parse_ticker("KXHIGHDEN-26JUN17-B82.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-B84.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-B86.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-B88.5"),
+    ]
+
+    out = resolve_event_kinds(parsed)
+
+    assert [p.kind for p in out] == ["above", "bracket", "bracket", "bracket", "bracket"]
+
+
+def test_resolve_event_kinds_no_T_passes_through() -> None:
+    parsed = [
+        parse_ticker("KXHIGHDEN-26JUN17-B82.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-B84.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-B86.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-B88.5"),
+    ]
+
+    out = resolve_event_kinds(parsed)
+
+    assert out == parsed
+
+
+def test_resolve_event_kinds_preserves_other_fields() -> None:
+    parsed = _event_ladder()
+
+    out = resolve_event_kinds(parsed)
+
+    for p_in, p_out in zip(parsed, out):
+        assert p_out.series == p_in.series
+        assert p_out.event_date == p_in.event_date
+        assert p_out.is_monthly == p_in.is_monthly
+        assert p_out.strikes == p_in.strikes
+        assert p_out.raw == p_in.raw
+
+
+def test_resolve_event_kinds_stable_order() -> None:
+    parsed = [
+        parse_ticker("KXHIGHDEN-26JUN17-B86.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-T89"),
+        parse_ticker("KXHIGHDEN-26JUN17-B82.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-T80"),
+        parse_ticker("KXHIGHDEN-26JUN17-B88.5"),
+        parse_ticker("KXHIGHDEN-26JUN17-B84.5"),
+    ]
+
+    out = resolve_event_kinds(parsed)
+
+    assert [p.raw for p in out] == [p.raw for p in parsed]
+    by_raw = {p.raw: p for p in out}
+    assert by_raw["KXHIGHDEN-26JUN17-T80"].kind == "below"
+    assert by_raw["KXHIGHDEN-26JUN17-T89"].kind == "above"
+
+
+def test_resolve_event_kinds_asserts_single_event() -> None:
+    parsed = [
+        parse_ticker("KXHIGHDEN-26JUN17-T80"),
+        parse_ticker("KXHIGHDEN-26JUN18-T89"),
+    ]
+
+    with pytest.raises(AssertionError):
+        resolve_event_kinds(parsed)

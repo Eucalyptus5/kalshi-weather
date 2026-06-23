@@ -121,6 +121,24 @@ def parse_ticker(ticker: str) -> ParsedTicker:
     )
 
 
+def resolve_event_kinds(parsed: Sequence[ParsedTicker]) -> list[ParsedTicker]:
+    """Re-tag the lowest single-strike T market in an event ladder as below-tail.
+
+    Single-T events stay as above; events with no T market pass through. Caller
+    must group by (series, event_date) before calling; asserted in debug.
+    """
+    assert len({(p.series, p.event_date) for p in parsed}) <= 1
+
+    above_idx = [i for i, p in enumerate(parsed) if p.kind == "above"]
+    if len(above_idx) < 2:
+        return list(parsed)
+
+    low_idx = min(above_idx, key=lambda i: parsed[i].strikes[0])
+    result = list(parsed)
+    result[low_idx] = result[low_idx].model_copy(update={"kind": "below"})
+    return result
+
+
 def event_yes_sum_ok(
     yes_prices: Sequence[Decimal],
     tolerance: Decimal = Decimal("0.05"),

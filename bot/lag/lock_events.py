@@ -29,7 +29,7 @@ def detect_lock_events(
     rounding_margin_f: Decimal = Decimal("1.0"),
 ) -> list[LockEvent]:
     """Return [] or a single-element list with the first running-max crossing of the strike."""
-    if market.kind not in ("above", "bracket"):
+    if market.kind not in ("above", "below", "bracket"):
         return []
 
     start_utc, end_utc = observation_window(tz_name, market.event_date)
@@ -54,6 +54,23 @@ def detect_lock_events(
                 LockEvent(
                     ticker=market.raw,
                     side_locked="yes",
+                    t0=ob.publication_time,
+                    strike=strike,
+                    crossing_temp_f=running_max_f,
+                    lock_ambiguous=ambiguous,
+                )
+            ]
+
+        if market.kind == "below":
+            strike = market.strikes[0]
+            clean = running_max_f > strike + rounding_margin_f
+            ambiguous = (not clean) and running_max_f > strike
+            if not (clean or ambiguous):
+                continue
+            return [
+                LockEvent(
+                    ticker=market.raw,
+                    side_locked="no",
                     t0=ob.publication_time,
                     strike=strike,
                     crossing_temp_f=running_max_f,
