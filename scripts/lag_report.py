@@ -23,7 +23,7 @@ from bot.lag.lock_events import LockEvent, detect_lock_events  # noqa: E402
 from bot.lag.report import aggregate_captures, format_report  # noqa: E402
 from bot.lag.snapshot_loader import load_snapshots  # noqa: E402
 from bot.main import STATIONS  # noqa: E402
-from bot.markets.parser import parse_ticker, series_id  # noqa: E402
+from bot.markets.parser import ParsedTicker, parse_ticker, resolve_event_kinds, series_id  # noqa: E402
 from bot.observations.basis_check import fetch_iem_1min_asos_archive  # noqa: E402
 from bot.observations.metar import StationObservation  # noqa: E402
 from bot.validation.reconcile import ACISClient  # noqa: E402
@@ -111,6 +111,10 @@ async def _gather_events_for_series(
     tz = cfg.timezone
 
     parsed_by_ticker = {t: parse_ticker(t) for t in tickers}
+    grouped: dict[tuple[str, date], list[ParsedTicker]] = {}
+    for p in parsed_by_ticker.values():
+        grouped.setdefault((p.series, p.event_date), []).append(p)
+    parsed_by_ticker = {p.raw: p for group in grouped.values() for p in resolve_event_kinds(group)}
     days = sorted({p.event_date for p in parsed_by_ticker.values()})
 
     obs_by_day: dict[date, list[StationObservation]] = {}
