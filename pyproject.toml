@@ -21,6 +21,7 @@ dependencies = [
     "scoringrules>=0.10.0",
     "sqlalchemy>=2.0.49",
     "urllib3>=2.6.3",
+    "websockets>=13.0",
 ]
 
 [tool.ruff]
