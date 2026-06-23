@@ -43,8 +43,8 @@ def _snap(
     ticker: str,
     t: datetime,
     *,
-    yes_bid: Decimal | str = "0.50",
-    yes_ask: Decimal | str = "0.50",
+    yes_bid: Decimal | str | None = "0.50",
+    yes_ask: Decimal | str | None = "0.50",
     no_bid: Decimal | str | None = None,
     no_ask: Decimal | str | None = None,
     yes_ask_depth: int | None = None,
@@ -55,8 +55,8 @@ def _snap(
     return OrderbookSnapshotRow(
         ticker=ticker,
         snapshot_at=t,
-        yes_bid=Decimal(str(yes_bid)),
-        yes_ask=Decimal(str(yes_ask)),
+        yes_bid=Decimal(str(yes_bid)) if yes_bid is not None else None,  # type: ignore[arg-type]
+        yes_ask=Decimal(str(yes_ask)) if yes_ask is not None else None,  # type: ignore[arg-type]
         no_bid=Decimal(str(no_bid)) if no_bid is not None else None,
         no_ask=Decimal(str(no_ask)) if no_ask is not None else None,
         yes_ask_depth=yes_ask_depth,
@@ -81,8 +81,8 @@ def test_clean_yes_lock_fills_full_depth_and_pays() -> None:
         _snap(
             ticker,
             t0 + timedelta(seconds=125),
-            yes_bid="0.93",
-            yes_ask="0.95",
+            yes_bid="0.30",
+            yes_ask="0.40",
             yes_ask_depth=5,
         ),
     ]
@@ -125,10 +125,10 @@ def test_no_lock_fills_depth_and_pays() -> None:
         _snap(
             ticker,
             t0 + timedelta(seconds=125),
-            yes_bid="0.97",
-            yes_ask="0.99",
-            no_bid="0.01",
-            no_ask="0.02",
+            yes_bid="0.65",
+            yes_ask="0.75",
+            no_bid="0.25",
+            no_ask="0.30",
             no_ask_depth=8,
         ),
     ]
@@ -166,8 +166,8 @@ def test_no_lock_strict_gt_boundary_pays_zero() -> None:
         _snap(
             ticker,
             t0 + timedelta(seconds=125),
-            no_bid="0.01",
-            no_ask="0.02",
+            no_bid="0.25",
+            no_ask="0.30",
             no_ask_depth=8,
         ),
     ]
@@ -193,7 +193,7 @@ def test_yes_lock_mislock_pays_zero() -> None:
     ev = _event(ticker, t0=t0, strike=85, crossing=87)
     snaps = [
         _snap(ticker, t0 - timedelta(seconds=30), yes_ask="0.40", yes_ask_depth=10),
-        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.95", yes_ask_depth=5),
+        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.40", yes_ask_depth=5),
     ]
 
     result = simulate_capture(
@@ -267,7 +267,7 @@ def test_notional_cap_binds() -> None:
     ev = _event(ticker, t0=t0, strike=85, crossing=87)
     snaps = [
         _snap(ticker, t0 - timedelta(seconds=30), yes_ask="0.40", yes_ask_depth=1000),
-        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.95", yes_ask_depth=1000),
+        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.40", yes_ask_depth=1000),
     ]
 
     result = simulate_capture(
@@ -286,7 +286,7 @@ def test_depth_cap_binds() -> None:
     ev = _event(ticker, t0=t0, strike=85, crossing=87)
     snaps = [
         _snap(ticker, t0 - timedelta(seconds=30), yes_ask="0.40", yes_ask_depth=3),
-        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.95", yes_ask_depth=3),
+        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.40", yes_ask_depth=3),
     ]
 
     result = simulate_capture(
@@ -311,8 +311,8 @@ def test_custom_latency_stack_changes_depth_read() -> None:
     ev = _event(ticker, t0=t0, strike=85, crossing=87)
     snaps = [
         _snap(ticker, t0 - timedelta(seconds=10), yes_ask="0.40", yes_ask_depth=50),
-        _snap(ticker, t0 + timedelta(seconds=30), yes_ask="0.60", yes_ask_depth=20),
-        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.95", yes_ask_depth=3),
+        _snap(ticker, t0 + timedelta(seconds=30), yes_ask="0.40", yes_ask_depth=20),
+        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.40", yes_ask_depth=3),
     ]
 
     default_result = simulate_capture(
@@ -342,7 +342,7 @@ def test_depth_from_t0_anti_test() -> None:
     ev = _event(ticker, t0=t0, strike=85, crossing=87)
     snaps = [
         _snap(ticker, t0, yes_ask="0.40", yes_ask_depth=65),
-        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.95", yes_ask_depth=3),
+        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.40", yes_ask_depth=3),
     ]
 
     result = simulate_capture(
@@ -450,6 +450,182 @@ def test_no_ask_missing_on_no_lock() -> None:
     assert result.payoff == Decimal("0")
     assert result.fees_paid == Decimal("0")
     assert result.pnl == Decimal("0")
+
+
+def test_yes_fill_zeroed_when_price_moved_up() -> None:
+    ticker = "KXHIGHDEN-26JUN17-T85"
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event(ticker, t0=t0, strike=85, crossing=87)
+    snaps = [
+        _snap(ticker, t0 - timedelta(seconds=30), yes_ask="0.01", yes_ask_depth=30),
+        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.95", yes_ask_depth=4000),
+    ]
+
+    result = simulate_capture(
+        ev,
+        snaps,
+        settle_price=Decimal("87"),
+        notional_cap=Decimal("10000"),
+    )
+
+    assert result.contracts_filled == 0
+    assert result.notional_spent == Decimal("0")
+    assert result.payoff == Decimal("0")
+    assert result.fees_paid == Decimal("0")
+    assert result.pnl == Decimal("0")
+
+
+def test_yes_fill_capped_when_price_unchanged_and_depth_shrunk() -> None:
+    ticker = "KXHIGHDEN-26JUN17-T85"
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event(ticker, t0=t0, strike=85, crossing=87)
+    snaps = [
+        _snap(ticker, t0 - timedelta(seconds=30), yes_ask="0.40", yes_ask_depth=100),
+        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.40", yes_ask_depth=30),
+    ]
+
+    result = simulate_capture(
+        ev,
+        snaps,
+        settle_price=Decimal("87"),
+        notional_cap=Decimal("1000"),
+    )
+
+    assert result.contracts_filled == 30
+
+
+def test_yes_fill_capped_when_price_unchanged_and_depth_grew() -> None:
+    ticker = "KXHIGHDEN-26JUN17-T85"
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event(ticker, t0=t0, strike=85, crossing=87)
+    snaps = [
+        _snap(ticker, t0 - timedelta(seconds=30), yes_ask="0.40", yes_ask_depth=30),
+        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.40", yes_ask_depth=100),
+    ]
+
+    result = simulate_capture(
+        ev,
+        snaps,
+        settle_price=Decimal("87"),
+        notional_cap=Decimal("1000"),
+    )
+
+    assert result.contracts_filled == 30
+
+
+def test_yes_fill_zeroed_when_price_moved_down() -> None:
+    ticker = "KXHIGHDEN-26JUN17-T85"
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event(ticker, t0=t0, strike=85, crossing=87)
+    snaps = [
+        _snap(ticker, t0 - timedelta(seconds=30), yes_ask="0.95", yes_ask_depth=30),
+        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.50", yes_ask_depth=100),
+    ]
+
+    result = simulate_capture(
+        ev,
+        snaps,
+        settle_price=Decimal("87"),
+        notional_cap=Decimal("1000"),
+    )
+
+    assert result.contracts_filled == 0
+
+
+def test_no_lock_fill_zeroed_when_no_ask_moved() -> None:
+    ticker = "KXHIGHCHI-26JUN17-T75-80"
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event(ticker, side="no", t0=t0, strike=80, crossing=82)
+    snaps = [
+        _snap(
+            ticker,
+            t0 - timedelta(seconds=20),
+            no_ask="0.02",
+            no_ask_depth=30,
+        ),
+        _snap(
+            ticker,
+            t0 + timedelta(seconds=125),
+            no_ask="0.90",
+            no_ask_depth=4000,
+        ),
+    ]
+
+    result = simulate_capture(
+        ev,
+        snaps,
+        settle_price=Decimal("83"),
+        notional_cap=Decimal("10000"),
+    )
+
+    assert result.contracts_filled == 0
+
+
+def test_no_lock_fill_capped_at_min_when_prices_match() -> None:
+    ticker = "KXHIGHCHI-26JUN17-T75-80"
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event(ticker, side="no", t0=t0, strike=80, crossing=82)
+    snaps = [
+        _snap(
+            ticker,
+            t0 - timedelta(seconds=20),
+            no_ask="0.02",
+            no_ask_depth=50,
+        ),
+        _snap(
+            ticker,
+            t0 + timedelta(seconds=125),
+            no_ask="0.02",
+            no_ask_depth=8,
+        ),
+    ]
+
+    result = simulate_capture(
+        ev,
+        snaps,
+        settle_price=Decimal("83"),
+        notional_cap=Decimal("50"),
+    )
+
+    assert result.contracts_filled == 8
+
+
+def test_zero_fill_when_stale_depth_none() -> None:
+    ticker = "KXHIGHDEN-26JUN17-T85"
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event(ticker, t0=t0, strike=85, crossing=87)
+    snaps = [
+        _snap(ticker, t0 - timedelta(seconds=30), yes_ask="0.40", yes_ask_depth=None),
+        _snap(ticker, t0 + timedelta(seconds=125), yes_ask="0.40", yes_ask_depth=100),
+    ]
+
+    result = simulate_capture(
+        ev,
+        snaps,
+        settle_price=Decimal("87"),
+        notional_cap=Decimal("1000"),
+    )
+
+    assert result.contracts_filled == 0
+
+
+def test_zero_fill_when_fillable_yes_ask_none() -> None:
+    ticker = "KXHIGHDEN-26JUN17-T85"
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event(ticker, t0=t0, strike=85, crossing=87)
+    snaps = [
+        _snap(ticker, t0 - timedelta(seconds=30), yes_ask="0.40", yes_ask_depth=30),
+        _snap(ticker, t0 + timedelta(seconds=125), yes_ask=None, yes_ask_depth=100),
+    ]
+
+    result = simulate_capture(
+        ev,
+        snaps,
+        settle_price=Decimal("87"),
+        notional_cap=Decimal("1000"),
+    )
+
+    assert result.contracts_filled == 0
 
 
 def test_orderbook_snapshot_row_backwards_compat() -> None:

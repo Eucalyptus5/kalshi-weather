@@ -228,7 +228,7 @@ async def test_capture_finds_stale_quote_for_single_event_ticker(
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
             (ticker, stale_iso, "0.40", "0.38", "0.62", "0.60", 10, 10, 10, 10, stale_iso),
-            (ticker, fillable_iso, "0.95", "0.93", "0.07", "0.05", 3, 3, 3, 3, fillable_iso),
+            (ticker, fillable_iso, "0.40", "0.38", "0.62", "0.60", 3, 3, 3, 3, fillable_iso),
         ],
     )
     conn.commit()

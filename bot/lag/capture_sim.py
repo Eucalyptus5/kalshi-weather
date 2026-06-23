@@ -39,6 +39,31 @@ class CaptureResult:
     depth_lower_bound: bool
 
 
+def _fillable_depth_at_stale_price(
+    stale_snap: OrderbookSnapshotRow,
+    fillable_snap: OrderbookSnapshotRow | None,
+    side: Literal["yes", "no"],
+) -> int:
+    if fillable_snap is None:
+        return 0
+    if side == "yes":
+        stale_ask = stale_snap.yes_ask
+        stale_depth = stale_snap.yes_ask_depth or 0
+        fillable_ask = fillable_snap.yes_ask
+        fillable_depth = fillable_snap.yes_ask_depth or 0
+    else:
+        stale_ask = stale_snap.no_ask
+        stale_depth = stale_snap.no_ask_depth or 0
+        fillable_ask = fillable_snap.no_ask
+        fillable_depth = fillable_snap.no_ask_depth or 0
+
+    if stale_ask is None or fillable_ask is None:
+        return 0
+    if fillable_ask != stale_ask:
+        return 0
+    return min(stale_depth, fillable_depth)
+
+
 def simulate_capture(
     event: LockEvent,
     snapshots: list[OrderbookSnapshotRow],
@@ -83,10 +108,9 @@ def simulate_capture(
 
     if event.side_locked == "yes":
         stale_price = stale_snap.yes_ask
-        fillable_depth = (fillable_snap.yes_ask_depth or 0) if fillable_snap is not None else 0
     else:
         stale_price = stale_snap.no_ask
-        fillable_depth = (fillable_snap.no_ask_depth or 0) if fillable_snap is not None else 0
+    fillable_depth = _fillable_depth_at_stale_price(stale_snap, fillable_snap, event.side_locked)
 
     if stale_price is None or stale_price <= _ZERO:
         return CaptureResult(
