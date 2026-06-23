@@ -15,7 +15,7 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, select, text
-from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.exc import IntegrityError, OperationalError, StatementError
 
 from bot.storage.sqlite import (
     Base,
@@ -26,6 +26,9 @@ from bot.storage.sqlite import (
     OrderbookSnapshot,
     PaperTradeRow,
     SimulatedPnl,
+    WsBookEvent,
+    WsGap,
+    WsTrade,
     ensure_baseline_stamped,
     make_engine,
     make_session_factory,
@@ -48,7 +51,7 @@ def session(engine):
         yield s
 
 
-def test_schema_creates_all_six_tables(engine):
+def test_schema_creates_expected_tables(engine):
     names = set(inspect(engine).get_table_names())
     assert {
         "forecasts",
@@ -57,6 +60,9 @@ def test_schema_creates_all_six_tables(engine):
         "paper_trades",
         "simulated_pnl",
         "gate_failures",
+        "ws_book_events",
+        "ws_trades",
+        "ws_gaps",
     } <= names
 
 
@@ -309,6 +315,106 @@ def test_decimal_six_dp_round_trip(session):
     assert got.no_bid == Decimal("0.500000")
 
 
+def test_ws_book_event_snapshot_round_trip_preserves_scale(session):
+    when = datetime(2026, 7, 6, 18, 0, tzinfo=_timezone.utc)
+    row = WsBookEvent(
+        ticker="KXHIGHDEN-26JUL06-T70-75",
+        received_at=when,
+        seq=101,
+        side="yes",
+        price=Decimal("0.500000"),
+        size=Decimal("300.00"),
+        is_snapshot=True,
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(WsBookEvent)).one()
+    assert isinstance(got.price, Decimal)
+    assert isinstance(got.size, Decimal)
+    assert str(got.price) == "0.500000"
+    assert str(got.size) == "300.00"
+    assert got.seq == 101
+    assert got.side == "yes"
+    assert got.is_snapshot is True
+    assert got.received_at == when
+
+
+def test_ws_book_event_delta_negative_size_round_trip(session):
+    when = datetime(2026, 7, 6, 18, 0, 1, tzinfo=_timezone.utc)
+    row = WsBookEvent(
+        ticker="KXHIGHDEN-26JUL06-T70-75",
+        received_at=when,
+        seq=102,
+        side="no",
+        price=Decimal("0.0800"),
+        size=Decimal("-54.00"),
+        is_snapshot=False,
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(WsBookEvent)).one()
+    assert str(got.price) == "0.0800"
+    assert str(got.size) == "-54.00"
+    assert got.is_snapshot is False
+
+
+def test_ws_book_event_naive_received_at_raises(session):
+    row = WsBookEvent(
+        ticker="KXHIGHDEN-26JUL06-T70-75",
+        received_at=datetime(2026, 7, 6, 18, 0),
+        seq=1,
+        side="yes",
+        price=Decimal("0.50"),
+        size=Decimal("1.00"),
+        is_snapshot=True,
+    )
+    session.add(row)
+    with pytest.raises(StatementError):
+        session.commit()
+
+
+def test_ws_trade_round_trip_preserves_scale(session):
+    when = datetime(2026, 7, 6, 19, 0, tzinfo=_timezone.utc)
+    row = WsTrade(
+        ticker="KXHIGHCHI-26JUL06-T85-90",
+        received_at=when,
+        yes_price=Decimal("0.360"),
+        count=Decimal("136.00"),
+        taker_side="no",
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(WsTrade)).one()
+    assert isinstance(got.yes_price, Decimal)
+    assert isinstance(got.count, Decimal)
+    assert str(got.yes_price) == "0.360"
+    assert str(got.count) == "136.00"
+    assert got.taker_side == "no"
+    assert got.received_at == when
+
+
+def test_ws_gap_round_trip_detected_at_utc(session):
+    when = datetime(2026, 7, 6, 19, 30, 15, 250000, tzinfo=_timezone.utc)
+    row = WsGap(
+        ticker="KXHIGHDEN-26JUL06-T70-75",
+        detected_at=when,
+        last_seq=41,
+        reason="seq_skip",
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(WsGap)).one()
+    assert got.detected_at == when
+    assert got.detected_at.tzinfo is not None
+    assert got.detected_at.utcoffset() == _timezone.utc.utcoffset(when)
+    assert got.last_seq == 41
+    assert got.reason == "seq_skip"
+
+
 def test_named_indexes_exist(engine):
     insp = inspect(engine)
     expected = {
@@ -317,6 +423,9 @@ def test_named_indexes_exist(engine):
         "orderbook_snapshots": {"ix_orderbook_snapshots_ticker_snapshot_at"},
         "paper_trades": {"ix_paper_trades_strategy_intended_at"},
         "gate_failures": {"ix_gate_failures_evaluated_at_gate_name"},
+        "ws_book_events": {"ix_ws_book_events_ticker_received_at"},
+        "ws_trades": {"ix_ws_trades_ticker_received_at"},
+        "ws_gaps": {"ix_ws_gaps_ticker_detected_at"},
     }
     for table, names in expected.items():
         present = {idx["name"] for idx in insp.get_indexes(table)}
@@ -386,6 +495,9 @@ def test_alembic_upgrade_head_creates_all_tables(tmp_path):
         "paper_trades",
         "simulated_pnl",
         "gate_failures",
+        "ws_book_events",
+        "ws_trades",
+        "ws_gaps",
         "alembic_version",
     } <= names
 
@@ -894,16 +1006,19 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
             REPO_ROOT / "alembic" / "versions" / "0008_portfolio_mtm_and_collateral_rename.py"
         ).read_text()
     )
-    (versions / "0009_decoy.py").write_text(
-        '"""decoy 0009 for forward-compat test\n\n'
-        "Revision ID: 0009\n"
-        "Revises: 0008\n"
+    (versions / "0009_ws_recorder_tables.py").write_text(
+        (REPO_ROOT / "alembic" / "versions" / "0009_ws_recorder_tables.py").read_text()
+    )
+    (versions / "0010_decoy.py").write_text(
+        '"""decoy 0010 for forward-compat test\n\n'
+        "Revision ID: 0010\n"
+        "Revises: 0009\n"
         "Create Date: 2026-06-02 14:00:00.000000\n\n"
         '"""\n\n'
         "from typing import Sequence, Union\n\n"
         "from alembic import op  # noqa: F401\n\n\n"
-        'revision: str = "0009"\n'
-        'down_revision: Union[str, Sequence[str], None] = "0008"\n'
+        'revision: str = "0010"\n'
+        'down_revision: Union[str, Sequence[str], None] = "0009"\n'
         "branch_labels: Union[str, Sequence[str], None] = None\n"
         "depends_on: Union[str, Sequence[str], None] = None\n\n\n"
         "def upgrade() -> None:\n"
@@ -922,8 +1037,8 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     engine = make_engine(db_file)
     Base.metadata.create_all(engine)
     script_dir = ScriptDirectory.from_config(cfg)
-    assert script_dir.get_current_head() == "0009"
-    assert _detect_baseline(engine, script_dir) == "0008"
+    assert script_dir.get_current_head() == "0010"
+    assert _detect_baseline(engine, script_dir) == "0009"
     engine.dispose()
 
 

@@ -50,6 +50,23 @@ class UtcDateTime(TypeDecorator):
         return value.astimezone(_timezone.utc)
 
 
+class DecimalText(TypeDecorator):
+    # TEXT, not Numeric: sqlite Numeric paths through float and drops trailing
+    # zeros, so Decimal("0.500000") would come back as Decimal("0.5").
+    impl = String
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        return str(value)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        return Decimal(value)
+
+
 def _utc_now() -> datetime:
     return datetime.now(tz=_timezone.utc)
 
@@ -229,6 +246,49 @@ class GateFailure(Base):
             unique=True,
         ),
     )
+
+
+class WsBookEvent(Base):
+    __tablename__ = "ws_book_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(64))
+    received_at: Mapped[datetime] = mapped_column(UtcDateTime())
+    seq: Mapped[int] = mapped_column(Integer)
+    side: Mapped[str] = mapped_column(String(8))
+    price: Mapped[Decimal] = mapped_column(DecimalText())
+    size: Mapped[Decimal] = mapped_column(DecimalText())
+    is_snapshot: Mapped[bool] = mapped_column(Boolean)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now)
+
+    __table_args__ = (Index("ix_ws_book_events_ticker_received_at", "ticker", "received_at"),)
+
+
+class WsTrade(Base):
+    __tablename__ = "ws_trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(64))
+    received_at: Mapped[datetime] = mapped_column(UtcDateTime())
+    yes_price: Mapped[Decimal] = mapped_column(DecimalText())
+    count: Mapped[Decimal] = mapped_column(DecimalText())
+    taker_side: Mapped[str] = mapped_column(String(8))
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now)
+
+    __table_args__ = (Index("ix_ws_trades_ticker_received_at", "ticker", "received_at"),)
+
+
+class WsGap(Base):
+    __tablename__ = "ws_gaps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    ticker: Mapped[str] = mapped_column(String(64))
+    detected_at: Mapped[datetime] = mapped_column(UtcDateTime())
+    last_seq: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now)
+
+    __table_args__ = (Index("ix_ws_gaps_ticker_detected_at", "ticker", "detected_at"),)
 
 
 def make_engine(db_path: Path | str) -> Engine:
