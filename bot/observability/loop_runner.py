@@ -29,6 +29,7 @@ _LOOP_PAIRS = [
     ("_settlement_loop", "settlement_loop"),
     ("_calibration_refit_loop", "calibration_loop"),
     ("_forecast_loop", "forecast_loop"),
+    ("_ws_recorder_loop", "ws_recorder_loop"),
 ]
 
 

@@ -9,7 +9,9 @@ import random
 import re
 import signal
 import sys
+import time
 from collections import defaultdict
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from datetime import timezone as _timezone
@@ -57,6 +59,7 @@ from bot.execution.paper import (
 from bot.forecast.cdf import EnsembleCDF
 from bot.forecast.open_meteo import OpenMeteoClient, StationForecast
 from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook, KalshiReadClient
+from bot.kalshi_ws import BookDelta, BookSnapshot, GapDetected, KalshiWSClient, TradePrint
 from bot.markets.observation_window import observation_window
 from bot.markets.parser import ParsedTicker, parse_ticker
 from bot.observability.loop_runner import LoopSkipped, _sleep_or_stop, run_loop
@@ -72,6 +75,9 @@ from bot.storage.sqlite import (
     PortfolioSnapshot,
     ReconcilerState,
     SimulatedPnl,
+    WsBookEvent,
+    WsGap,
+    WsTrade,
     make_engine,
     make_session_factory,
     upgrade_schema,
@@ -130,6 +136,11 @@ def series_position_cap(app: "App | None" = None) -> Decimal:
 def aggregate_exposure_cap(app: "App | None" = None) -> Decimal:
     return bankroll(app) * AGGREGATE_EXPOSURE_FRAC
 
+
+KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+WS_CHANNELS: tuple[str, ...] = ("orderbook_delta", "trade")
+WS_SUBSCRIPTION_POLL_SECONDS: float = 5.0
+WS_HEARTBEAT_INTERVAL_SECONDS: float = 60.0
 
 MARKET_REFRESH_INTERVAL = 60.0
 EVAL_INTERVAL = 60.0
@@ -326,6 +337,7 @@ class App:
     kalshi_read: KalshiReadClient
     acis: ACISClient
     series_list: tuple[str, ...]
+    kalshi_ws: KalshiWSClient | None = None
     bankroll: Decimal | None = None
     db_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     reconcile_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -347,6 +359,8 @@ class App:
         await self.meteo.aclose()
         await self.kalshi.aclose()
         await self.kalshi_read.aclose()
+        if self.kalshi_ws is not None:
+            await self.kalshi_ws.aclose()
         await self.acis.aclose()
         _checkpoint_wal(self.engine)
         self.engine.dispose()
@@ -1388,6 +1402,163 @@ async def _forecast_loop(app: App, stop: asyncio.Event) -> None:
     )
 
 
+_WsEvent = BookSnapshot | BookDelta | TradePrint | GapDetected
+
+
+async def _persist_ws_event(app: App, event: _WsEvent) -> None:
+    rows: list[WsBookEvent | WsTrade | WsGap]
+    if isinstance(event, BookSnapshot):
+        rows = [
+            WsBookEvent(
+                ticker=event.ticker,
+                received_at=event.received_at,
+                seq=event.seq,
+                side=side,
+                price=level.price,
+                size=level.size,
+                is_snapshot=True,
+            )
+            for side, levels in (("yes", event.yes_levels), ("no", event.no_levels))
+            for level in levels
+        ]
+    elif isinstance(event, BookDelta):
+        rows = [
+            WsBookEvent(
+                ticker=event.ticker,
+                received_at=event.received_at,
+                seq=event.seq,
+                side=event.side,
+                price=event.price,
+                size=event.delta,
+                is_snapshot=False,
+            )
+        ]
+    elif isinstance(event, TradePrint):
+        rows = [
+            WsTrade(
+                ticker=event.ticker,
+                received_at=event.received_at,
+                yes_price=event.yes_price,
+                count=event.count,
+                taker_side=event.taker_side,
+            )
+        ]
+    else:
+        rows = [
+            WsGap(
+                ticker=event.ticker,
+                detected_at=datetime.now(tz=_timezone.utc),
+                last_seq=event.last_seq,
+                reason=event.reason,
+            )
+        ]
+    async with app.db_lock:
+        with app.session_factory() as session:
+            session.add_all(rows)
+            session.commit()
+
+
+async def _ws_resubscribe(
+    client: KalshiWSClient,
+    pending: asyncio.Task[_WsEvent] | None,
+    tickers: frozenset[str],
+) -> tuple[AsyncIterator[_WsEvent] | None, asyncio.Task[_WsEvent] | None]:
+    if pending is not None:
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+    await client.aclose()
+    if not tickers:
+        return None, None
+    await client.aopen()
+    await client.subscribe(list(WS_CHANNELS), sorted(tickers))
+    event_iter = client.events()
+    return event_iter, asyncio.create_task(anext(event_iter))
+
+
+async def _ws_record_session(app: App, client: KalshiWSClient, stop: asyncio.Event) -> None:
+    subscribed: frozenset[str] = frozenset()
+    event_iter: AsyncIterator[_WsEvent] | None = None
+    pending: asyncio.Task[_WsEvent] | None = None
+    stop_task = asyncio.create_task(stop.wait())
+    book_events = trades = gaps = 0
+    refresh_at = time.monotonic()
+    heartbeat_at = time.monotonic() + WS_HEARTBEAT_INTERVAL_SECONDS
+    try:
+        while not stop.is_set():
+            now = time.monotonic()
+            if now >= refresh_at:
+                refresh_at = now + WS_SUBSCRIPTION_POLL_SECONDS
+                desired = frozenset(app.latest_markets)
+                if desired != subscribed:
+                    event_iter, pending = await _ws_resubscribe(client, pending, desired)
+                    subscribed = desired
+            if now >= heartbeat_at:
+                heartbeat_at = now + WS_HEARTBEAT_INTERVAL_SECONDS
+                logger.info(
+                    "ws_recorder_heartbeat book_events=%d trades=%d gaps=%d tickers=%d",
+                    book_events,
+                    trades,
+                    gaps,
+                    len(subscribed),
+                )
+                book_events = trades = gaps = 0
+            waiters = {stop_task} if pending is None else {stop_task, pending}
+            timeout = max(0.0, min(refresh_at, heartbeat_at) - time.monotonic())
+            done, _ = await asyncio.wait(
+                waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+            if stop_task in done or pending is None or pending not in done:
+                continue
+            event = pending.result()
+            pending = asyncio.create_task(anext(event_iter))
+            await _persist_ws_event(app, event)
+            if isinstance(event, GapDetected):
+                gaps += 1
+                logger.warning(
+                    "ws_gap ticker=%s seq=%d reason=%s",
+                    event.ticker,
+                    event.last_seq,
+                    event.reason,
+                )
+                if event.reason == "seq_skip":
+                    event_iter, pending = await _ws_resubscribe(client, pending, subscribed)
+            elif isinstance(event, TradePrint):
+                trades += 1
+            elif isinstance(event, BookSnapshot):
+                book_events += len(event.yes_levels) + len(event.no_levels)
+            else:
+                book_events += 1
+    finally:
+        stop_task.cancel()
+        if pending is not None:
+            pending.cancel()
+        await asyncio.gather(
+            stop_task, *(() if pending is None else (pending,)), return_exceptions=True
+        )
+        await client.aclose()
+
+
+async def _ws_recorder_loop(app: App, stop: asyncio.Event) -> None:
+    client = app.kalshi_ws
+    if client is None or not app.settings.kalshi_prod_key_id:
+        logger.info("ws_recorder_disabled reason=prod_ws_unconfigured")
+        return
+    key_path = app.settings.kalshi_prod_private_key_path
+    if key_path is None or not key_path.exists():
+        logger.info("ws_recorder_disabled reason=key_file_missing path=%s", key_path)
+        return
+
+    async def body() -> None:
+        await _ws_record_session(app, client, stop)
+
+    await run_loop(
+        name="ws_recorder_loop",
+        body=body,
+        interval_seconds=WS_SUBSCRIPTION_POLL_SECONDS,
+        stop=stop,
+    )
+
+
 async def run(app: App, duration: timedelta) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -1415,6 +1586,7 @@ async def run(app: App, duration: timedelta) -> None:
         asyncio.create_task(_settlement_loop(app, stop), name="settlement_loop"),
         asyncio.create_task(_order_reconcile_loop(app, stop), name="order_reconcile_loop"),
         asyncio.create_task(_calibration_refit_loop(app, stop), name="calibration_loop"),
+        asyncio.create_task(_ws_recorder_loop(app, stop), name="ws_recorder_loop"),
     ]
     if app.settings.mode == "demo":
         tasks.append(
@@ -1567,6 +1739,7 @@ def main() -> None:
     meteo = OpenMeteoClient()
     kalshi = KalshiDemoClient(settings)
     kalshi_read = KalshiReadClient(settings)
+    kalshi_ws = KalshiWSClient(settings, KALSHI_WS_URL)
     acis = ACISClient()
 
     app = App(
@@ -1578,6 +1751,7 @@ def main() -> None:
         kalshi_read=kalshi_read,
         acis=acis,
         series_list=series_list,
+        kalshi_ws=kalshi_ws,
     )
 
     async def _go() -> None:

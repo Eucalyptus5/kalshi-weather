@@ -6,6 +6,7 @@ import dataclasses
 import inspect as py_inspect
 import logging
 import re as _re
+from collections.abc import AsyncIterator, Callable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -24,6 +25,7 @@ from bot.execution.paper import PaperTrade, TradeIntent, TradeSide
 from bot.forecast.cdf import EnsembleCDF
 from bot.forecast.open_meteo import StationForecast
 from bot.kalshi_client import KalshiDemoClient, KalshiMarket, KalshiOrderbook
+from bot.kalshi_ws import BookDelta, BookLevel, BookSnapshot, GapDetected, TradePrint
 from bot.main import (
     STATIONS,
     STRATEGY_BLACKLIST,
@@ -53,6 +55,9 @@ from bot.storage.sqlite import (
     OrderbookSnapshot,
     PaperTradeRow,
     SimulatedPnl,
+    WsBookEvent,
+    WsGap,
+    WsTrade,
     make_engine,
     make_session_factory,
 )
@@ -7405,3 +7410,379 @@ def test_guard_rejects_run_loop_as_attribute() -> None:
     tree = ast.parse(src)
     func_def = _find_async_func(tree, "_market_loop")
     assert not _body_calls_run_loop(func_def, "market_loop")
+
+
+class _ScriptedWSClient:
+    def __init__(self, scripts: tuple[tuple[object, ...], ...] = ()) -> None:
+        self._scripts = scripts
+        self._epoch = -1
+        self.calls: list[str] = []
+        self.subscriptions: list[tuple[list[str], list[str]]] = []
+
+    async def aopen(self) -> None:
+        self.calls.append("aopen")
+
+    async def aclose(self) -> None:
+        self.calls.append("aclose")
+
+    async def subscribe(self, channels: list[str], tickers: list[str]) -> None:
+        self.calls.append("subscribe")
+        self.subscriptions.append((list(channels), list(tickers)))
+
+    async def events(self) -> AsyncIterator[object]:
+        self._epoch += 1
+        epoch = self._epoch
+        if epoch < len(self._scripts):
+            for item in self._scripts[epoch]:
+                yield item
+        await asyncio.Event().wait()
+
+
+_WS_TICKER = "KXHIGHDEN-26MAY08-T96.5"
+_WS_TICKER_B = "KXHIGHDEN-26MAY08-T92.5"
+_WS_RECEIVED = datetime(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
+_WS_CHANNELS = ["orderbook_delta", "trade"]
+
+
+def _ws_settings(pem: Path) -> _DemoSettings:
+    return _DemoSettings(
+        mode="paper",
+        kalshi_prod_key_id="prod-key-id",
+        kalshi_prod_private_key_path=pem,
+    )
+
+
+def _make_ws_app(client: _ScriptedWSClient, settings: _DemoSettings) -> App:
+    engine = make_engine(":memory:")
+    Base.metadata.create_all(engine)
+    sf = make_session_factory(engine)
+    return App(
+        settings=settings,
+        engine=engine,
+        session_factory=sf,
+        meteo=_StubMeteo({}),  # type: ignore[arg-type]
+        kalshi=_StubKalshi([], {}),  # type: ignore[arg-type]
+        kalshi_read=_StubKalshi([], {}),  # type: ignore[arg-type]
+        acis=_StubACIS(None),  # type: ignore[arg-type]
+        series_list=("KXHIGHDEN",),
+        kalshi_ws=client,  # type: ignore[arg-type]
+    )
+
+
+def _ws_market(ticker: str) -> KalshiMarket:
+    return _market_from(ticker, "0.45", "0.43", datetime(2026, 5, 9, 0, 0, tzinfo=timezone.utc))
+
+
+def _ws_snapshot() -> BookSnapshot:
+    return BookSnapshot(
+        ticker=_WS_TICKER,
+        sid=1,
+        seq=5,
+        yes_levels=(
+            BookLevel(Decimal("0.08"), Decimal("300.00")),
+            BookLevel(Decimal("0.22"), Decimal("333.00")),
+        ),
+        no_levels=(BookLevel(Decimal("0.54"), Decimal("20.00")),),
+        received_at=_WS_RECEIVED,
+    )
+
+
+def _ws_delta() -> BookDelta:
+    return BookDelta(
+        ticker=_WS_TICKER,
+        sid=1,
+        seq=6,
+        side="no",
+        price=Decimal("0.96"),
+        delta=Decimal("-54.00"),
+        ts_ms=1669149841000,
+        received_at=_WS_RECEIVED,
+    )
+
+
+def _ws_trade_print() -> TradePrint:
+    return TradePrint(
+        ticker=_WS_TICKER,
+        sid=1,
+        yes_price=Decimal("0.36"),
+        no_price=Decimal("0.64"),
+        count=Decimal("136.00"),
+        taker_side="no",
+        ts_ms=1669149841000,
+        received_at=_WS_RECEIVED,
+    )
+
+
+async def _ws_wait(cond: Callable[[], bool]) -> None:
+    for _ in range(300):
+        if cond():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("ws condition not met within timeout")
+
+
+async def _run_ws_recorder_until(app: App, cond: Callable[[], bool]) -> None:
+    stop = asyncio.Event()
+    task = asyncio.create_task(bot_main._ws_recorder_loop(app, stop))
+    try:
+        await _ws_wait(cond)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+
+async def test_ws_recorder_subscription_lifecycle(
+    monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    client = _ScriptedWSClient()
+    app = _make_ws_app(client, _ws_settings(_rsa_pem))
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(bot_main._ws_recorder_loop(app, stop))
+
+    await _ws_wait(lambda: len(client.subscriptions) == 1)
+    assert client.subscriptions[0] == (_WS_CHANNELS, [_WS_TICKER])
+    assert client.calls[:3] == ["aclose", "aopen", "subscribe"]
+
+    app.latest_markets[_WS_TICKER_B] = _ws_market(_WS_TICKER_B)
+    await _ws_wait(lambda: len(client.subscriptions) == 2)
+    assert client.subscriptions[1] == (_WS_CHANNELS, sorted([_WS_TICKER, _WS_TICKER_B]))
+    assert client.calls[3:6] == ["aclose", "aopen", "subscribe"]
+
+    await asyncio.sleep(0.05)
+    assert len(client.subscriptions) == 2
+
+    del app.latest_markets[_WS_TICKER]
+    await _ws_wait(lambda: len(client.subscriptions) == 3)
+    assert client.subscriptions[2] == (_WS_CHANNELS, [_WS_TICKER_B])
+
+    stop.set()
+    await asyncio.wait_for(task, timeout=2.0)
+    assert task.exception() is None
+
+
+async def test_ws_recorder_persists_snapshot_rows(
+    monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    client = _ScriptedWSClient(scripts=((_ws_snapshot(),),))
+    app = _make_ws_app(client, _ws_settings(_rsa_pem))
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    def _rows() -> list[WsBookEvent]:
+        with app.session_factory() as session:
+            return list(session.scalars(select(WsBookEvent).order_by(WsBookEvent.id)).all())
+
+    await _run_ws_recorder_until(app, lambda: len(_rows()) == 3)
+
+    rows = _rows()
+    assert [(r.side, r.price, r.size) for r in rows] == [
+        ("yes", Decimal("0.08"), Decimal("300.00")),
+        ("yes", Decimal("0.22"), Decimal("333.00")),
+        ("no", Decimal("0.54"), Decimal("20.00")),
+    ]
+    assert all(r.is_snapshot for r in rows)
+    assert {r.seq for r in rows} == {5}
+    assert {r.ticker for r in rows} == {_WS_TICKER}
+    assert {r.received_at for r in rows} == {_WS_RECEIVED}
+
+
+async def test_ws_recorder_persists_signed_delta(
+    monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    client = _ScriptedWSClient(scripts=((_ws_delta(),),))
+    app = _make_ws_app(client, _ws_settings(_rsa_pem))
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    def _rows() -> list[WsBookEvent]:
+        with app.session_factory() as session:
+            return list(session.scalars(select(WsBookEvent)).all())
+
+    await _run_ws_recorder_until(app, lambda: len(_rows()) == 1)
+
+    row = _rows()[0]
+    assert row.is_snapshot is False
+    assert row.side == "no"
+    assert row.price == Decimal("0.96")
+    assert row.size == Decimal("-54.00")
+    assert row.seq == 6
+    assert row.ticker == _WS_TICKER
+    assert row.received_at == _WS_RECEIVED
+
+
+async def test_ws_recorder_persists_trade(monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    client = _ScriptedWSClient(scripts=((_ws_trade_print(),),))
+    app = _make_ws_app(client, _ws_settings(_rsa_pem))
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    def _rows() -> list[WsTrade]:
+        with app.session_factory() as session:
+            return list(session.scalars(select(WsTrade)).all())
+
+    await _run_ws_recorder_until(app, lambda: len(_rows()) == 1)
+
+    row = _rows()[0]
+    assert row.ticker == _WS_TICKER
+    assert row.yes_price == Decimal("0.36")
+    assert row.count == Decimal("136.00")
+    assert row.taker_side == "no"
+    assert row.received_at == _WS_RECEIVED
+
+
+async def test_ws_recorder_seq_skip_writes_gap_and_resubscribes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    gap = GapDetected(ticker=_WS_TICKER, sid=1, last_seq=7, next_seq=9, reason="seq_skip")
+    client = _ScriptedWSClient(scripts=((gap,),))
+    app = _make_ws_app(client, _ws_settings(_rsa_pem))
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    caplog.set_level(logging.WARNING, logger="bot.main")
+    await _run_ws_recorder_until(app, lambda: len(client.subscriptions) >= 2)
+
+    with app.session_factory() as session:
+        rows = session.scalars(select(WsGap)).all()
+    assert len(rows) == 1
+    assert rows[0].ticker == _WS_TICKER
+    assert rows[0].last_seq == 7
+    assert rows[0].reason == "seq_skip"
+    assert rows[0].detected_at is not None
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(f"ws_gap ticker={_WS_TICKER}" in m and "seq=7" in m for m in messages)
+
+    assert client.subscriptions[1] == (_WS_CHANNELS, [_WS_TICKER])
+    subs = [i for i, name in enumerate(client.calls) if name == "subscribe"]
+    between = client.calls[subs[0] + 1 : subs[1]]
+    assert "aclose" in between
+    assert "aopen" in between
+
+
+async def test_ws_recorder_connection_reset_writes_gap_without_resubscribe(
+    monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    gap = GapDetected(ticker="", sid=0, last_seq=0, next_seq=0, reason="connection_reset")
+    client = _ScriptedWSClient(scripts=((gap,),))
+    app = _make_ws_app(client, _ws_settings(_rsa_pem))
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    def _rows() -> list[WsGap]:
+        with app.session_factory() as session:
+            return list(session.scalars(select(WsGap)).all())
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(bot_main._ws_recorder_loop(app, stop))
+    await _ws_wait(lambda: len(_rows()) == 1)
+    await asyncio.sleep(0.05)
+    assert len(client.subscriptions) == 1
+    stop.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert _rows()[0].reason == "connection_reset"
+
+
+async def test_ws_recorder_shutdown_drains_cleanly(
+    monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    client = _ScriptedWSClient(scripts=((_ws_snapshot(), _ws_delta(), _ws_trade_print()),))
+    app = _make_ws_app(client, _ws_settings(_rsa_pem))
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    def _trade_rows() -> list[WsTrade]:
+        with app.session_factory() as session:
+            return list(session.scalars(select(WsTrade)).all())
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(bot_main._ws_recorder_loop(app, stop))
+    await _ws_wait(lambda: len(_trade_rows()) == 1)
+    stop.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert task.exception() is None
+    assert client.calls[-1] == "aclose"
+    with app.session_factory() as session:
+        book_rows = session.scalars(select(WsBookEvent)).all()
+    assert len(book_rows) == 4
+
+
+async def test_ws_recorder_disabled_without_key_id(caplog: pytest.LogCaptureFixture) -> None:
+    client = _ScriptedWSClient()
+    settings = _DemoSettings(
+        mode="paper", kalshi_prod_key_id=None, kalshi_prod_private_key_path=None
+    )
+    app = _make_ws_app(client, settings)
+    caplog.set_level(logging.INFO, logger="bot.main")
+
+    await asyncio.wait_for(bot_main._ws_recorder_loop(app, asyncio.Event()), timeout=1.0)
+
+    assert any("ws_recorder_disabled" in r.getMessage() for r in caplog.records)
+    assert client.calls == []
+
+
+async def test_ws_recorder_disabled_when_key_file_missing(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    client = _ScriptedWSClient()
+    settings = _DemoSettings(
+        mode="paper",
+        kalshi_prod_key_id="prod-key-id",
+        kalshi_prod_private_key_path=tmp_path / "missing.pem",
+    )
+    app = _make_ws_app(client, settings)
+    caplog.set_level(logging.INFO, logger="bot.main")
+
+    await asyncio.wait_for(bot_main._ws_recorder_loop(app, asyncio.Event()), timeout=1.0)
+
+    assert any("ws_recorder_disabled" in r.getMessage() for r in caplog.records)
+    assert client.calls == []
+
+
+async def test_ws_recorder_heartbeat_logs_counts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(bot_main, "WS_HEARTBEAT_INTERVAL_SECONDS", 0.03)
+    client = _ScriptedWSClient(scripts=((_ws_trade_print(),),))
+    app = _make_ws_app(client, _ws_settings(_rsa_pem))
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    caplog.set_level(logging.INFO, logger="bot.main")
+
+    def _beats() -> list[str]:
+        return [r.getMessage() for r in caplog.records if "ws_recorder_heartbeat" in r.getMessage()]
+
+    await _run_ws_recorder_until(app, lambda: any("trades=1" in m for m in _beats()))
+    assert any("tickers=1" in m and "trades=1" in m for m in _beats())
+
+
+async def test_run_starts_ws_recorder_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _make_app(meteo=_StubMeteo({}), kalshi=_StubKalshi([], {}))
+    started = asyncio.Event()
+
+    async def recorder_spy(app_arg: App, stop: asyncio.Event) -> None:
+        started.set()
+        await stop.wait()
+
+    async def fast_loop(app_arg: App, stop: asyncio.Event) -> None:
+        await stop.wait()
+
+    for name in (
+        "_forecast_loop",
+        "_market_loop",
+        "_eval_loop",
+        "_settlement_loop",
+        "_order_reconcile_loop",
+        "_calibration_refit_loop",
+    ):
+        monkeypatch.setattr(bot_main, name, fast_loop)
+    monkeypatch.setattr(bot_main, "_ws_recorder_loop", recorder_spy)
+
+    await run(app, timedelta(milliseconds=100))
+    assert started.is_set()
