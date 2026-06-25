@@ -4,8 +4,6 @@ Revision ID: 0009
 Revises: 0008
 Create Date: 2026-07-07 12:00:00.000000
 
-Weather books are low-traffic; if a smoke day exceeds ~500k rows/day across all series,
-add per-day pruning of non-DEN/CHI series before the recorder deploy signs off.
 """
 
 from typing import Sequence, Union
