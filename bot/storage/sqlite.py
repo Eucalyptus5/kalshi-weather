@@ -259,6 +259,7 @@ class WsBookEvent(Base):
     price: Mapped[Decimal] = mapped_column(DecimalText())
     size: Mapped[Decimal] = mapped_column(DecimalText())
     is_snapshot: Mapped[bool] = mapped_column(Boolean)
+    ts_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now)
 
     __table_args__ = (Index("ix_ws_book_events_ticker_received_at", "ticker", "received_at"),)
@@ -269,10 +270,12 @@ class WsTrade(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ticker: Mapped[str] = mapped_column(String(64))
+    trade_id: Mapped[str] = mapped_column(String(), nullable=False)
     received_at: Mapped[datetime] = mapped_column(UtcDateTime())
     yes_price: Mapped[Decimal] = mapped_column(DecimalText())
     count: Mapped[Decimal] = mapped_column(DecimalText())
     taker_side: Mapped[str] = mapped_column(String(8))
+    ts_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now)
 
     __table_args__ = (Index("ix_ws_trades_ticker_received_at", "ticker", "received_at"),)

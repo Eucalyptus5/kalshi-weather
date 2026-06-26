@@ -7504,6 +7504,7 @@ def _ws_trade_print() -> TradePrint:
     return TradePrint(
         ticker=_WS_TICKER,
         sid=1,
+        trade_id="8f5b9f2e-1234-4abc-9def-000000000001",
         yes_price=Decimal("0.36"),
         no_price=Decimal("0.64"),
         count=Decimal("136.00"),
@@ -7587,6 +7588,7 @@ async def test_ws_recorder_persists_snapshot_rows(
     assert {r.seq for r in rows} == {5}
     assert {r.ticker for r in rows} == {_WS_TICKER}
     assert {r.received_at for r in rows} == {_WS_RECEIVED}
+    assert all(r.ts_ms is None for r in rows)
 
 
 async def test_ws_recorder_persists_signed_delta(
@@ -7611,6 +7613,7 @@ async def test_ws_recorder_persists_signed_delta(
     assert row.seq == 6
     assert row.ticker == _WS_TICKER
     assert row.received_at == _WS_RECEIVED
+    assert row.ts_ms == 1669149841000
 
 
 async def test_ws_recorder_persists_trade(monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path) -> None:
@@ -7631,6 +7634,8 @@ async def test_ws_recorder_persists_trade(monkeypatch: pytest.MonkeyPatch, _rsa_
     assert row.count == Decimal("136.00")
     assert row.taker_side == "no"
     assert row.received_at == _WS_RECEIVED
+    assert row.ts_ms == 1669149841000
+    assert row.trade_id == "8f5b9f2e-1234-4abc-9def-000000000001"
 
 
 async def test_ws_recorder_seq_skip_writes_gap_and_resubscribes(

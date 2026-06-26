@@ -379,10 +379,12 @@ def test_ws_trade_round_trip_preserves_scale(session):
     when = datetime(2026, 7, 6, 19, 0, tzinfo=_timezone.utc)
     row = WsTrade(
         ticker="KXHIGHCHI-26JUL06-T85-90",
+        trade_id="8f5b9f2e-1234-4abc-9def-000000000001",
         received_at=when,
         yes_price=Decimal("0.360"),
         count=Decimal("136.00"),
         taker_side="no",
+        ts_ms=1712000000500,
     )
     session.add(row)
     session.commit()
@@ -394,6 +396,8 @@ def test_ws_trade_round_trip_preserves_scale(session):
     assert str(got.count) == "136.00"
     assert got.taker_side == "no"
     assert got.received_at == when
+    assert got.ts_ms == 1712000000500
+    assert got.trade_id == "8f5b9f2e-1234-4abc-9def-000000000001"
 
 
 def test_ws_gap_round_trip_detected_at_utc(session):
@@ -1009,16 +1013,19 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     (versions / "0009_ws_recorder_tables.py").write_text(
         (REPO_ROOT / "alembic" / "versions" / "0009_ws_recorder_tables.py").read_text()
     )
-    (versions / "0010_decoy.py").write_text(
-        '"""decoy 0010 for forward-compat test\n\n'
-        "Revision ID: 0010\n"
-        "Revises: 0009\n"
-        "Create Date: 2026-06-02 14:00:00.000000\n\n"
+    (versions / "0010_ws_ts_ms_trade_id.py").write_text(
+        (REPO_ROOT / "alembic" / "versions" / "0010_ws_ts_ms_trade_id.py").read_text()
+    )
+    (versions / "0011_decoy.py").write_text(
+        '"""decoy 0011 for forward-compat test\n\n'
+        "Revision ID: 0011\n"
+        "Revises: 0010\n"
+        "Create Date: 2026-07-08 14:00:00.000000\n\n"
         '"""\n\n'
         "from typing import Sequence, Union\n\n"
         "from alembic import op  # noqa: F401\n\n\n"
-        'revision: str = "0010"\n'
-        'down_revision: Union[str, Sequence[str], None] = "0009"\n'
+        'revision: str = "0011"\n'
+        'down_revision: Union[str, Sequence[str], None] = "0010"\n'
         "branch_labels: Union[str, Sequence[str], None] = None\n"
         "depends_on: Union[str, Sequence[str], None] = None\n\n\n"
         "def upgrade() -> None:\n"
@@ -1037,8 +1044,8 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     engine = make_engine(db_file)
     Base.metadata.create_all(engine)
     script_dir = ScriptDirectory.from_config(cfg)
-    assert script_dir.get_current_head() == "0010"
-    assert _detect_baseline(engine, script_dir) == "0009"
+    assert script_dir.get_current_head() == "0011"
+    assert _detect_baseline(engine, script_dir) == "0010"
     engine.dispose()
 
 

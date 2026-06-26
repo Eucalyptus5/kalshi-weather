@@ -48,6 +48,12 @@ SENTINELS_0009: tuple[tuple[str, str], ...] = (
     ("ws_gaps", "last_seq"),
 )
 
+SENTINELS_0010: tuple[tuple[str, str], ...] = (
+    ("ws_book_events", "ts_ms"),
+    ("ws_trades", "ts_ms"),
+    ("ws_trades", "trade_id"),
+)
+
 
 def _present_sentinels(
     inspector: Inspector, tables: set[str], sentinels: tuple[tuple[str, str], ...]
@@ -140,7 +146,16 @@ def _detect_baseline(engine: Engine, script_dir: ScriptDirectory) -> str:
         raise RuntimeError(
             f"partial 0009 schema detected; present={sorted(present_0009)} missing={sorted(missing)}"
         )
-    return "0009"
+
+    present_0010 = _present_sentinels(inspector, tables, SENTINELS_0010)
+    if not present_0010:
+        return "0009"
+    if len(present_0010) != len(SENTINELS_0010):
+        missing = set(SENTINELS_0010) - present_0010
+        raise RuntimeError(
+            f"partial 0010 schema detected; present={sorted(present_0010)} missing={sorted(missing)}"
+        )
+    return "0010"
 
 
 def main() -> None:

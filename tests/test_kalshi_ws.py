@@ -267,7 +267,7 @@ async def test_trade_decode_prefers_outcome_side(
             "type": "trade",
             "sid": 11,
             "msg": {
-                "trade_id": "abc",
+                "trade_id": "8f5b9f2e-1234-4abc-9def-000000000001",
                 "market_ticker": "KXHIGHDEN-26MAY08-T96.5",
                 "yes_price_dollars": "0.360",
                 "no_price_dollars": "0.640",
@@ -291,6 +291,7 @@ async def test_trade_decode_prefers_outcome_side(
     await client.aclose()
 
     assert isinstance(trade, TradePrint)
+    assert trade.trade_id == "8f5b9f2e-1234-4abc-9def-000000000001"
     assert trade.taker_side == "no"
     assert trade.yes_price == Decimal("0.360")
     assert trade.no_price == Decimal("0.640")

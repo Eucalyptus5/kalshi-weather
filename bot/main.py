@@ -1431,16 +1431,19 @@ async def _persist_ws_event(app: App, event: _WsEvent) -> None:
                 price=event.price,
                 size=event.delta,
                 is_snapshot=False,
+                ts_ms=event.ts_ms,
             )
         ]
     elif isinstance(event, TradePrint):
         rows = [
             WsTrade(
                 ticker=event.ticker,
+                trade_id=event.trade_id,
                 received_at=event.received_at,
                 yes_price=event.yes_price,
                 count=event.count,
                 taker_side=event.taker_side,
+                ts_ms=event.ts_ms,
             )
         ]
     else:

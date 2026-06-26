@@ -56,6 +56,7 @@ class BookDelta:
 class TradePrint:
     ticker: str
     sid: int
+    trade_id: str
     yes_price: Decimal
     no_price: Decimal
     count: Decimal
@@ -280,6 +281,7 @@ class KalshiWSClient:
             return TradePrint(
                 ticker=ticker,
                 sid=sid,
+                trade_id=str(raw_msg["trade_id"]),
                 yes_price=Decimal(str(raw_msg["yes_price_dollars"])),
                 no_price=Decimal(str(raw_msg["no_price_dollars"])),
                 count=Decimal(str(raw_msg["count_fp"])),
