@@ -79,6 +79,7 @@ from bot.storage.sqlite import (
     SimulatedPnl,
     WsBookEvent,
     WsGap,
+    WsHeartbeat,
     WsTrade,
     make_engine,
     make_session_factory,
@@ -1531,6 +1532,18 @@ async def _ws_record_session(app: App, client: KalshiWSClient, stop: asyncio.Eve
                     gaps,
                     len(subscribed),
                 )
+                row = WsHeartbeat(
+                    beat_at=datetime.now(tz=_timezone.utc),
+                    book_events=book_events,
+                    trades=trades,
+                    gaps=gaps,
+                    subscribed=len(subscribed),
+                    raw_bytes=0 if app.ws_tape is None else app.ws_tape.bytes_written,
+                )
+                async with app.db_lock:
+                    with app.session_factory() as session:
+                        session.add(row)
+                        session.commit()
                 book_events = trades = gaps = 0
             waiters = {stop_task} if pending is None else {stop_task, pending}
             timeout = max(0.0, min(refresh_at, heartbeat_at) - time.monotonic())

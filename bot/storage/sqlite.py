@@ -294,6 +294,21 @@ class WsGap(Base):
     __table_args__ = (Index("ix_ws_gaps_ticker_detected_at", "ticker", "detected_at"),)
 
 
+class WsHeartbeat(Base):
+    __tablename__ = "ws_heartbeats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    beat_at: Mapped[datetime] = mapped_column(UtcDateTime())
+    book_events: Mapped[int] = mapped_column(Integer)
+    trades: Mapped[int] = mapped_column(Integer)
+    gaps: Mapped[int] = mapped_column(Integer)
+    subscribed: Mapped[int] = mapped_column(Integer)
+    raw_bytes: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now)
+
+    __table_args__ = (Index("ix_ws_heartbeats_beat_at", "beat_at"),)
+
+
 def make_engine(db_path: Path | str) -> Engine:
     if isinstance(db_path, Path):
         url = f"sqlite:///{db_path}"

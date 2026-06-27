@@ -59,6 +59,7 @@ from bot.storage.sqlite import (
     SimulatedPnl,
     WsBookEvent,
     WsGap,
+    WsHeartbeat,
     WsTrade,
     make_engine,
     make_session_factory,
@@ -7767,6 +7768,44 @@ async def test_ws_recorder_heartbeat_logs_counts(
 
     await _run_ws_recorder_until(app, lambda: any("trades=1" in m for m in _beats()))
     assert any("tickers=1" in m and "trades=1" in m for m in _beats())
+
+
+async def test_ws_recorder_heartbeat_writes_row_matching_log(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    _rsa_pem: Path,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(bot_main, "WS_HEARTBEAT_INTERVAL_SECONDS", 0.03)
+    client = _ScriptedWSClient(scripts=((_ws_trade_print(),),))
+    app = _make_ws_app(client, _ws_settings(_rsa_pem))
+    app.ws_tape = bot_main.WsRawTape(tmp_path)
+    app.ws_tape.write('{"seq":1}', _WS_RECEIVED)
+    tape_bytes = app.ws_tape.bytes_written
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    caplog.set_level(logging.INFO, logger="bot.main")
+
+    def _beats() -> list[str]:
+        return [r.getMessage() for r in caplog.records if "ws_recorder_heartbeat" in r.getMessage()]
+
+    def _rows() -> list[WsHeartbeat]:
+        with app.session_factory() as session:
+            return list(session.scalars(select(WsHeartbeat).order_by(WsHeartbeat.id)).all())
+
+    await _run_ws_recorder_until(app, lambda: any("trades=1" in m for m in _beats()))
+
+    pattern = _re.compile(
+        r"ws_recorder_heartbeat book_events=(\d+) trades=(\d+) gaps=(\d+) tickers=(\d+)"
+    )
+    logged = [tuple(int(g) for g in pattern.match(m).groups()) for m in _beats()]
+    rows = _rows()
+    assert tape_bytes > 0
+    assert len(rows) == len(logged)
+    assert [(r.book_events, r.trades, r.gaps, r.subscribed) for r in rows] == logged
+    assert all(r.raw_bytes == tape_bytes for r in rows)
+    assert all(r.beat_at.tzinfo is not None for r in rows)
 
 
 def test_ws_raw_tape_rotates_on_utc_date(tmp_path: Path) -> None:
