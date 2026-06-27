@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -539,3 +540,34 @@ async def test_no_key_raises(rsa_pem: Path) -> None:
     client = KalshiWSClient(_settings_no_key(), _URL)
     with pytest.raises(RuntimeError):
         await client.aopen()
+
+
+async def test_frame_sink_sees_every_frame(rsa_pem: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bot.kalshi_ws.KalshiAuth", _RecordingAuth)
+    valid = _snapshot_frame(sid=1, seq=1)
+    error = json.dumps({"type": "error", "sid": 1, "msg": {"code": 99, "msg": "throttled"}})
+    unknown = json.dumps({"type": "market_lifecycle", "sid": 1, "msg": {"open": True}})
+    garbage = "not json {"
+    conn = FakeWSConn([valid, error, unknown, garbage], end_exception=ConnectionClosed(None, None))
+    connect_fn, _ = _make_connect_fn([conn])
+    seen: list[tuple[str, datetime]] = []
+    client = KalshiWSClient(
+        _settings_with_pem(rsa_pem),
+        _URL,
+        connect_fn=connect_fn,
+        backoff_seconds=(0.0,),
+        frame_sink=lambda raw, received_at: seen.append((raw, received_at)),
+    )
+    await client.aopen()
+    await client.subscribe(["orderbook_delta"], ["KXHIGHDEN-26MAY08-T96.5"])
+
+    events = client.events()
+    snap = await asyncio.wait_for(anext(events), timeout=1.0)
+    with pytest.raises(json.JSONDecodeError):
+        await asyncio.wait_for(anext(events), timeout=1.0)
+    await client.aclose()
+
+    assert isinstance(snap, BookSnapshot)
+    assert snap.seq == 1
+    assert [raw for raw, _ in seen] == [valid, error, unknown, garbage]
+    assert all(received_at.tzinfo is not None for _, received_at in seen)

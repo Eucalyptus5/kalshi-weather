@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import gzip
 import json
 import logging
 import os
@@ -16,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from datetime import timezone as _timezone
 from decimal import Decimal
+from pathlib import Path
 
 import httpx
 import numpy as np
@@ -338,6 +340,7 @@ class App:
     acis: ACISClient
     series_list: tuple[str, ...]
     kalshi_ws: KalshiWSClient | None = None
+    ws_tape: WsRawTape | None = None
     bankroll: Decimal | None = None
     db_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     reconcile_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -1402,6 +1405,30 @@ async def _forecast_loop(app: App, stop: asyncio.Event) -> None:
     )
 
 
+class WsRawTape:
+    def __init__(self, dir_path: Path) -> None:
+        self._dir = dir_path
+        self._file: gzip.GzipFile | None = None
+        self._file_date: date | None = None
+        self.bytes_written = 0
+
+    def write(self, raw: str, received_at: datetime) -> None:
+        day = received_at.astimezone(_timezone.utc).date()
+        if self._file is None or day != self._file_date:
+            self.close()
+            self._dir.mkdir(parents=True, exist_ok=True)
+            self._file = gzip.open(self._dir / f"{day.isoformat()}.jsonl.gz", "ab")
+            self._file_date = day
+        data = json.dumps({"received_at": received_at.isoformat(), "raw": raw}).encode() + b"\n"
+        self._file.write(data)
+        self.bytes_written += len(data)
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+
 _WsEvent = BookSnapshot | BookDelta | TradePrint | GapDetected
 
 
@@ -1539,6 +1566,8 @@ async def _ws_record_session(app: App, client: KalshiWSClient, stop: asyncio.Eve
             stop_task, *(() if pending is None else (pending,)), return_exceptions=True
         )
         await client.aclose()
+        if app.ws_tape is not None:
+            app.ws_tape.close()
 
 
 async def _ws_recorder_loop(app: App, stop: asyncio.Event) -> None:
@@ -1742,7 +1771,8 @@ def main() -> None:
     meteo = OpenMeteoClient()
     kalshi = KalshiDemoClient(settings)
     kalshi_read = KalshiReadClient(settings)
-    kalshi_ws = KalshiWSClient(settings, KALSHI_WS_URL)
+    ws_tape = WsRawTape(Path("data/ws_raw"))
+    kalshi_ws = KalshiWSClient(settings, KALSHI_WS_URL, frame_sink=ws_tape.write)
     acis = ACISClient()
 
     app = App(
@@ -1755,6 +1785,7 @@ def main() -> None:
         acis=acis,
         series_list=series_list,
         kalshi_ws=kalshi_ws,
+        ws_tape=ws_tape,
     )
 
     async def _go() -> None:

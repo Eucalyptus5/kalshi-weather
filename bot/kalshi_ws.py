@@ -122,6 +122,7 @@ class KalshiWSClient:
         connect_fn: _ConnectFn | None = None,
         clock: Callable[[], datetime] | None = None,
         backoff_seconds: tuple[float, ...] = (1.0, 2.0, 5.0, 15.0, 30.0),
+        frame_sink: Callable[[str, datetime], None] | None = None,
     ) -> None:
         if not backoff_seconds:
             raise ValueError("backoff_seconds must have at least one entry")
@@ -130,6 +131,7 @@ class KalshiWSClient:
         self._connect_fn: _ConnectFn = connect_fn or _default_connect
         self._clock = clock or _utc_now
         self._backoff_seconds = backoff_seconds
+        self._frame_sink = frame_sink
 
         self._auth: KalshiAuth | None = None
         self._conn: WSConnection | None = None
@@ -310,6 +312,9 @@ class KalshiWSClient:
             except (ConnectionClosed, OSError):
                 await self._trigger_reconnect(reason="connection_reset", sid=0, last_seq=0)
                 continue
+
+            if self._frame_sink is not None:
+                self._frame_sink(raw, self._clock())
 
             payload = json.loads(raw)
             if not isinstance(payload, dict):

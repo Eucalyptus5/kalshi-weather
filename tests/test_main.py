@@ -3,7 +3,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import dataclasses
+import gzip
 import inspect as py_inspect
+import json
 import logging
 import re as _re
 from collections.abc import AsyncIterator, Callable
@@ -7765,6 +7767,104 @@ async def test_ws_recorder_heartbeat_logs_counts(
 
     await _run_ws_recorder_until(app, lambda: any("trades=1" in m for m in _beats()))
     assert any("tickers=1" in m and "trades=1" in m for m in _beats())
+
+
+def test_ws_raw_tape_rotates_on_utc_date(tmp_path: Path) -> None:
+    tape = bot_main.WsRawTape(tmp_path)
+    tape.write('{"seq":1}', datetime(2026, 7, 6, 23, 59, 59, tzinfo=timezone.utc))
+    tape.write('{"seq":2}', datetime(2026, 7, 6, 23, 59, 59, tzinfo=timezone.utc))
+    tape.write('{"seq":3}', datetime(2026, 7, 7, 0, 0, 1, tzinfo=timezone.utc))
+    tape.close()
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "2026-07-06.jsonl.gz",
+        "2026-07-07.jsonl.gz",
+    ]
+    with gzip.open(tmp_path / "2026-07-06.jsonl.gz", "rt", encoding="utf-8") as fh:
+        first = [json.loads(line) for line in fh]
+    with gzip.open(tmp_path / "2026-07-07.jsonl.gz", "rt", encoding="utf-8") as fh:
+        second = [json.loads(line) for line in fh]
+    assert [e["raw"] for e in first] == ['{"seq":1}', '{"seq":2}']
+    assert [e["raw"] for e in second] == ['{"seq":3}']
+    assert all(e["received_at"].startswith("2026-07-06") for e in first)
+    assert all(e["received_at"].startswith("2026-07-07") for e in second)
+
+
+def test_ws_raw_tape_gzip_round_trip(tmp_path: Path) -> None:
+    received_at = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+    raws = [
+        '{"type": "trade", "note": "caf\u00e9 31\u2103"}',
+        "not json at all",
+        '{"seq": 9}',
+    ]
+    tape = bot_main.WsRawTape(tmp_path)
+    for raw in raws:
+        tape.write(raw, received_at)
+    tape.close()
+
+    with gzip.open(tmp_path / "2026-07-07.jsonl.gz", "rt", encoding="utf-8") as fh:
+        parsed = [json.loads(line) for line in fh]
+    assert [e["raw"].encode() for e in parsed] == [r.encode() for r in raws]
+    assert [e["received_at"] for e in parsed] == [received_at.isoformat()] * 3
+
+
+def test_ws_raw_tape_append_reopens_same_date(tmp_path: Path) -> None:
+    received_at = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+    first = bot_main.WsRawTape(tmp_path)
+    first.write('{"seq":1}', received_at)
+    first.write('{"seq":2}', received_at)
+    first.close()
+
+    second = bot_main.WsRawTape(tmp_path)
+    second.write('{"seq":3}', received_at)
+    second.close()
+
+    with gzip.open(tmp_path / "2026-07-07.jsonl.gz", "rt", encoding="utf-8") as fh:
+        raws = [json.loads(line)["raw"] for line in fh]
+    assert raws == ['{"seq":1}', '{"seq":2}', '{"seq":3}']
+
+
+def test_ws_raw_tape_bytes_written_counter(tmp_path: Path) -> None:
+    tape = bot_main.WsRawTape(tmp_path)
+    received_at = datetime(2026, 7, 7, 12, 0, tzinfo=timezone.utc)
+    assert tape.bytes_written == 0
+    tape.write('{"seq":1}', received_at)
+    after_first = tape.bytes_written
+    tape.write('{"seq":2}', received_at)
+    after_second = tape.bytes_written
+    tape.close()
+
+    assert after_first > 0
+    assert after_second > after_first
+    assert tape.bytes_written == after_second
+
+
+async def test_ws_recorder_shutdown_closes_tape(
+    monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    client = _ScriptedWSClient(scripts=((_ws_trade_print(),),))
+    app = _make_ws_app(client, _ws_settings(_rsa_pem))
+    app.ws_tape = bot_main.WsRawTape(tmp_path)
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    def _trade_rows() -> list[WsTrade]:
+        with app.session_factory() as session:
+            return list(session.scalars(select(WsTrade)).all())
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(bot_main._ws_recorder_loop(app, stop))
+    await _ws_wait(lambda: len(_trade_rows()) == 1)
+    app.ws_tape.write('{"type":"unknown_kind"}', _WS_RECEIVED)
+    app.ws_tape.write("garbage frame", _WS_RECEIVED)
+    stop.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert task.exception() is None
+    assert app.ws_tape._file is None
+    with gzip.open(tmp_path / "2026-05-08.jsonl.gz", "rt", encoding="utf-8") as fh:
+        raws = [json.loads(line)["raw"] for line in fh]
+    assert raws == ['{"type":"unknown_kind"}', "garbage frame"]
 
 
 async def test_run_starts_ws_recorder_loop(monkeypatch: pytest.MonkeyPatch) -> None:
