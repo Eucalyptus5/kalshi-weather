@@ -7616,6 +7616,35 @@ async def test_ws_recorder_persists_snapshot_rows(
     assert all(r.ts_ms is None for r in rows)
 
 
+async def test_ws_recorder_batches_available_events_into_one_commit(
+    monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    burst = tuple(dataclasses.replace(_ws_delta(), seq=seq) for seq in range(5, 25))
+    client = _ScriptedWSClient(scripts=(burst,))
+    app = _make_ws_app(client, _ws_settings(_rsa_pem))
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    real_factory = app.session_factory
+    sessions_opened = 0
+
+    def counting_factory() -> object:
+        nonlocal sessions_opened
+        sessions_opened += 1
+        return real_factory()
+
+    app.session_factory = counting_factory  # type: ignore[assignment]
+
+    def _row_count() -> int:
+        with real_factory() as session:
+            return len(session.scalars(select(WsBookEvent)).all())
+
+    await _run_ws_recorder_until(app, lambda: _row_count() == 20)
+
+    assert _row_count() == 20
+    assert sessions_opened <= 2
+
+
 async def test_ws_recorder_persists_signed_delta(
     monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
 ) -> None:

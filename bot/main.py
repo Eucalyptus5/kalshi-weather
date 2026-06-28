@@ -12,7 +12,7 @@ import signal
 import sys
 import time
 from collections import defaultdict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from datetime import timezone as _timezone
@@ -145,6 +145,8 @@ def aggregate_exposure_cap(app: "App | None" = None) -> Decimal:
 KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 WS_CHANNELS: tuple[str, ...] = ("orderbook_delta", "trade")
 WS_SUBSCRIPTION_POLL_SECONDS: float = 5.0
+WS_PERSIST_BATCH_MAX: int = 500
+WS_PERSIST_DRAIN_SECONDS: float = 0.01
 WS_RECORDING_DISCOVERY_SECONDS: float = 60.0
 WS_HEARTBEAT_INTERVAL_SECONDS: float = 60.0
 
@@ -1483,56 +1485,57 @@ class WsRawTape:
 _WsEvent = BookSnapshot | BookDelta | TradePrint | GapDetected
 
 
-async def _persist_ws_event(app: App, event: _WsEvent) -> None:
-    rows: list[WsBookEvent | WsTrade | WsGap]
-    if isinstance(event, BookSnapshot):
-        rows = [
-            WsBookEvent(
-                ticker=event.ticker,
-                received_at=event.received_at,
-                seq=event.seq,
-                side=side,
-                price=level.price,
-                size=level.size,
-                is_snapshot=True,
+async def _persist_ws_events(app: App, events: Sequence[_WsEvent]) -> None:
+    rows: list[WsBookEvent | WsTrade | WsGap] = []
+    for event in events:
+        if isinstance(event, BookSnapshot):
+            rows.extend(
+                WsBookEvent(
+                    ticker=event.ticker,
+                    received_at=event.received_at,
+                    seq=event.seq,
+                    side=side,
+                    price=level.price,
+                    size=level.size,
+                    is_snapshot=True,
+                )
+                for side, levels in (("yes", event.yes_levels), ("no", event.no_levels))
+                for level in levels
             )
-            for side, levels in (("yes", event.yes_levels), ("no", event.no_levels))
-            for level in levels
-        ]
-    elif isinstance(event, BookDelta):
-        rows = [
-            WsBookEvent(
-                ticker=event.ticker,
-                received_at=event.received_at,
-                seq=event.seq,
-                side=event.side,
-                price=event.price,
-                size=event.delta,
-                is_snapshot=False,
-                ts_ms=event.ts_ms,
+        elif isinstance(event, BookDelta):
+            rows.append(
+                WsBookEvent(
+                    ticker=event.ticker,
+                    received_at=event.received_at,
+                    seq=event.seq,
+                    side=event.side,
+                    price=event.price,
+                    size=event.delta,
+                    is_snapshot=False,
+                    ts_ms=event.ts_ms,
+                )
             )
-        ]
-    elif isinstance(event, TradePrint):
-        rows = [
-            WsTrade(
-                ticker=event.ticker,
-                trade_id=event.trade_id,
-                received_at=event.received_at,
-                yes_price=event.yes_price,
-                count=event.count,
-                taker_side=event.taker_side,
-                ts_ms=event.ts_ms,
+        elif isinstance(event, TradePrint):
+            rows.append(
+                WsTrade(
+                    ticker=event.ticker,
+                    trade_id=event.trade_id,
+                    received_at=event.received_at,
+                    yes_price=event.yes_price,
+                    count=event.count,
+                    taker_side=event.taker_side,
+                    ts_ms=event.ts_ms,
+                )
             )
-        ]
-    else:
-        rows = [
-            WsGap(
-                ticker=event.ticker,
-                detected_at=datetime.now(tz=_timezone.utc),
-                last_seq=event.last_seq,
-                reason=event.reason,
+        else:
+            rows.append(
+                WsGap(
+                    ticker=event.ticker,
+                    detected_at=datetime.now(tz=_timezone.utc),
+                    last_seq=event.last_seq,
+                    reason=event.reason,
+                )
             )
-        ]
     async with app.db_lock:
         with app.session_factory() as session:
             session.add_all(rows)
@@ -1619,25 +1622,33 @@ async def _ws_record_session(app: App, client: KalshiWSClient, stop: asyncio.Eve
             )
             if stop_task in done or pending is None or pending not in done:
                 continue
-            event = pending.result()
+            batch: list[_WsEvent] = [pending.result()]
             pending = asyncio.create_task(anext(event_iter))
-            await _persist_ws_event(app, event)
-            if isinstance(event, GapDetected):
-                gaps += 1
-                logger.warning(
-                    "ws_gap ticker=%s seq=%d reason=%s",
-                    event.ticker,
-                    event.last_seq,
-                    event.reason,
-                )
-                if event.reason == "seq_skip":
-                    event_iter, pending = await _ws_resubscribe(client, pending, subscribed)
-            elif isinstance(event, TradePrint):
-                trades += 1
-            elif isinstance(event, BookSnapshot):
-                book_events += len(event.yes_levels) + len(event.no_levels)
-            else:
-                book_events += 1
+            while len(batch) < WS_PERSIST_BATCH_MAX and not isinstance(batch[-1], GapDetected):
+                drained, _ = await asyncio.wait({pending}, timeout=WS_PERSIST_DRAIN_SECONDS)
+                if pending not in drained:
+                    break
+                batch.append(pending.result())
+                pending = asyncio.create_task(anext(event_iter))
+            await _persist_ws_events(app, batch)
+            for event in batch:
+                if isinstance(event, GapDetected):
+                    gaps += 1
+                    logger.warning(
+                        "ws_gap ticker=%s seq=%d reason=%s",
+                        event.ticker,
+                        event.last_seq,
+                        event.reason,
+                    )
+                elif isinstance(event, TradePrint):
+                    trades += 1
+                elif isinstance(event, BookSnapshot):
+                    book_events += len(event.yes_levels) + len(event.no_levels)
+                else:
+                    book_events += 1
+            last = batch[-1]
+            if isinstance(last, GapDetected) and last.reason == "seq_skip":
+                event_iter, pending = await _ws_resubscribe(client, pending, subscribed)
     finally:
         stop_task.cancel()
         if pending is not None:
