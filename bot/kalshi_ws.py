@@ -162,6 +162,8 @@ class KalshiWSClient:
             self._conn_ctx = None
             self._conn = None
         self._auth = None
+        self._seq_by_sid.clear()
+        self._pending_gap = None
 
     async def subscribe(self, channels: Sequence[str], tickers: Sequence[str]) -> None:
         for channel in channels:

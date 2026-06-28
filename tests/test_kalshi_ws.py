@@ -369,6 +369,40 @@ async def test_seq_gap_detection(rsa_pem: Path, monkeypatch: pytest.MonkeyPatch)
     assert e4.seq == 4
 
 
+async def test_resubscribe_after_close_does_not_flag_gap(
+    rsa_pem: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("bot.kalshi_ws.KalshiAuth", _RecordingAuth)
+    conn1 = FakeWSConn(
+        [_snapshot_frame(sid=1, seq=1), _delta_frame(sid=1, seq=2)],
+        end_exception=ConnectionClosed(None, None),
+    )
+    conn2 = FakeWSConn([_snapshot_frame(sid=1, seq=1)], end_exception=ConnectionClosed(None, None))
+    spare = FakeWSConn([], end_exception=ConnectionClosed(None, None))
+    connect_fn, _ = _make_connect_fn([conn1, conn2, spare])
+    client = KalshiWSClient(
+        _settings_with_pem(rsa_pem), _URL, connect_fn=connect_fn, backoff_seconds=(0.0,)
+    )
+    await client.aopen()
+    await client.subscribe(["orderbook_delta"], ["A"])
+
+    events = client.events()
+    assert isinstance(await asyncio.wait_for(anext(events), timeout=1.0), BookSnapshot)
+    assert isinstance(await asyncio.wait_for(anext(events), timeout=1.0), BookDelta)
+
+    await client.aclose()
+    await client.aopen()
+    await client.subscribe(["orderbook_delta"], ["A", "B"])
+
+    events = client.events()
+    first = await asyncio.wait_for(anext(events), timeout=1.0)
+    await client.aclose()
+
+    assert isinstance(first, BookSnapshot)
+    assert first.sid == 1
+    assert first.seq == 1
+
+
 async def test_terminal_error_10_triggers_resubscribe(
     rsa_pem: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
