@@ -309,6 +309,20 @@ class WsHeartbeat(Base):
     __table_args__ = (Index("ix_ws_heartbeats_beat_at", "beat_at"),)
 
 
+class WsObsArrival(Base):
+    __tablename__ = "ws_obs_arrivals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    station: Mapped[str] = mapped_column(String(16))
+    source: Mapped[str] = mapped_column(String(16))
+    obs_time: Mapped[datetime] = mapped_column(UtcDateTime())
+    tmpf: Mapped[Decimal] = mapped_column(DecimalText())
+    received_at: Mapped[datetime] = mapped_column(UtcDateTime())
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime(), default=_utc_now)
+
+    __table_args__ = (Index("ix_ws_obs_arrivals_station_obs_time", "station", "obs_time"),)
+
+
 def make_engine(db_path: Path | str) -> Engine:
     if isinstance(db_path, Path):
         url = f"sqlite:///{db_path}"

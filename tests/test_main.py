@@ -8,11 +8,13 @@ import inspect as py_inspect
 import json
 import logging
 import re as _re
+import time
 from collections.abc import AsyncIterator, Callable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import numpy as np
@@ -49,6 +51,8 @@ from bot.main import (
     run,
 )
 from bot.markets.parser import parse_ticker
+from bot.observability.loop_runner import LoopSkipped
+from bot.observations.metar import MetarClient
 from bot.storage.sqlite import (
     Base,
     Forecast,
@@ -60,6 +64,7 @@ from bot.storage.sqlite import (
     WsBookEvent,
     WsGap,
     WsHeartbeat,
+    WsObsArrival,
     WsTrade,
     make_engine,
     make_session_factory,
@@ -8151,3 +8156,302 @@ async def test_run_starts_ws_recorder_loop(monkeypatch: pytest.MonkeyPatch) -> N
 
     await run(app, timedelta(milliseconds=100))
     assert started.is_set()
+
+
+_OBS_EPOCH = 1783440000
+_OBS_TIME = datetime.fromtimestamp(_OBS_EPOCH, tz=timezone.utc)
+
+
+def _metar_entry(icao: str, obs_epoch: int, temp: float, raw_ob: str) -> dict[str, object]:
+    return {
+        "icaoId": icao,
+        "obsTime": obs_epoch,
+        "receiptTime": "2026-07-07T16:05:00Z",
+        "temp": temp,
+        "rawOb": raw_ob,
+    }
+
+
+def _kden_metar(obs_epoch: int = _OBS_EPOCH) -> dict[str, object]:
+    return _metar_entry(
+        "KDEN",
+        obs_epoch,
+        26.5,
+        "METAR KDEN 071650Z 27015KT 10SM CLR 26/01 A2992 RMK T02650011",
+    )
+
+
+def _make_obs_app(handler: Callable[[httpx.Request], httpx.Response]) -> App:
+    app = _make_app(meteo=_StubMeteo({}), kalshi=_StubKalshi([], {}))
+    http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    app.metar = MetarClient(http_client=http)
+    app.metar_http = http
+    return app
+
+
+def _obs_rows(app: App) -> list[WsObsArrival]:
+    with app.session_factory() as session:
+        return list(session.scalars(select(WsObsArrival).order_by(WsObsArrival.id)).all())
+
+
+async def test_obs_poll_inserts_first_seen_and_dedups_repolls() -> None:
+    payload: list[dict[str, object]] = [_kden_metar()]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    app = _make_obs_app(handler)
+    state = bot_main.ObsPollState(seen=bot_main._load_seen_obs(app))
+
+    before = datetime.now(tz=timezone.utc)
+    assert await bot_main._poll_obs_arrivals(app, state) == 1
+    after = datetime.now(tz=timezone.utc)
+
+    rows = _obs_rows(app)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.station == "KDEN"
+    assert row.source == "metar"
+    assert row.obs_time == _OBS_TIME
+    assert row.tmpf == Decimal("79.7")
+    assert before <= row.received_at <= after
+
+    assert await bot_main._poll_obs_arrivals(app, state) == 0
+    assert len(_obs_rows(app)) == 1
+
+    payload.append(_kden_metar(_OBS_EPOCH + 3600))
+    assert await bot_main._poll_obs_arrivals(app, state) == 1
+    rows = _obs_rows(app)
+    assert len(rows) == 2
+    assert rows[1].obs_time == _OBS_TIME + timedelta(hours=1)
+
+    await app.metar_http.aclose()
+
+
+async def test_obs_poll_restart_session_does_not_reinsert() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[_kden_metar()])
+
+    app = _make_obs_app(handler)
+    first = bot_main.ObsPollState(seen=bot_main._load_seen_obs(app))
+    assert await bot_main._poll_obs_arrivals(app, first) == 1
+
+    fresh = bot_main.ObsPollState(seen=bot_main._load_seen_obs(app))
+    assert await bot_main._poll_obs_arrivals(app, fresh) == 0
+    assert len(_obs_rows(app)) == 1
+
+    await app.metar_http.aclose()
+
+
+async def test_obs_poll_batches_all_stations_and_specis_in_one_request() -> None:
+    requests_seen: list[httpx.Request] = []
+    payload = [
+        _kden_metar(),
+        _metar_entry(
+            "KDEN",
+            _OBS_EPOCH + 300,
+            27.0,
+            "SPECI KDEN 071655Z 28020G30KT 10SM CLR 27/01 A2990 RMK T02700010",
+        ),
+        _metar_entry(
+            "KMDW",
+            _OBS_EPOCH,
+            22.0,
+            "METAR KMDW 071650Z 27015KT 10SM CLR 22/10 A2992 RMK T02200100",
+        ),
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(request)
+        return httpx.Response(200, json=payload)
+
+    app = _make_obs_app(handler)
+    state = bot_main.ObsPollState(seen=set())
+
+    assert await bot_main._poll_obs_arrivals(app, state) == 3
+
+    assert len(requests_seen) == 1
+    qs = parse_qs(urlparse(str(requests_seen[0].url)).query)
+    expected_ids = sorted(cfg.station for cfg in STATIONS.values())
+    assert len(expected_ids) == 20
+    assert qs["ids"] == [",".join(expected_ids)]
+
+    rows = _obs_rows(app)
+    assert {(r.station, r.obs_time) for r in rows} == {
+        ("KDEN", _OBS_TIME),
+        ("KDEN", _OBS_TIME + timedelta(minutes=5)),
+        ("KMDW", _OBS_TIME),
+    }
+    speci = next(r for r in rows if r.obs_time == _OBS_TIME + timedelta(minutes=5))
+    assert speci.tmpf == Decimal("80.6")
+
+    await app.metar_http.aclose()
+
+
+@pytest.mark.parametrize("status", [429, 403])
+async def test_obs_poll_backs_off_on_rate_limit_then_resumes(status: int) -> None:
+    requests_seen: list[httpx.Request] = []
+    responses = {"status": status}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(request)
+        if responses["status"] != 200:
+            return httpx.Response(responses["status"], json=[])
+        return httpx.Response(200, json=[_kden_metar()])
+
+    app = _make_obs_app(handler)
+    state = bot_main.ObsPollState(seen=set())
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await bot_main._poll_obs_arrivals(app, state)
+    assert state.backoff_seconds == bot_main.OBS_BACKOFF_START_SECONDS
+    assert state.resume_at > time.monotonic()
+    assert len(_obs_rows(app)) == 0
+
+    responses["status"] = 200
+    with pytest.raises(LoopSkipped):
+        await bot_main._poll_obs_arrivals(app, state)
+    assert len(requests_seen) == 1
+    assert len(_obs_rows(app)) == 0
+
+    state.resume_at = 0.0
+    assert await bot_main._poll_obs_arrivals(app, state) == 1
+    assert state.backoff_seconds == 0.0
+    assert len(requests_seen) == 2
+    assert len(_obs_rows(app)) == 1
+
+    await app.metar_http.aclose()
+
+
+async def test_obs_poll_backoff_doubles_up_to_cap_and_resets_after_clean_cycle() -> None:
+    responses = {"status": 429}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if responses["status"] != 200:
+            return httpx.Response(responses["status"], json=[])
+        return httpx.Response(200, json=[_kden_metar()])
+
+    app = _make_obs_app(handler)
+    state = bot_main.ObsPollState(seen=set())
+
+    for expected in (60.0, 120.0, 240.0):
+        with pytest.raises(httpx.HTTPStatusError):
+            await bot_main._poll_obs_arrivals(app, state)
+        assert state.backoff_seconds == expected
+        state.resume_at = 0.0
+
+    state.backoff_seconds = bot_main.OBS_BACKOFF_CAP_SECONDS
+    with pytest.raises(httpx.HTTPStatusError):
+        await bot_main._poll_obs_arrivals(app, state)
+    assert state.backoff_seconds == bot_main.OBS_BACKOFF_CAP_SECONDS
+    state.resume_at = 0.0
+
+    responses["status"] = 200
+    assert await bot_main._poll_obs_arrivals(app, state) == 1
+    assert state.backoff_seconds == 0.0
+
+    responses["status"] = 429
+    with pytest.raises(httpx.HTTPStatusError):
+        await bot_main._poll_obs_arrivals(app, state)
+    assert state.backoff_seconds == bot_main.OBS_BACKOFF_START_SECONDS
+
+    await app.metar_http.aclose()
+
+
+async def test_obs_poll_500_does_not_arm_backoff() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    app = _make_obs_app(handler)
+    state = bot_main.ObsPollState(seen=set())
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await bot_main._poll_obs_arrivals(app, state)
+    assert state.backoff_seconds == 0.0
+    assert state.resume_at == 0.0
+    assert len(_obs_rows(app)) == 0
+
+    await app.metar_http.aclose()
+
+
+async def test_obs_arrival_loop_survives_transport_errors(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import bot.observability.loop_runner as loop_runner
+
+    monkeypatch.setattr(bot_main, "OBS_POLL_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(loop_runner, "_FAILURE_RECOVERY_SLEEP_SECONDS", 0.01)
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("connection refused")
+        if calls["n"] == 2:
+            return httpx.Response(500)
+        return httpx.Response(200, json=[_kden_metar()])
+
+    app = _make_obs_app(handler)
+    caplog.set_level(logging.ERROR, logger="bot.observability.loop_runner")
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(bot_main._obs_arrival_loop(app, stop))
+    try:
+        await _ws_wait(lambda: len(_obs_rows(app)) == 1)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    assert task.exception() is None
+    assert calls["n"] >= 3
+    assert len(_obs_rows(app)) == 1
+    failures = [
+        r
+        for r in caplog.records
+        if "loop_iteration_failed" in r.getMessage() and "obs_arrival_loop" in r.getMessage()
+    ]
+    assert failures
+
+    await app.metar_http.aclose()
+
+
+async def test_obs_arrival_loop_disabled_without_metar_client() -> None:
+    app = _make_app(meteo=_StubMeteo({}), kalshi=_StubKalshi([], {}))
+    await asyncio.wait_for(bot_main._obs_arrival_loop(app, asyncio.Event()), timeout=1.0)
+
+
+async def test_run_starts_obs_arrival_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _make_app(meteo=_StubMeteo({}), kalshi=_StubKalshi([], {}))
+    started = asyncio.Event()
+
+    async def obs_spy(app_arg: App, stop: asyncio.Event) -> None:
+        started.set()
+        await stop.wait()
+
+    async def fast_loop(app_arg: App, stop: asyncio.Event) -> None:
+        await stop.wait()
+
+    for name in (
+        "_forecast_loop",
+        "_market_loop",
+        "_eval_loop",
+        "_settlement_loop",
+        "_order_reconcile_loop",
+        "_calibration_refit_loop",
+        "_ws_recorder_loop",
+    ):
+        monkeypatch.setattr(bot_main, name, fast_loop)
+    monkeypatch.setattr(bot_main, "_obs_arrival_loop", obs_spy)
+
+    await run(app, timedelta(milliseconds=100))
+    assert started.is_set()
+
+
+async def test_app_aclose_closes_metar_http() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[])
+
+    app = _make_obs_app(handler)
+    await app.aclose()
+    assert app.metar_http.is_closed

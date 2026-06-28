@@ -65,6 +65,7 @@ from bot.kalshi_ws import BookDelta, BookSnapshot, GapDetected, KalshiWSClient, 
 from bot.markets.observation_window import observation_window
 from bot.markets.parser import ParsedTicker, parse_ticker
 from bot.observability.loop_runner import LoopSkipped, _sleep_or_stop, run_loop
+from bot.observations.metar import MetarClient
 from bot.risk.gates import CAP_GATE_NAMES, GateContext, GateMode, evaluate as evaluate_gates
 from bot.storage.positions import open_exposures
 from bot.storage.sqlite import (
@@ -80,6 +81,7 @@ from bot.storage.sqlite import (
     WsBookEvent,
     WsGap,
     WsHeartbeat,
+    WsObsArrival,
     WsTrade,
     make_engine,
     make_session_factory,
@@ -145,6 +147,11 @@ WS_CHANNELS: tuple[str, ...] = ("orderbook_delta", "trade")
 WS_SUBSCRIPTION_POLL_SECONDS: float = 5.0
 WS_RECORDING_DISCOVERY_SECONDS: float = 60.0
 WS_HEARTBEAT_INTERVAL_SECONDS: float = 60.0
+
+OBS_POLL_INTERVAL_SECONDS: float = 15.0
+OBS_BACKOFF_START_SECONDS: float = 60.0
+OBS_BACKOFF_CAP_SECONDS: float = 960.0
+OBS_USER_AGENT = "kalshi-weather obs recorder (victorfuan197@gmail.com)"
 
 MARKET_REFRESH_INTERVAL = 60.0
 EVAL_INTERVAL = 60.0
@@ -380,6 +387,8 @@ class App:
     series_list: tuple[str, ...]
     kalshi_ws: KalshiWSClient | None = None
     ws_tape: WsRawTape | None = None
+    metar: MetarClient | None = None
+    metar_http: httpx.AsyncClient | None = None
     bankroll: Decimal | None = None
     db_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     reconcile_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -404,6 +413,8 @@ class App:
         await self.kalshi_read.aclose()
         if self.kalshi_ws is not None:
             await self.kalshi_ws.aclose()
+        if self.metar_http is not None:
+            await self.metar_http.aclose()
         await self.acis.aclose()
         _checkpoint_wal(self.engine)
         self.engine.dispose()
@@ -1660,6 +1671,81 @@ async def _ws_recorder_loop(app: App, stop: asyncio.Event) -> None:
     )
 
 
+@dataclass
+class ObsPollState:
+    seen: set[tuple[str, datetime]]
+    backoff_seconds: float = 0.0
+    resume_at: float = 0.0
+
+
+def _load_seen_obs(app: App) -> set[tuple[str, datetime]]:
+    with app.session_factory() as session:
+        rows = session.execute(select(WsObsArrival.station, WsObsArrival.obs_time)).all()
+    return {(station, obs_time) for station, obs_time in rows}
+
+
+async def _poll_obs_arrivals(app: App, state: ObsPollState) -> int:
+    if time.monotonic() < state.resume_at:
+        raise LoopSkipped
+    stations = sorted(cfg.station for cfg in STATIONS.values())
+    try:
+        observations = await app.metar.fetch_observations(stations)
+    except httpx.HTTPStatusError as err:
+        if err.response.status_code in (403, 429):
+            state.backoff_seconds = (
+                OBS_BACKOFF_START_SECONDS
+                if state.backoff_seconds == 0.0
+                else min(state.backoff_seconds * 2, OBS_BACKOFF_CAP_SECONDS)
+            )
+            state.resume_at = time.monotonic() + state.backoff_seconds
+        raise
+    received_at = datetime.now(tz=_timezone.utc)
+    batch: set[tuple[str, datetime]] = set()
+    rows: list[WsObsArrival] = []
+    for obs in observations:
+        key = (obs.station, obs.valid_time)
+        if key in state.seen or key in batch:
+            continue
+        batch.add(key)
+        rows.append(
+            WsObsArrival(
+                station=obs.station,
+                source=obs.source,
+                obs_time=obs.valid_time,
+                tmpf=obs.temp_f,
+                received_at=received_at,
+            )
+        )
+    if rows:
+        async with app.db_lock:
+            with app.session_factory() as session:
+                session.add_all(rows)
+                session.commit()
+    state.seen |= batch
+    state.backoff_seconds = 0.0
+    state.resume_at = 0.0
+    return len(rows)
+
+
+async def _obs_arrival_loop(app: App, stop: asyncio.Event) -> None:
+    if app.metar is None:
+        logger.info("obs_arrival_disabled reason=metar_unconfigured")
+        return
+    state = ObsPollState(seen=_load_seen_obs(app))
+
+    async def body() -> None:
+        inserted = await _poll_obs_arrivals(app, state)
+        if inserted:
+            logger.info("obs_arrivals inserted=%d", inserted)
+
+    await run_loop(
+        name="obs_arrival_loop",
+        body=body,
+        interval_seconds=OBS_POLL_INTERVAL_SECONDS,
+        stop=stop,
+    )
+
+
 async def run(app: App, duration: timedelta) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -1688,6 +1774,7 @@ async def run(app: App, duration: timedelta) -> None:
         asyncio.create_task(_order_reconcile_loop(app, stop), name="order_reconcile_loop"),
         asyncio.create_task(_calibration_refit_loop(app, stop), name="calibration_loop"),
         asyncio.create_task(_ws_recorder_loop(app, stop), name="ws_recorder_loop"),
+        asyncio.create_task(_obs_arrival_loop(app, stop), name="obs_arrival_loop"),
     ]
     if app.settings.mode == "demo":
         tasks.append(
@@ -1843,6 +1930,8 @@ def main() -> None:
     ws_tape = WsRawTape(Path("data/ws_raw"))
     kalshi_ws = KalshiWSClient(settings, KALSHI_WS_URL, frame_sink=ws_tape.write)
     acis = ACISClient()
+    metar_http = httpx.AsyncClient(timeout=30.0, headers={"User-Agent": OBS_USER_AGENT})
+    metar = MetarClient(http_client=metar_http)
 
     app = App(
         settings=settings,
@@ -1855,6 +1944,8 @@ def main() -> None:
         series_list=series_list,
         kalshi_ws=kalshi_ws,
         ws_tape=ws_tape,
+        metar=metar,
+        metar_http=metar_http,
     )
 
     async def _go() -> None:

@@ -29,6 +29,7 @@ from bot.storage.sqlite import (
     WsBookEvent,
     WsGap,
     WsHeartbeat,
+    WsObsArrival,
     WsTrade,
     ensure_baseline_stamped,
     make_engine,
@@ -65,6 +66,7 @@ def test_schema_creates_expected_tables(engine):
         "ws_trades",
         "ws_gaps",
         "ws_heartbeats",
+        "ws_obs_arrivals",
     } <= names
 
 
@@ -426,6 +428,31 @@ def test_ws_heartbeat_round_trip(session):
     assert got.created_at is not None
 
 
+def test_ws_obs_arrival_round_trip_preserves_scale(session):
+    obs_at = datetime(2026, 7, 7, 15, 53, tzinfo=_timezone.utc)
+    seen_at = datetime(2026, 7, 7, 15, 54, 12, 250000, tzinfo=_timezone.utc)
+    row = WsObsArrival(
+        station="KDEN",
+        source="metar",
+        obs_time=obs_at,
+        tmpf=Decimal("75.92"),
+        received_at=seen_at,
+    )
+    session.add(row)
+    session.commit()
+
+    got = session.scalars(select(WsObsArrival)).one()
+    assert got.station == "KDEN"
+    assert got.source == "metar"
+    assert got.obs_time == obs_at
+    assert got.obs_time.tzinfo is not None
+    assert isinstance(got.tmpf, Decimal)
+    assert str(got.tmpf) == "75.92"
+    assert got.received_at == seen_at
+    assert got.received_at.tzinfo is not None
+    assert got.created_at is not None
+
+
 def test_ws_gap_round_trip_detected_at_utc(session):
     when = datetime(2026, 7, 6, 19, 30, 15, 250000, tzinfo=_timezone.utc)
     row = WsGap(
@@ -457,6 +484,7 @@ def test_named_indexes_exist(engine):
         "ws_trades": {"ix_ws_trades_ticker_received_at"},
         "ws_gaps": {"ix_ws_gaps_ticker_detected_at"},
         "ws_heartbeats": {"ix_ws_heartbeats_beat_at"},
+        "ws_obs_arrivals": {"ix_ws_obs_arrivals_station_obs_time"},
     }
     for table, names in expected.items():
         present = {idx["name"] for idx in insp.get_indexes(table)}
@@ -530,6 +558,7 @@ def test_alembic_upgrade_head_creates_all_tables(tmp_path):
         "ws_trades",
         "ws_gaps",
         "ws_heartbeats",
+        "ws_obs_arrivals",
         "alembic_version",
     } <= names
 
@@ -1047,16 +1076,19 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     (versions / "0011_ws_heartbeats.py").write_text(
         (REPO_ROOT / "alembic" / "versions" / "0011_ws_heartbeats.py").read_text()
     )
-    (versions / "0012_decoy.py").write_text(
-        '"""decoy 0012 for forward-compat test\n\n'
-        "Revision ID: 0012\n"
-        "Revises: 0011\n"
+    (versions / "0012_ws_obs_arrivals.py").write_text(
+        (REPO_ROOT / "alembic" / "versions" / "0012_ws_obs_arrivals.py").read_text()
+    )
+    (versions / "0013_decoy.py").write_text(
+        '"""decoy 0013 for forward-compat test\n\n'
+        "Revision ID: 0013\n"
+        "Revises: 0012\n"
         "Create Date: 2026-07-08 14:00:00.000000\n\n"
         '"""\n\n'
         "from typing import Sequence, Union\n\n"
         "from alembic import op  # noqa: F401\n\n\n"
-        'revision: str = "0012"\n'
-        'down_revision: Union[str, Sequence[str], None] = "0011"\n'
+        'revision: str = "0013"\n'
+        'down_revision: Union[str, Sequence[str], None] = "0012"\n'
         "branch_labels: Union[str, Sequence[str], None] = None\n"
         "depends_on: Union[str, Sequence[str], None] = None\n\n\n"
         "def upgrade() -> None:\n"
@@ -1075,8 +1107,8 @@ def test_detect_baseline_returns_newest_sentinel_shape_even_when_head_is_unrecog
     engine = make_engine(db_file)
     Base.metadata.create_all(engine)
     script_dir = ScriptDirectory.from_config(cfg)
-    assert script_dir.get_current_head() == "0012"
-    assert _detect_baseline(engine, script_dir) == "0011"
+    assert script_dir.get_current_head() == "0013"
+    assert _detect_baseline(engine, script_dir) == "0012"
     engine.dispose()
 
 

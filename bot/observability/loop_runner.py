@@ -30,6 +30,7 @@ _LOOP_PAIRS = [
     ("_calibration_refit_loop", "calibration_loop"),
     ("_forecast_loop", "forecast_loop"),
     ("_ws_recorder_loop", "ws_recorder_loop"),
+    ("_obs_arrival_loop", "obs_arrival_loop"),
 ]
 
 
