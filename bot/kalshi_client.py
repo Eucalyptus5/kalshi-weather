@@ -18,7 +18,6 @@ from pydantic import BaseModel, ConfigDict
 
 from bot.config import Settings
 from bot.execution.token_bucket import TokenBucket
-from bot.markets.parser import series_id
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +288,7 @@ def _markets_from_payload(payload: dict[str, object], series_ticker: str) -> lis
             skipped_null += 1
             continue
         ticker = m["ticker"]
-        series = series_id(ticker)
+        series = ticker.split("-")[0]
         if series != series_ticker:
             logger.warning(
                 "kalshi_list_markets_series_mismatch ticker=%s expected=%s",

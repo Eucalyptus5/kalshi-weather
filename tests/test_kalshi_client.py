@@ -1083,6 +1083,29 @@ async def test_read_client_list_open_markets_parses_and_signs(rsa_pem: Path) -> 
     assert markets[0].yes_ask == Decimal("0.4500")
 
 
+async def test_read_client_list_open_markets_keeps_ticker_opaque(rsa_pem: Path) -> None:
+    payload = {
+        "markets": [
+            _market_dict("KXRAINCHIM-26JUL-1", "0.4500", "0.4300"),
+            _market_dict("KXRAINCHIM-26JUL-2", "0.3000", "0.2800"),
+        ],
+        "cursor": "",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url=_PROD_BASE) as http:
+        client = KalshiReadClient(_prod_settings_with_pem(rsa_pem), http_client=http)
+        await client.aopen()
+        markets = await client.list_open_markets_for_series("KXRAINCHIM")
+
+    assert [m.ticker for m in markets] == ["KXRAINCHIM-26JUL-1", "KXRAINCHIM-26JUL-2"]
+    assert all(m.series == "KXRAINCHIM" for m in markets)
+    assert all(m.event_ticker == "KXRAINCHIM-26JUL" for m in markets)
+
+
 async def test_read_client_get_orderbook_reconstructs_populated_ask_side(rsa_pem: Path) -> None:
     payload = {
         "orderbook_fp": {

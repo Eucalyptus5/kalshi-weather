@@ -7455,7 +7455,22 @@ def _ws_settings(pem: Path) -> _DemoSettings:
     )
 
 
-def _make_ws_app(client: _ScriptedWSClient, settings: _DemoSettings) -> App:
+class _FlakyReadClient:
+    def __init__(self, markets: list[KalshiMarket]) -> None:
+        self.markets = markets
+        self.fail_series: set[str] = set()
+
+    async def list_open_markets_for_series(self, series_prefix: str) -> list[KalshiMarket]:
+        if series_prefix in self.fail_series:
+            raise RuntimeError(f"listing down: {series_prefix}")
+        return [m for m in self.markets if m.ticker.startswith(f"{series_prefix}-")]
+
+
+def _make_ws_app(
+    client: _ScriptedWSClient,
+    settings: _DemoSettings,
+    read: _StubKalshi | _FlakyReadClient | None = None,
+) -> App:
     engine = make_engine(":memory:")
     Base.metadata.create_all(engine)
     sf = make_session_factory(engine)
@@ -7465,7 +7480,7 @@ def _make_ws_app(client: _ScriptedWSClient, settings: _DemoSettings) -> App:
         session_factory=sf,
         meteo=_StubMeteo({}),  # type: ignore[arg-type]
         kalshi=_StubKalshi([], {}),  # type: ignore[arg-type]
-        kalshi_read=_StubKalshi([], {}),  # type: ignore[arg-type]
+        kalshi_read=read if read is not None else _StubKalshi([], {}),  # type: ignore[arg-type]
         acis=_StubACIS(None),  # type: ignore[arg-type]
         series_list=("KXHIGHDEN",),
         kalshi_ws=client,  # type: ignore[arg-type]
@@ -7904,6 +7919,179 @@ async def test_ws_recorder_shutdown_closes_tape(
     with gzip.open(tmp_path / "2026-05-08.jsonl.gz", "rt", encoding="utf-8") as fh:
         raws = [json.loads(line)["raw"] for line in fh]
     assert raws == ['{"type":"unknown_kind"}', "garbage frame"]
+
+
+_WS_RAIN_TICKER = "KXRAINCHIM-26JUL-1"
+_WS_LOW_TICKER = "KXLOWTDEN-26MAY08-B42.5"
+
+
+def test_recording_series_covers_lows_and_rain() -> None:
+    assert len(bot_main.RECORDING_SERIES) == 32
+    assert len(set(bot_main.RECORDING_SERIES)) == 32
+    assert sum(1 for s in bot_main.RECORDING_SERIES if s.startswith("KXLOWT")) == 20
+    assert sum(1 for s in bot_main.RECORDING_SERIES if s.startswith("KXRAIN")) == 12
+    assert not set(bot_main.RECORDING_SERIES) & set(STATIONS)
+
+
+async def test_ws_recorder_subscribes_union_of_traded_and_recording(
+    monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    client = _ScriptedWSClient()
+    read = _StubKalshi([_ws_market(_WS_LOW_TICKER), _ws_market(_WS_RAIN_TICKER)], {})
+    app = _make_ws_app(client, _ws_settings(_rsa_pem), read=read)
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    await _run_ws_recorder_until(app, lambda: len(client.subscriptions) == 1)
+
+    assert client.subscriptions[0] == (
+        _WS_CHANNELS,
+        sorted([_WS_TICKER, _WS_LOW_TICKER, _WS_RAIN_TICKER]),
+    )
+    assert app.recording_tickers == {_WS_LOW_TICKER, _WS_RAIN_TICKER}
+
+
+async def test_recording_only_tickers_stay_out_of_trading_paths(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    now = datetime(2026, 5, 6, 12, 0, tzinfo=timezone.utc)
+    close_at = datetime(2026, 5, 8, 23, 0, tzinfo=timezone.utc)
+    high = _market_from(_WS_TICKER, "0.45", "0.43", close_at)
+    book = _book_from(_WS_TICKER, "0.45", "0.43", now=now)
+    read = _StubKalshi([high, _ws_market(_WS_RAIN_TICKER)], {_WS_TICKER: book})
+    client = _ScriptedWSClient()
+    app = _make_ws_app(client, _ws_settings(_rsa_pem), read=read)
+
+    caplog.set_level(logging.WARNING, logger="bot.main")
+    await refresh_markets(app)
+    await _run_ws_recorder_until(app, lambda: len(client.subscriptions) == 1)
+
+    assert _WS_RAIN_TICKER in client.subscriptions[0][1]
+    assert set(app.latest_markets) == {_WS_TICKER}
+    assert set(app.latest_orderbooks) == {_WS_TICKER}
+
+    await evaluate_strategies(app, now)
+
+    with app.session_factory() as session:
+        market_tickers = [m.ticker for m in session.scalars(select(Market)).all()]
+        gate_tickers = [g.market_ticker for g in session.scalars(select(GateFailure)).all()]
+        paper_tickers = [p.market_ticker for p in session.scalars(select(PaperTradeRow)).all()]
+    assert market_tickers == [_WS_TICKER]
+    assert _WS_RAIN_TICKER not in gate_tickers
+    assert _WS_RAIN_TICKER not in paper_tickers
+    assert not any(_WS_RAIN_TICKER in r.getMessage() for r in caplog.records)
+
+
+async def test_recording_discovery_failure_keeps_prior_set(
+    caplog: pytest.LogCaptureFixture, _rsa_pem: Path
+) -> None:
+    read = _FlakyReadClient([_ws_market(_WS_RAIN_TICKER), _ws_market(_WS_LOW_TICKER)])
+    app = _make_ws_app(_ScriptedWSClient(), _ws_settings(_rsa_pem), read=read)
+
+    await bot_main._refresh_recording_tickers(app)
+    assert app.recording_tickers == {_WS_RAIN_TICKER, _WS_LOW_TICKER}
+
+    caplog.set_level(logging.WARNING, logger="bot.main")
+    read.fail_series = set(bot_main.RECORDING_SERIES)
+    await bot_main._refresh_recording_tickers(app)
+
+    assert app.recording_tickers == {_WS_RAIN_TICKER, _WS_LOW_TICKER}
+    failures = [r for r in caplog.records if "recording_discovery_failed" in r.getMessage()]
+    assert failures
+
+
+async def test_recording_discovery_partial_failure_updates_healthy_series(
+    _rsa_pem: Path,
+) -> None:
+    low_next = "KXLOWTDEN-26MAY09-B42.5"
+    read = _FlakyReadClient([_ws_market(_WS_RAIN_TICKER), _ws_market(_WS_LOW_TICKER)])
+    app = _make_ws_app(_ScriptedWSClient(), _ws_settings(_rsa_pem), read=read)
+
+    await bot_main._refresh_recording_tickers(app)
+    assert app.recording_tickers == {_WS_RAIN_TICKER, _WS_LOW_TICKER}
+
+    read.fail_series = {"KXRAINCHIM"}
+    read.markets = [_ws_market(low_next)]
+    await bot_main._refresh_recording_tickers(app)
+
+    assert app.recording_tickers == {_WS_RAIN_TICKER, low_next}
+
+
+async def test_recording_settled_markets_drop_from_desired_set(
+    monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    markets = [_ws_market(_WS_RAIN_TICKER), _ws_market(_WS_LOW_TICKER)]
+    read = _StubKalshi(markets, {})
+    client = _ScriptedWSClient()
+    app = _make_ws_app(client, _ws_settings(_rsa_pem), read=read)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(bot_main._ws_recorder_loop(app, stop))
+    try:
+        await _ws_wait(lambda: len(client.subscriptions) == 1)
+        assert client.subscriptions[0] == (
+            _WS_CHANNELS,
+            sorted([_WS_LOW_TICKER, _WS_RAIN_TICKER]),
+        )
+
+        markets[:] = [_ws_market(_WS_LOW_TICKER)]
+        await _ws_wait(lambda: len(client.subscriptions) == 2)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    assert client.subscriptions[1] == (_WS_CHANNELS, [_WS_LOW_TICKER])
+    assert app.recording_tickers == {_WS_LOW_TICKER}
+
+
+async def test_ws_recorder_persists_recording_only_events(
+    monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    delta = BookDelta(
+        ticker=_WS_RAIN_TICKER,
+        sid=1,
+        seq=3,
+        side="yes",
+        price=Decimal("0.12"),
+        delta=Decimal("25.00"),
+        ts_ms=1669149841000,
+        received_at=_WS_RECEIVED,
+    )
+    trade = TradePrint(
+        ticker=_WS_RAIN_TICKER,
+        sid=1,
+        trade_id="8f5b9f2e-1234-4abc-9def-000000000002",
+        yes_price=Decimal("0.14"),
+        no_price=Decimal("0.86"),
+        count=Decimal("7.00"),
+        taker_side="yes",
+        ts_ms=1669149841000,
+        received_at=_WS_RECEIVED,
+    )
+    client = _ScriptedWSClient(scripts=((delta, trade),))
+    read = _StubKalshi([_ws_market(_WS_RAIN_TICKER)], {})
+    app = _make_ws_app(client, _ws_settings(_rsa_pem), read=read)
+
+    def _trade_rows() -> list[WsTrade]:
+        with app.session_factory() as session:
+            return list(session.scalars(select(WsTrade)).all())
+
+    await _run_ws_recorder_until(app, lambda: len(_trade_rows()) == 1)
+
+    with app.session_factory() as session:
+        book_rows = session.scalars(select(WsBookEvent)).all()
+    assert [(r.ticker, r.side, r.price, r.size, r.seq, r.ts_ms) for r in book_rows] == [
+        (_WS_RAIN_TICKER, "yes", Decimal("0.12"), Decimal("25.00"), 3, 1669149841000)
+    ]
+    row = _trade_rows()[0]
+    assert row.ticker == _WS_RAIN_TICKER
+    assert row.yes_price == Decimal("0.14")
+    assert row.count == Decimal("7.00")
+    assert row.taker_side == "yes"
+    assert row.trade_id == "8f5b9f2e-1234-4abc-9def-000000000002"
 
 
 async def test_run_starts_ws_recorder_loop(monkeypatch: pytest.MonkeyPatch) -> None:

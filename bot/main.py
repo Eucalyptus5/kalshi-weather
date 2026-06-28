@@ -316,6 +316,43 @@ assert len(STATIONS) == 20
 
 STRATEGY_BLACKLIST: frozenset[str] = frozenset({"KXHIGHLAX", "KXHIGHMIA"})
 
+RECORDING_SERIES: tuple[str, ...] = (
+    "KXLOWTDEN",
+    "KXLOWTAUS",
+    "KXLOWTCHI",
+    "KXLOWTNYC",
+    "KXLOWTPHIL",
+    "KXLOWTATL",
+    "KXLOWTBOS",
+    "KXLOWTDAL",
+    "KXLOWTDC",
+    "KXLOWTHOU",
+    "KXLOWTLV",
+    "KXLOWTMIN",
+    "KXLOWTNOLA",
+    "KXLOWTOKC",
+    "KXLOWTPHX",
+    "KXLOWTSATX",
+    "KXLOWTSEA",
+    "KXLOWTSFO",
+    "KXLOWTLAX",
+    "KXLOWTMIA",
+    "KXRAINNYCM",
+    "KXRAINCHIM",
+    "KXRAINSEAM",
+    "KXRAINMIAM",
+    "KXRAINDENM",
+    "KXRAINLAXM",
+    "KXRAINAUSM",
+    "KXRAINDALM",
+    "KXRAINHOUM",
+    "KXRAINSFOM",
+    "KXRAINSTPM",
+    "KXRAINNYC",
+)
+
+assert len(RECORDING_SERIES) == 32
+
 
 def _empty_calibration_maps() -> CalibrationMaps:
     return CalibrationMaps(
@@ -350,6 +387,7 @@ class App:
     forecast_run_times: dict[tuple[str, date], datetime] = field(default_factory=dict)
     latest_markets: dict[str, KalshiMarket] = field(default_factory=dict)
     latest_orderbooks: dict[str, KalshiOrderbook] = field(default_factory=dict)
+    recording_tickers: set[str] = field(default_factory=set)
     calibration_maps: CalibrationMaps = field(default_factory=_empty_calibration_maps)
 
     def __post_init__(self) -> None:
@@ -1489,6 +1527,19 @@ async def _persist_ws_event(app: App, event: _WsEvent) -> None:
             session.commit()
 
 
+async def _refresh_recording_tickers(app: App) -> None:
+    discovered: set[str] = set()
+    for series in RECORDING_SERIES:
+        try:
+            markets = await app.kalshi_read.list_open_markets_for_series(series)
+        except Exception as err:
+            logger.warning("recording_discovery_failed series=%s err=%s", series, err)
+            discovered.update(t for t in app.recording_tickers if t.startswith(f"{series}-"))
+            continue
+        discovered.update(m.ticker for m in markets)
+    app.recording_tickers = discovered
+
+
 async def _ws_resubscribe(
     client: KalshiWSClient,
     pending: asyncio.Task[_WsEvent] | None,
@@ -1519,7 +1570,8 @@ async def _ws_record_session(app: App, client: KalshiWSClient, stop: asyncio.Eve
             now = time.monotonic()
             if now >= refresh_at:
                 refresh_at = now + WS_SUBSCRIPTION_POLL_SECONDS
-                desired = frozenset(app.latest_markets)
+                await _refresh_recording_tickers(app)
+                desired = frozenset(app.latest_markets) | frozenset(app.recording_tickers)
                 if desired != subscribed:
                     event_iter, pending = await _ws_resubscribe(client, pending, desired)
                     subscribed = desired
