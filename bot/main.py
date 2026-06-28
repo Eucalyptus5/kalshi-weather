@@ -143,6 +143,7 @@ def aggregate_exposure_cap(app: "App | None" = None) -> Decimal:
 KALSHI_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
 WS_CHANNELS: tuple[str, ...] = ("orderbook_delta", "trade")
 WS_SUBSCRIPTION_POLL_SECONDS: float = 5.0
+WS_RECORDING_DISCOVERY_SECONDS: float = 60.0
 WS_HEARTBEAT_INTERVAL_SECONDS: float = 60.0
 
 MARKET_REFRESH_INTERVAL = 60.0
@@ -1564,13 +1565,16 @@ async def _ws_record_session(app: App, client: KalshiWSClient, stop: asyncio.Eve
     stop_task = asyncio.create_task(stop.wait())
     book_events = trades = gaps = 0
     refresh_at = time.monotonic()
+    discover_at = time.monotonic()
     heartbeat_at = time.monotonic() + WS_HEARTBEAT_INTERVAL_SECONDS
     try:
         while not stop.is_set():
             now = time.monotonic()
             if now >= refresh_at:
                 refresh_at = now + WS_SUBSCRIPTION_POLL_SECONDS
-                await _refresh_recording_tickers(app)
+                if now >= discover_at:
+                    discover_at = now + WS_RECORDING_DISCOVERY_SECONDS
+                    await _refresh_recording_tickers(app)
                 desired = frozenset(app.latest_markets) | frozenset(app.recording_tickers)
                 if desired != subscribed:
                     event_iter, pending = await _ws_resubscribe(client, pending, desired)

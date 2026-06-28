@@ -7459,8 +7459,10 @@ class _FlakyReadClient:
     def __init__(self, markets: list[KalshiMarket]) -> None:
         self.markets = markets
         self.fail_series: set[str] = set()
+        self.calls: list[str] = []
 
     async def list_open_markets_for_series(self, series_prefix: str) -> list[KalshiMarket]:
+        self.calls.append(series_prefix)
         if series_prefix in self.fail_series:
             raise RuntimeError(f"listing down: {series_prefix}")
         return [m for m in self.markets if m.ticker.startswith(f"{series_prefix}-")]
@@ -8022,6 +8024,7 @@ async def test_recording_settled_markets_drop_from_desired_set(
     monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
 ) -> None:
     monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(bot_main, "WS_RECORDING_DISCOVERY_SECONDS", 0.01)
     markets = [_ws_market(_WS_RAIN_TICKER), _ws_market(_WS_LOW_TICKER)]
     read = _StubKalshi(markets, {})
     client = _ScriptedWSClient()
@@ -8044,6 +8047,36 @@ async def test_recording_settled_markets_drop_from_desired_set(
 
     assert client.subscriptions[1] == (_WS_CHANNELS, [_WS_LOW_TICKER])
     assert app.recording_tickers == {_WS_LOW_TICKER}
+
+
+async def test_recording_discovery_throttled_within_window(
+    monkeypatch: pytest.MonkeyPatch, _rsa_pem: Path
+) -> None:
+    monkeypatch.setattr(bot_main, "WS_SUBSCRIPTION_POLL_SECONDS", 0.01)
+    read = _FlakyReadClient([_ws_market(_WS_RAIN_TICKER)])
+    client = _ScriptedWSClient()
+    app = _make_ws_app(client, _ws_settings(_rsa_pem), read=read)
+    app.latest_markets[_WS_TICKER] = _ws_market(_WS_TICKER)
+
+    stop = asyncio.Event()
+    task = asyncio.create_task(bot_main._ws_recorder_loop(app, stop))
+    try:
+        await _ws_wait(lambda: len(client.subscriptions) == 1)
+        assert client.subscriptions[0] == (
+            _WS_CHANNELS,
+            sorted([_WS_TICKER, _WS_RAIN_TICKER]),
+        )
+        calls_after_first = len(read.calls)
+
+        del app.latest_markets[_WS_TICKER]
+        await _ws_wait(lambda: len(client.subscriptions) == 2)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    assert calls_after_first == len(bot_main.RECORDING_SERIES)
+    assert len(read.calls) == calls_after_first
+    assert client.subscriptions[1] == (_WS_CHANNELS, [_WS_RAIN_TICKER])
 
 
 async def test_ws_recorder_persists_recording_only_events(
