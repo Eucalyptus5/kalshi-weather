@@ -20,6 +20,7 @@ from scripts.ws_watchdog import (
     in_restart_window,
     main,
     read_db,
+    should_send_daily_ping,
 )
 
 
@@ -195,6 +196,26 @@ def test_evaluate_golden(
 
 
 @pytest.mark.parametrize(
+    ("hour", "last_ping", "has_alarms", "expected"),
+    [
+        (11, None, False, False),
+        (12, None, False, True),
+        (12, "2026-07-19", False, False),
+        (12, "2026-07-18", False, True),
+        (23, "2026-07-18", False, True),
+        (12, None, True, False),
+        (12, "2026-07-18", True, False),
+        (0, "2026-07-18", False, False),
+    ],
+)
+def test_should_send_daily_ping(
+    hour: int, last_ping: str | None, has_alarms: bool, expected: bool
+) -> None:
+    now = datetime(2026, 7, 19, hour, 30, 0, tzinfo=timezone.utc)
+    assert should_send_daily_ping(now, last_ping, has_alarms) is expected
+
+
+@pytest.mark.parametrize(
     ("hour", "minute", "expected"),
     [(7, 54, False), (7, 55, True), (8, 39, True), (8, 40, False)],
 )
@@ -259,6 +280,9 @@ def test_run_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_path: Path) 
     monkeypatch.setenv("KW_WATCHDOG_NTFY_TOPIC", TOPIC)
     beat = (FIXED_NOW - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S.%f")
     insert_heartbeat(db_path, beat)
+    (tmp_path / "wd_state.json").write_text(
+        json.dumps({"gap_count": 0, "last_ok_ping": "2026-07-19"})
+    )
 
     rc = main(watchdog_argv(tmp_path, db_path))
 
@@ -272,11 +296,95 @@ def test_run_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_path: Path) 
     assert "service=active" in line
     assert "heartbeat_age_s=60 " in line
     assert "gap_count=0" in line
-    assert "gap_delta=none" in line
+    assert "gap_delta=0" in line
     assert "disk_free_fraction=0.500" in line
     assert "ntfy=none" in line
     assert TOPIC not in line
-    assert json.loads((tmp_path / "wd_state.json").read_text()) == {"gap_count": 0}
+    assert json.loads((tmp_path / "wd_state.json").read_text()) == {
+        "gap_count": 0,
+        "last_ok_ping": "2026-07-19",
+    }
+
+
+def test_run_sends_daily_ok_ping(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_path: Path
+) -> None:
+    requests = mock_boundaries(monkeypatch)
+    monkeypatch.setenv("KW_WATCHDOG_NTFY_TOPIC", TOPIC)
+    beat = (FIXED_NOW - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S.%f")
+    insert_heartbeat(db_path, beat)
+    insert_gaps(db_path, 4)
+
+    rc = main(watchdog_argv(tmp_path, db_path))
+
+    assert rc == 0
+    assert len(requests) == 1
+    assert requests[0].full_url == f"https://ntfy.sh/{TOPIC}"
+    assert requests[0].data == b"daily_ok service=active gaps=4 disk_free=0.50"
+    lines = (tmp_path / "wd.log").read_text().splitlines()
+    assert "verdict=ok" in lines[0]
+    assert "ntfy=daily_ok" in lines[0]
+    assert TOPIC not in lines[0]
+    assert json.loads((tmp_path / "wd_state.json").read_text()) == {
+        "gap_count": 4,
+        "last_ok_ping": "2026-07-19",
+    }
+
+
+def test_daily_ok_ping_sent_once_per_day(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_path: Path
+) -> None:
+    requests = mock_boundaries(monkeypatch)
+    monkeypatch.setenv("KW_WATCHDOG_NTFY_TOPIC", TOPIC)
+    beat = (FIXED_NOW - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S.%f")
+    insert_heartbeat(db_path, beat)
+    argv = watchdog_argv(tmp_path, db_path)
+
+    assert main(argv) == 0
+    assert main(argv) == 0
+
+    assert len(requests) == 1
+    lines = (tmp_path / "wd.log").read_text().splitlines()
+    assert "ntfy=daily_ok" in lines[0]
+    assert "ntfy=none" in lines[1]
+
+
+def test_daily_ok_ping_retries_after_post_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_path: Path
+) -> None:
+    mock_boundaries(monkeypatch)
+    monkeypatch.setenv("KW_WATCHDOG_NTFY_TOPIC", TOPIC)
+    beat = (FIXED_NOW - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S.%f")
+    insert_heartbeat(db_path, beat)
+
+    def raising_urlopen(request: urllib.request.Request, timeout: float | None = None) -> None:
+        raise urllib.error.URLError("connection refused")
+
+    monkeypatch.setattr(ws_watchdog.urllib.request, "urlopen", raising_urlopen)
+
+    rc = main(watchdog_argv(tmp_path, db_path))
+
+    assert rc == 1
+    lines = (tmp_path / "wd.log").read_text().splitlines()
+    assert "verdict=ok" in lines[0]
+    assert "ntfy=failed" in lines[0]
+    assert json.loads((tmp_path / "wd_state.json").read_text())["last_ok_ping"] is None
+
+
+def test_alarm_suppresses_daily_ok_ping(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_path: Path
+) -> None:
+    requests = mock_boundaries(monkeypatch, service_state="failed")
+    monkeypatch.setenv("KW_WATCHDOG_NTFY_TOPIC", TOPIC)
+    beat = (FIXED_NOW - timedelta(seconds=60)).strftime("%Y-%m-%d %H:%M:%S.%f")
+    insert_heartbeat(db_path, beat)
+
+    rc = main(watchdog_argv(tmp_path, db_path))
+
+    assert rc == 0
+    assert len(requests) == 1
+    assert requests[0].data == b"service_not_active state=failed"
+    assert json.loads((tmp_path / "wd_state.json").read_text())["last_ok_ping"] is None
 
 
 def test_run_alarm_posts_to_ntfy(
@@ -359,7 +467,10 @@ def test_run_missing_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     assert "db_unreadable" in lines[0]
     assert "heartbeat_age_s=none" in lines[0]
     assert "gap_count=none" in lines[0]
-    assert json.loads((tmp_path / "wd_state.json").read_text()) == {"gap_count": None}
+    assert json.loads((tmp_path / "wd_state.json").read_text()) == {
+        "gap_count": None,
+        "last_ok_ping": None,
+    }
 
 
 def test_state_round_trip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_path: Path) -> None:
@@ -372,7 +483,10 @@ def test_state_round_trip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_pa
 
     rc = main(argv)
     assert rc == 0
-    assert json.loads((tmp_path / "wd_state.json").read_text()) == {"gap_count": 1}
+    assert json.loads((tmp_path / "wd_state.json").read_text()) == {
+        "gap_count": 1,
+        "last_ok_ping": None,
+    }
     lines = (tmp_path / "wd.log").read_text().splitlines()
     assert len(lines) == 1
     assert "verdict=ok" in lines[0]
@@ -381,7 +495,10 @@ def test_state_round_trip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_pa
     insert_gaps(db_path, 5)
     rc = main(argv)
     assert rc == 0
-    assert json.loads((tmp_path / "wd_state.json").read_text()) == {"gap_count": 6}
+    assert json.loads((tmp_path / "wd_state.json").read_text()) == {
+        "gap_count": 6,
+        "last_ok_ping": None,
+    }
     lines = (tmp_path / "wd.log").read_text().splitlines()
     assert len(lines) == 2
     assert "verdict=alarm" in lines[1]

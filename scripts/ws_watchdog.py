@@ -13,6 +13,7 @@ MIN_DISK_FREE_FRACTION = 0.20
 # restart drifts about +20s/day from 08:04, so the window carries months of slack
 RESTART_WINDOW_START_MIN = 7 * 60 + 55
 RESTART_WINDOW_END_MIN = 8 * 60 + 40
+DAILY_PING_HOUR_UTC = 12
 
 
 def evaluate(
@@ -44,6 +45,14 @@ def in_restart_window(now: datetime) -> bool:
     return RESTART_WINDOW_START_MIN <= minute < RESTART_WINDOW_END_MIN
 
 
+# Without a periodic all-clear the operator cannot distinguish a healthy recorder from a
+# dead notification channel; a silent ntfy topic went unnoticed for six days once.
+def should_send_daily_ping(now: datetime, last_ok_ping: str | None, has_alarms: bool) -> bool:
+    if has_alarms or now.hour < DAILY_PING_HOUR_UTC:
+        return False
+    return last_ok_ping != now.date().isoformat()
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -73,20 +82,20 @@ def read_disk_free_fraction(directory: Path) -> float:
     return stats.f_bavail / stats.f_blocks
 
 
-def load_previous_gap_count(state_path: Path) -> int | None:
+def load_state(state_path: Path) -> dict[str, object]:
     if not state_path.exists():
-        return None
-    return json.loads(state_path.read_text())["gap_count"]
+        return {}
+    return json.loads(state_path.read_text())
 
 
-def save_gap_count(state_path: Path, gap_count: int | None) -> None:
-    state_path.write_text(json.dumps({"gap_count": gap_count}))
+def save_state(state_path: Path, gap_count: int | None, last_ok_ping: str | None) -> None:
+    state_path.write_text(json.dumps({"gap_count": gap_count, "last_ok_ping": last_ok_ping}))
 
 
-def post_alarms(topic: str, alarms: list[str]) -> None:
+def post_ntfy(topic: str, lines: list[str]) -> None:
     request = urllib.request.Request(
         f"https://ntfy.sh/{topic}",
-        data="\n".join(alarms).encode(),
+        data="\n".join(lines).encode(),
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=30):
@@ -117,31 +126,48 @@ def run(args: argparse.Namespace) -> int:
         db_ok = False
 
     heartbeat_age_s = None if latest_beat is None else (now - latest_beat).total_seconds()
-    previous = load_previous_gap_count(args.state)
+    state = load_state(args.state)
+    previous = state.get("gap_count")
+    last_ok_ping = state.get("last_ok_ping")
     gap_delta = None if gap_count is None or previous is None else gap_count - previous
     free_fraction = read_disk_free_fraction(args.db.parent)
 
     alarms = evaluate(
         service_state, heartbeat_age_s, gap_delta, free_fraction, in_restart_window(now), db_ok
     )
-    save_gap_count(args.state, gap_count)
 
+    age_text = "none" if heartbeat_age_s is None else f"{heartbeat_age_s:.0f}"
+    gap_count_text = "none" if gap_count is None else str(gap_count)
+    gap_delta_text = "none" if gap_delta is None else str(gap_delta)
+
+    topic = os.environ.get("KW_WATCHDOG_NTFY_TOPIC", "")
     ntfy = "none"
     if alarms:
-        topic = os.environ.get("KW_WATCHDOG_NTFY_TOPIC", "")
         if topic:
             try:
-                post_alarms(topic, alarms)
+                post_ntfy(topic, alarms)
                 ntfy = "sent"
             except OSError:
                 ntfy = "failed"
         else:
             ntfy = "skipped"
+    elif should_send_daily_ping(now, last_ok_ping, bool(alarms)):
+        ping = (
+            f"daily_ok service={service_state} gaps={gap_count_text} disk_free={free_fraction:.2f}"
+        )
+        if topic:
+            try:
+                post_ntfy(topic, [ping])
+                ntfy = "daily_ok"
+                last_ok_ping = now.date().isoformat()
+            except OSError:
+                ntfy = "failed"
+        else:
+            ntfy = "skipped"
+
+    save_state(args.state, gap_count, last_ok_ping)
 
     verdict = "alarm" if alarms else "ok"
-    age_text = "none" if heartbeat_age_s is None else f"{heartbeat_age_s:.0f}"
-    gap_count_text = "none" if gap_count is None else str(gap_count)
-    gap_delta_text = "none" if gap_delta is None else str(gap_delta)
     line = (
         f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')} verdict={verdict} service={service_state} "
         f"heartbeat_age_s={age_text} gap_count={gap_count_text} gap_delta={gap_delta_text} "
