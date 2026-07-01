@@ -12,11 +12,17 @@ from pathlib import Path
 import httpx
 import pytest
 
+from bot.main import STATIONS
 from scripts.lag_report import (
     DEFAULT_LATENCY_TOTAL_S,
     DEFAULT_NOTIONAL_CAP,
     DEFAULT_SERIES,
     DEFAULT_START,
+    EXCLUDED_SERIES,
+    R0_FRACTION_INVALID_MAX,
+    R0_PASSING_SERIES,
+    R0_WINDOW_END_EXCLUSIVE,
+    R0_WINDOW_START,
     build_parser,
     filter_series,
     run,
@@ -192,6 +198,31 @@ async def test_run_empty_window_short_circuits(
         assert "empty window" in captured.out
     finally:
         db_path.unlink()
+
+
+def test_r0_passing_series_is_a_frozen_twenty_station_subset_of_stations() -> None:
+    assert len(R0_PASSING_SERIES) == 20
+    assert set(R0_PASSING_SERIES) <= set(STATIONS)
+    assert len(set(R0_PASSING_SERIES)) == len(R0_PASSING_SERIES)
+
+
+def test_r0_window_spans_fifteen_days() -> None:
+    assert R0_WINDOW_START == date(2026, 7, 18)
+    assert (R0_WINDOW_END_EXCLUSIVE - R0_WINDOW_START).days == 15
+
+
+def test_r0_fraction_invalid_max_is_decimal() -> None:
+    assert R0_FRACTION_INVALID_MAX == Decimal("0.5")
+    assert type(R0_FRACTION_INVALID_MAX) is Decimal
+
+
+def test_anchor_series_are_inside_the_passing_universe() -> None:
+    assert all(s in R0_PASSING_SERIES for s in DEFAULT_SERIES)
+
+
+def test_kxhighmia_passes_r0_but_remains_in_excluded_series() -> None:
+    assert "KXHIGHMIA" in R0_PASSING_SERIES
+    assert "KXHIGHMIA" in EXCLUDED_SERIES
 
 
 def test_decimal_notional_cap_passthrough() -> None:
