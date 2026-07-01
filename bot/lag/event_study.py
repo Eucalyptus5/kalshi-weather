@@ -9,8 +9,10 @@ from bot.lag.lock_events import LockEvent
 from bot.markets.parser import series_id
 
 
-_YES_BAND = Decimal("0.95")
-_NO_BAND = Decimal("0.05")
+POOLED = "POOLED"
+
+YES_BAND = Decimal("0.95")
+NO_BAND = Decimal("0.05")
 _TWO = Decimal(2)
 _FLOOR_FACTOR = Decimal("1.5")
 
@@ -34,7 +36,9 @@ class LagBucket:
     series: str
     n: int
     median_lag_s: int | None
+    p25_lag_s: int | None
     p90_lag_s: int | None
+    cadence_s: int | None
     never_repriced_n: int
     mislock_n: int
     mislock_rate: Decimal
@@ -45,6 +49,14 @@ class LagBucket:
 class LagReport:
     raw: list[LagBucket]
     net_of_floor: list[LagBucket]
+    raw_pooled: LagBucket
+    net_of_floor_pooled: LagBucket
+
+
+@dataclass(frozen=True, slots=True)
+class EventProbe:
+    lag_s: int | None
+    cadence_s: int | None
 
 
 def study_lag(
@@ -54,72 +66,93 @@ def study_lag(
     settle_by_event: Mapping[str, Decimal] | None = None,
     day_window_seconds: int = 24 * 3600,
 ) -> LagReport:
-    """Missing settles leave mislock unknown for that event; the bucket mislock_rate
-    denominator is bucket n, so unknowns dilute the rate downward."""
     by_ticker: dict[str, list[OrderbookSnapshotRow]] = {}
     for s in snapshots:
         by_ticker.setdefault(s.ticker, []).append(s)
     for rows in by_ticker.values():
         rows.sort(key=lambda r: r.snapshot_at)
 
-    raw = _aggregate(events, by_ticker, settle_by_event, day_window_seconds)
+    probes = {
+        (ev.ticker, ev.t0): EventProbe(
+            lag_s=_event_lag(ev, by_ticker.get(ev.ticker, []), day_window_seconds),
+            cadence_s=_event_cadence(ev, by_ticker.get(ev.ticker, [])),
+        )
+        for ev in events
+    }
+    return study_lag_from_probes(events, probes, settle_by_event=settle_by_event)
+
+
+def study_lag_from_probes(
+    events: list[LockEvent],
+    probes: Mapping[tuple[str, datetime], EventProbe],
+    *,
+    settle_by_event: Mapping[str, Decimal] | None = None,
+) -> LagReport:
+    """Missing settles leave mislock unknown for that event; the bucket mislock_rate
+    denominator is bucket n, so unknowns dilute the rate downward."""
+    raw, raw_pooled = _aggregate(events, probes, settle_by_event)
     filtered = filter_net_of_floor(events, settle_by_event)
-    net = _aggregate(filtered, by_ticker, settle_by_event, day_window_seconds)
-    return LagReport(raw=raw, net_of_floor=net)
+    net, net_pooled = _aggregate(filtered, probes, settle_by_event)
+    return LagReport(
+        raw=raw,
+        net_of_floor=net,
+        raw_pooled=raw_pooled,
+        net_of_floor_pooled=net_pooled,
+    )
 
 
 def _aggregate(
     events: list[LockEvent],
-    by_ticker: Mapping[str, list[OrderbookSnapshotRow]],
+    probes: Mapping[tuple[str, datetime], EventProbe],
     settle_by_event: Mapping[str, Decimal] | None,
-    day_window_seconds: int,
-) -> list[LagBucket]:
+) -> tuple[list[LagBucket], LagBucket]:
     by_series: dict[str, list[LockEvent]] = {}
     for ev in events:
         by_series.setdefault(series_id(ev.ticker), []).append(ev)
 
-    buckets: list[LagBucket] = []
-    for s in sorted(by_series):
-        bucket_events = by_series[s]
-        lags: list[int | None] = []
-        cadences: list[int] = []
-        mislock_n = 0
-        for ev in bucket_events:
-            ticker_snaps = by_ticker.get(ev.ticker, [])
-            lags.append(_event_lag(ev, ticker_snaps, day_window_seconds))
-            cadence = _event_cadence(ev, ticker_snaps)
-            if cadence is not None:
-                cadences.append(cadence)
-            if _is_mislock(ev, settle_by_event):
-                mislock_n += 1
+    buckets = [_bucket(s, by_series[s], probes, settle_by_event) for s in sorted(by_series)]
+    return buckets, _bucket(POOLED, events, probes, settle_by_event)
 
-        non_none = sorted(v for v in lags if v is not None)
-        median_lag = _quantile(non_none, Decimal("0.5"))
-        p90_lag = _quantile(non_none, Decimal("0.9"))
-        never_repriced = sum(1 for v in lags if v is None)
-        n = len(bucket_events)
-        rate = Decimal(mislock_n) / Decimal(max(1, n))
 
-        bucket_cadence = _median_int(cadences)
-        unreliable = (
-            median_lag is not None
-            and bucket_cadence is not None
-            and Decimal(median_lag) <= _FLOOR_FACTOR * Decimal(bucket_cadence)
-        )
+def _bucket(
+    label: str,
+    events: list[LockEvent],
+    probes: Mapping[tuple[str, datetime], EventProbe],
+    settle_by_event: Mapping[str, Decimal] | None,
+) -> LagBucket:
+    lags: list[int | None] = []
+    cadences: list[int] = []
+    mislock_n = 0
+    for ev in events:
+        probe = probes[(ev.ticker, ev.t0)]
+        lags.append(probe.lag_s)
+        if probe.cadence_s is not None:
+            cadences.append(probe.cadence_s)
+        if _is_mislock(ev, settle_by_event):
+            mislock_n += 1
 
-        buckets.append(
-            LagBucket(
-                series=s,
-                n=n,
-                median_lag_s=median_lag,
-                p90_lag_s=p90_lag,
-                never_repriced_n=never_repriced,
-                mislock_n=mislock_n,
-                mislock_rate=rate,
-                snapshot_unreliable=bool(unreliable),
-            )
-        )
-    return buckets
+    non_none = sorted(v for v in lags if v is not None)
+    median_lag = _quantile(non_none, Decimal("0.5"))
+    n = len(events)
+    bucket_cadence = median_int(cadences)
+    unreliable = (
+        median_lag is not None
+        and bucket_cadence is not None
+        and Decimal(median_lag) <= _FLOOR_FACTOR * Decimal(bucket_cadence)
+    )
+
+    return LagBucket(
+        series=label,
+        n=n,
+        median_lag_s=median_lag,
+        p25_lag_s=_quantile(non_none, Decimal("0.25")),
+        p90_lag_s=_quantile(non_none, Decimal("0.9")),
+        cadence_s=bucket_cadence,
+        never_repriced_n=sum(1 for v in lags if v is None),
+        mislock_n=mislock_n,
+        mislock_rate=Decimal(mislock_n) / Decimal(max(1, n)),
+        snapshot_unreliable=bool(unreliable),
+    )
 
 
 def _event_lag(
@@ -134,9 +167,9 @@ def _event_lag(
         if delta > day_window_seconds:
             break
         mid = (snap.yes_bid + snap.yes_ask) / _TWO
-        if ev.side_locked == "yes" and mid >= _YES_BAND:
+        if ev.side_locked == "yes" and mid >= YES_BAND:
             return int(delta)
-        if ev.side_locked == "no" and mid <= _NO_BAND:
+        if ev.side_locked == "no" and mid <= NO_BAND:
             return int(delta)
     return None
 
@@ -153,7 +186,7 @@ def _event_cadence(ev: LockEvent, ticker_snaps: list[OrderbookSnapshotRow]) -> i
     if len(window) < 3:
         return None
     deltas = [int((window[i + 1] - window[i]).total_seconds()) for i in range(len(window) - 1)]
-    return _median_int(deltas)
+    return median_int(deltas)
 
 
 def _is_mislock(ev: LockEvent, settle_by_event: Mapping[str, Decimal] | None) -> bool:
@@ -190,7 +223,7 @@ def _quantile(sorted_values: list[int], p: Decimal) -> int | None:
     return sorted_values[int(idx_dec)]
 
 
-def _median_int(values: list[int]) -> int | None:
+def median_int(values: list[int]) -> int | None:
     if not values:
         return None
     s = sorted(values)

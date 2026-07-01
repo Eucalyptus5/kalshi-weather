@@ -6,10 +6,13 @@ from decimal import Decimal
 from typing import Literal
 
 from bot.lag.event_study import (
+    POOLED,
+    EventProbe,
     LagBucket,
     LagReport,
     OrderbookSnapshotRow,
     study_lag,
+    study_lag_from_probes,
 )
 from bot.lag.lock_events import LockEvent
 
@@ -366,3 +369,130 @@ def test_quantile_k3_pinned() -> None:
     b = report.raw[0]
     assert b.median_lag_s == 60
     assert b.p90_lag_s == 90
+
+
+def test_p25_quantile_pinned_over_four_events() -> None:
+    base = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    lags = [30, 60, 90, 120]
+    events = []
+    snaps = []
+    for i, lag in enumerate(lags):
+        t0 = base + timedelta(hours=i)
+        ticker = f"KXHIGHDEN-26JUN17-T{85 + i}"
+        events.append(_event(ticker, t0=t0))
+        snaps.append(_snap(ticker, t0 + timedelta(seconds=lag), "0.95", "0.96"))
+
+    b = study_lag(events, snaps).raw[0]
+
+    assert b.p25_lag_s == 60
+    assert b.median_lag_s == 90
+    assert b.p90_lag_s == 120
+
+
+def test_p25_is_none_when_nothing_repriced() -> None:
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event("KXHIGHDEN-26JUN17-T85", t0=t0)
+    snaps = [_snap("KXHIGHDEN-26JUN17-T85", t0 + timedelta(seconds=30), "0.45", "0.55")]
+
+    assert study_lag([ev], snaps).raw[0].p25_lag_s is None
+
+
+def test_pooled_bucket_spans_every_series() -> None:
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    den = _event("KXHIGHDEN-26JUN17-T85", t0=t0)
+    chi = _event("KXHIGHCHI-26JUN17-T75-80", side="no", t0=t0, strike=80, crossing=82)
+    snaps = [
+        _snap("KXHIGHDEN-26JUN17-T85", t0 + timedelta(seconds=30), "0.95", "0.96"),
+        _snap("KXHIGHCHI-26JUN17-T75-80", t0 + timedelta(seconds=150), "0.03", "0.05"),
+    ]
+
+    report = study_lag([den, chi], snaps)
+
+    assert report.raw_pooled.series == POOLED
+    assert report.raw_pooled.n == 2
+    assert report.raw_pooled.median_lag_s == 30
+    assert report.raw_pooled.p90_lag_s == 150
+    assert [b.n for b in report.raw] == [1, 1]
+
+
+def test_pooled_net_of_floor_drops_ambiguous() -> None:
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    clean = _event("KXHIGHDEN-26JUN17-T85", t0=t0)
+    amb = _event("KXHIGHCHI-26JUN17-T80", t0=t0, strike=80, crossing=80, lock_ambiguous=True)
+    snaps = [
+        _snap("KXHIGHDEN-26JUN17-T85", t0 + timedelta(seconds=30), "0.95", "0.96"),
+        _snap("KXHIGHCHI-26JUN17-T80", t0 + timedelta(seconds=30), "0.95", "0.96"),
+    ]
+
+    report = study_lag([clean, amb], snaps)
+
+    assert report.raw_pooled.n == 2
+    assert report.net_of_floor_pooled.n == 1
+
+
+def test_pooled_mislock_rate_is_over_the_pooled_denominator() -> None:
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    den = _event("KXHIGHDEN-26JUN17-T85", t0=t0, strike=85, crossing=87)
+    chi = _event("KXHIGHCHI-26JUN17-T80", t0=t0, strike=80, crossing=82)
+    snaps = [
+        _snap("KXHIGHDEN-26JUN17-T85", t0 + timedelta(seconds=30), "0.95", "0.96"),
+        _snap("KXHIGHCHI-26JUN17-T80", t0 + timedelta(seconds=30), "0.95", "0.96"),
+    ]
+    settle = {"KXHIGHDEN-26JUN17-T85": Decimal("83"), "KXHIGHCHI-26JUN17-T80": Decimal("84")}
+
+    report = study_lag([den, chi], snaps, settle_by_event=settle)
+
+    assert report.raw_pooled.mislock_n == 1
+    assert report.raw_pooled.mislock_rate == Decimal(1) / Decimal(2)
+
+
+def test_bucket_reports_measured_cadence() -> None:
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event("KXHIGHDEN-26JUN17-T85", t0=t0, strike=85, crossing=87)
+    snaps = [
+        _snap("KXHIGHDEN-26JUN17-T85", t0 + timedelta(seconds=s), "0.50", "0.50")
+        for s in (0, 60, 120, 180)
+    ]
+    snaps.append(_snap("KXHIGHDEN-26JUN17-T85", t0 + timedelta(seconds=300), "0.95", "0.96"))
+
+    b = study_lag([ev], snaps).raw[0]
+
+    assert b.cadence_s == 60
+
+
+def test_pooled_bucket_is_empty_when_no_events() -> None:
+    report = study_lag([], [])
+
+    assert report.raw == []
+    assert report.raw_pooled.series == POOLED
+    assert report.raw_pooled.n == 0
+    assert report.raw_pooled.median_lag_s is None
+    assert report.raw_pooled.snapshot_unreliable is False
+
+
+def test_probes_drive_aggregation_without_snapshot_rows() -> None:
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    den = _event("KXHIGHDEN-26JUN17-T85", t0=t0)
+    chi = _event("KXHIGHCHI-26JUN17-T80", t0=t0, strike=80, crossing=82)
+    probes = {
+        (den.ticker, den.t0): EventProbe(lag_s=140, cadence_s=0),
+        (chi.ticker, chi.t0): EventProbe(lag_s=None, cadence_s=0),
+    }
+
+    report = study_lag_from_probes([den, chi], probes)
+
+    assert report.raw_pooled.n == 2
+    assert report.raw_pooled.median_lag_s == 140
+    assert report.raw_pooled.never_repriced_n == 1
+    assert report.raw_pooled.cadence_s == 0
+
+
+def test_sub_second_cadence_clears_the_snapshot_floor_flag() -> None:
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event("KXHIGHDEN-26JUN17-T85", t0=t0)
+    probes = {(ev.ticker, ev.t0): EventProbe(lag_s=1, cadence_s=0)}
+
+    b = study_lag_from_probes([ev], probes).raw[0]
+
+    assert b.cadence_s == 0
+    assert b.snapshot_unreliable is False
