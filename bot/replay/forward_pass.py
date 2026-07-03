@@ -25,9 +25,10 @@ BARRIER_ROWS = 5_000_000
 CHECKPOINT_NAME = "checkpoint.json"
 
 _DB_TS = "%Y-%m-%d %H:%M:%S.%f"
-_SELECT = (
-    "SELECT id, ticker, received_at, seq, side, price, size, is_snapshot, ts_ms "
-    "FROM ws_book_events WHERE id > ? ORDER BY id LIMIT ?"
+_COLUMNS = "id, ticker, received_at, seq, side, price, size, is_snapshot, ts_ms"
+_SELECT = f"SELECT {_COLUMNS} FROM ws_book_events WHERE id > ? ORDER BY id LIMIT ?"
+_SELECT_BOUNDED = (
+    f"SELECT {_COLUMNS} FROM ws_book_events WHERE id > ? AND id <= ? ORDER BY id LIMIT ?"
 )
 
 type JsonState = dict[str, JsonState] | list[JsonState] | str | int | float | bool | None
@@ -257,18 +258,21 @@ def run_forward_pass(
     row_group_rows: int = ROW_GROUP_ROWS,
     barrier_rows: int = BARRIER_ROWS,
     max_resident_ladders: int | None = None,
+    max_id: int | None = None,
 ) -> PassResult:
     out_dir.mkdir(parents=True, exist_ok=True)
     state = _Pass(
         out_dir, emitters, accumulators, row_group_rows, barrier_rows, max_resident_ladders
     )
     state.restore()
+    select = _SELECT if max_id is None else _SELECT_BOUNDED
+    bound = () if max_id is None else (max_id,)
     conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
     try:
         # One held ORDER BY id cursor pins the recorder's WAL, which it cannot checkpoint
         # before shutdown, so every batch is its own statement carrying the last id forward.
         while True:
-            batch = conn.execute(_SELECT, (state.last_id, read_batch_rows)).fetchall()
+            batch = conn.execute(select, (state.last_id, *bound, read_batch_rows)).fetchall()
             if not batch:
                 break
             for raw in batch:

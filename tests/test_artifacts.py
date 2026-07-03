@@ -41,6 +41,9 @@ DB_TS = "%Y-%m-%d %H:%M:%S.%f"
 DEN = "KXHIGHDEN-26JUL19-B85.5"
 CHI = "KXHIGHCHI-26JUL19-T75"
 RAIN = "KXRAINCHIM-26JUL-1"
+LOW = "KXLOWTCHI-26JUL19-T55"
+PHX = "KXHIGHTPHX-26JUL17-B93.5"
+BWI = "KXHIGHTBWI-26AUG05-B93.5"
 
 BOOK_SQL = """
 CREATE TABLE ws_book_events (
@@ -117,6 +120,23 @@ BOOK_ROWS = [
     _book(10, CHI, 64, 7, "yes", "0.1", "-5", False),
 ]
 
+SCOPE_ROWS = [
+    _book(1, CHI, 0, 1, "yes", "0.1000", "5.00", True),
+    _book(2, LOW, 0, 1, "yes", "0.2000", "5.00", True),
+    _book(3, RAIN, 0, 1, "yes", "0.3000", "5.00", True),
+    _book(4, PHX, 0, 1, "yes", "0.4000", "5.00", True),
+    _book(5, BWI, 0, 1, "yes", "0.5000", "5.00", True),
+]
+
+LIFE_ROWS = [
+    _book(1, DEN, 0, 1, "yes", "0.4000", "10.00", True),
+    _book(2, DEN, 2 * 86_400, 2, "yes", "0.4100", "9.00", True),
+]
+
+DEPTH_ROWS = [
+    _book(i + 1, DEN, 0, 1, "yes", f"0.{10 + i}00", f"{i + 1}.00", True) for i in range(8)
+] + [_book(i + 9, DEN, 0, 1, "no", f"0.{20 + i}00", f"{i + 1}.00", True) for i in range(8)]
+
 TRADE_ROWS = [
     _trade(1, DEN, 0, "0.07", "3", "yes"),
     _trade(2, RAIN, 61, "0.2000", "12", "no"),
@@ -131,6 +151,15 @@ FULL_BUDGET = byte_budget(
     ws_raw_daily_bytes=387_000_000,
     pass_hours=Decimal("12"),
 )
+
+
+def build_book_db(path: Path, rows: list[tuple[object, ...]]) -> Path:
+    conn = sqlite3.connect(path)
+    conn.execute(BOOK_SQL)
+    conn.executemany("INSERT INTO ws_book_events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+    return path
 
 
 def build_db(path: Path) -> None:
@@ -251,43 +280,74 @@ def test_the_touch_series_carries_one_row_per_book_event(tmp_path: Path, db_path
     }
 
 
-def test_the_ladder_artifact_covers_only_the_selected_tickers_and_windows(
-    tmp_path: Path, db_path: Path
+def test_the_ladder_scope_is_a_prefix_on_the_series_root_not_a_list_of_known_roots(
+    tmp_path: Path,
 ) -> None:
     out_dir = tmp_path / "out"
+    emitter = LadderEmitter()
     run_forward_pass(
-        db_path, out_dir, [LadderEmitter([DEN], [(_at(0), _at(60))])], barrier_rows=10_000
+        build_book_db(tmp_path / "scope.db", SCOPE_ROWS), out_dir, [emitter], barrier_rows=10_000
     )
-    files = artifact(out_dir)
 
-    assert sorted(files) == ["ladder/KXHIGHDEN-2026-07-19-b000001.parquet"]
-    rows = files["ladder/KXHIGHDEN-2026-07-19-b000001.parquet"]
-    assert [r["id"] for r in rows] == [1, 2, 5]
-    assert rows[2]["yes_bid"] == "0.4100"
-    assert rows[2]["yes_prices"] == ["0.4100", "0.4000"]
-    assert rows[2]["yes_sizes"] == ["2.00", "10.00"]
-    assert rows[2]["yes_levels"] == 2
-    assert rows[2]["no_prices"] == ["0.5500"]
-    assert rows[2]["no_sizes"] == ["7.00"]
-    assert rows[2]["no_levels"] == 1
+    assert sorted(artifact(out_dir)) == [
+        "ladder/KXHIGHCHI-2026-07-19-b000001.parquet",
+        "ladder/KXHIGHTBWI-2026-07-19-b000001.parquet",
+        "ladder/KXHIGHTPHX-2026-07-19-b000001.parquet",
+        "ladder/KXLOWTCHI-2026-07-19-b000001.parquet",
+    ]
+    assert emitter.roots == {"KXHIGHCHI", "KXHIGHTBWI", "KXHIGHTPHX", "KXLOWTCHI"}
 
 
-def test_ladder_depth_truncates_the_levels_and_still_counts_them(
-    tmp_path: Path, db_path: Path
-) -> None:
+def test_the_ladder_scope_drops_kxrain_in_its_recorded_form(tmp_path: Path) -> None:
     out_dir = tmp_path / "out"
+    emitter = LadderEmitter()
     run_forward_pass(
-        db_path,
+        build_book_db(tmp_path / "rain.db", [_book(1, RAIN, 0, 1, "yes", "0.3000", "5.00", True)]),
         out_dir,
-        [LadderEmitter([DEN], [(_at(0), _at(60))], depth=1)],
+        [emitter],
         barrier_rows=10_000,
     )
 
-    rows = artifact(out_dir)["ladder/KXHIGHDEN-2026-07-19-b000001.parquet"]
-    assert rows[2]["yes_prices"] == ["0.4100"]
-    assert rows[2]["yes_sizes"] == ["2.00"]
-    assert rows[2]["yes_levels"] == 2
-    assert LadderEmitter([DEN], [(_at(0), _at(60))]).depth is None
+    with pytest.raises(ValueError):
+        series_id(RAIN)
+    assert emitter.roots == set()
+    assert artifact(out_dir) == {}
+
+
+def test_the_ladder_covers_the_whole_recorded_life_of_a_root(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out"
+    run_forward_pass(
+        build_book_db(tmp_path / "life.db", LIFE_ROWS),
+        out_dir,
+        [LadderEmitter()],
+        barrier_rows=10_000,
+    )
+    files = artifact(out_dir)
+
+    assert sorted(files) == [
+        "ladder/KXHIGHDEN-2026-07-19-b000001.parquet",
+        "ladder/KXHIGHDEN-2026-07-21-b000001.parquet",
+    ]
+    assert [r["id"] for r in files["ladder/KXHIGHDEN-2026-07-19-b000001.parquet"]] == [1]
+    assert [r["id"] for r in files["ladder/KXHIGHDEN-2026-07-21-b000001.parquet"]] == [2]
+
+
+def test_the_ladder_carries_six_levels_a_side_and_still_counts_them_all(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out"
+    run_forward_pass(
+        build_book_db(tmp_path / "depth.db", DEPTH_ROWS),
+        out_dir,
+        [LadderEmitter()],
+        barrier_rows=10_000,
+    )
+
+    row = artifact(out_dir)["ladder/KXHIGHDEN-2026-07-19-b000001.parquet"][-1]
+    assert row["yes_prices"] == ["0.1700", "0.1600", "0.1500", "0.1400", "0.1300", "0.1200"]
+    assert row["yes_sizes"] == ["8.00", "7.00", "6.00", "5.00", "4.00", "3.00"]
+    assert row["yes_levels"] == 8
+    assert row["no_prices"] == ["0.2700", "0.2600", "0.2500", "0.2400", "0.2300", "0.2200"]
+    assert row["no_sizes"] == ["8.00", "7.00", "6.00", "5.00", "4.00", "3.00"]
+    assert row["no_levels"] == 8
 
 
 def test_trades_are_their_own_artifact_with_no_price_derived_in_decimal(
@@ -358,20 +418,35 @@ def test_the_inventory_carries_the_three_tables_the_scalars_and_the_budget(
     assert scalars["tickers"] == "3"
     assert scalars["budget_bytes"] == "41115000000"
     assert scalars["budget_floor_bytes"] == "40960000000"
+    assert scalars["ladder_scope"] == "none"
+    assert scalars["ladder_roots"] == "none"
     assert scalars["ladder_depth"] == "none"
     assert int(scalars["bytes_written"]) > 0
 
 
-def test_the_inventory_records_a_truncated_ladder_depth(tmp_path: Path, db_path: Path) -> None:
+def test_the_inventory_records_the_ladder_scope_the_roots_it_hit_and_the_depth(
+    tmp_path: Path, db_path: Path
+) -> None:
     out_dir = tmp_path / "out"
     exclusions = ExclusionInventory(read_gap_rows(db_path))
     seq = SeqBoundaryDetector()
     tickers = TickerInventory()
-    run_forward_pass(db_path, out_dir, [], accumulators=[exclusions, seq, tickers])
-    write_inventory(out_dir, build_inventory(exclusions, seq, tickers), FULL_BUDGET, ladder_depth=4)
+    emitter = LadderEmitter()
+    run_forward_pass(
+        db_path,
+        out_dir,
+        [emitter],
+        accumulators=[exclusions, seq, tickers],
+        barrier_rows=10_000,
+    )
+    write_inventory(out_dir, build_inventory(exclusions, seq, tickers), FULL_BUDGET, ladder=emitter)
 
     rows = artifact(out_dir)["inventory/scalars-b000000.parquet"]
-    assert {r["name"]: r["value"] for r in rows}["ladder_depth"] == "4"
+    scalars = {r["name"]: r["value"] for r in rows}
+    assert scalars["ladder_scope"] == "KXHIGH,KXLOW"
+    assert scalars["ladder_roots"] == "KXHIGHCHI,KXHIGHDEN"
+    assert scalars["ladder_depth"] == "6"
+    assert scalars["tickers"] == "3"
 
 
 def test_the_byte_budget_deducts_the_floor_from_total_not_from_free() -> None:
@@ -529,15 +604,16 @@ def test_every_artifact_lands_where_the_consumer_expects_and_reads_back(
     seq = SeqBoundaryDetector()
     tickers = TickerInventory()
     guard = BudgetGuard(out_dir, FULL_BUDGET, check_rows=1)
+    emitter = LadderEmitter()
     result = run_forward_pass(
         db_path,
         out_dir,
-        [TouchEmitter(), LadderEmitter([DEN, RAIN], [(_at(0), _at(120))])],
+        [TouchEmitter(), emitter],
         accumulators=[exclusions, seq, tickers, guard],
         barrier_rows=10_000,
     )
     write_trades(db_path, out_dir, FULL_BUDGET)
-    write_inventory(out_dir, build_inventory(exclusions, seq, tickers), FULL_BUDGET)
+    write_inventory(out_dir, build_inventory(exclusions, seq, tickers), FULL_BUDGET, ladder=emitter)
 
     assert result.rows == len(BOOK_ROWS)
     assert sorted(str(p.relative_to(out_dir)) for p in out_dir.rglob("*.parquet")) == [
@@ -545,9 +621,10 @@ def test_every_artifact_lands_where_the_consumer_expects_and_reads_back(
         "inventory/coverage-b000000.parquet",
         "inventory/scalars-b000000.parquet",
         "inventory/windows-b000000.parquet",
+        "ladder/KXHIGHCHI-2026-07-19-b000001.parquet",
+        "ladder/KXHIGHCHI-2026-07-20-b000001.parquet",
         "ladder/KXHIGHDEN-2026-07-19-b000001.parquet",
         "ladder/KXHIGHDEN-2026-07-20-b000001.parquet",
-        "ladder/KXRAINCHIM-2026-07-20-b000001.parquet",
         "touch/KXHIGHCHI-2026-07-19-b000001.parquet",
         "touch/KXHIGHCHI-2026-07-20-b000001.parquet",
         "touch/KXHIGHDEN-2026-07-19-b000001.parquet",

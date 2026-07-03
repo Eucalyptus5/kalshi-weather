@@ -1,7 +1,7 @@
 import logging
 import os
 import sqlite3
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -21,6 +21,10 @@ MIN_DISK_FREE_FRACTION = Decimal("0.20")
 RECORDER_DAILY_BYTES = 5_100_000_000
 TRADES_BATCH_ROWS = 50_000
 BUDGET_CHECK_ROWS = 100_000
+LADDER_SCOPE = ("KXHIGH", "KXLOW")
+# Six, not five: five populated levels span only four ticks of price, one short of the
+# cumulative-through-five-ticks depth the consumer reads.
+LADDER_DEPTH = 6
 
 _ZERO_PRICE = Decimal("0").quantize(_PRICE_EXPONENT)
 _ZERO_SIZE = Decimal("0").quantize(_SIZE_EXPONENT)
@@ -116,26 +120,22 @@ class TouchEmitter:
         yield partition_key(row.ticker, row.received_at), _touch_row(row, ladder)
 
 
+# A prefix on the series root rather than the roots this tape happens to hold: a KXHIGH root
+# first recorded after the roots were counted would otherwise drop out of the artifact silently.
 class LadderEmitter:
     name = "ladder"
     schema = LADDER_SCHEMA
+    scope = LADDER_SCOPE
+    depth = LADDER_DEPTH
 
-    def __init__(
-        self,
-        tickers: Sequence[str],
-        windows: Sequence[tuple[datetime, datetime]],
-        *,
-        depth: int | None = None,
-    ) -> None:
-        self.tickers = frozenset(tickers)
-        self.windows = tuple(windows)
-        self.depth = depth
+    def __init__(self) -> None:
+        self.roots: set[str] = set()
 
     def emit(self, row: SourceRow, ladder: Ladder) -> Iterator[tuple[str, dict[str, object]]]:
-        if row.ticker not in self.tickers:
+        root = row.ticker.split("-")[0]
+        if not root.startswith(self.scope):
             return
-        if not any(start <= row.received_at < end for start, end in self.windows):
-            return
+        self.roots.add(root)
         yes = _live(ladder.levels["yes"])
         no = _live(ladder.levels["no"])
         out = _touch_row(row, ladder)
@@ -363,7 +363,7 @@ def write_inventory(
     inventory: PassInventory,
     budget: ByteBudget,
     *,
-    ladder_depth: int | None = None,
+    ladder: LadderEmitter | None = None,
     extra: Mapping[str, str] | None = None,
 ) -> list[Path]:
     preflight(budget)
@@ -378,7 +378,9 @@ def write_inventory(
         "budget_ws_raw_day_bytes": str(budget.ws_raw_day),
         "budget_wal_bytes": str(budget.wal),
         "budget_bytes": str(budget.budget_bytes),
-        "ladder_depth": "none" if ladder_depth is None else str(ladder_depth),
+        "ladder_scope": "none" if ladder is None else ",".join(ladder.scope),
+        "ladder_roots": "none" if ladder is None else ",".join(sorted(ladder.roots)),
+        "ladder_depth": "none" if ladder is None else str(ladder.depth),
         "bytes_written": str(bytes_written(out_dir)),
         **(extra or {}),
     }

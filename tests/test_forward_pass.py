@@ -198,6 +198,13 @@ def artifact(out_dir: Path) -> dict[str, list[dict[str, object]]]:
     }
 
 
+def partitions(out_dir: Path) -> dict[str, list[dict[str, object]]]:
+    out: dict[str, list[dict[str, object]]] = {}
+    for name, rows in sorted(artifact(out_dir).items()):
+        out.setdefault(name.rsplit("-b", 1)[0], []).extend(rows)
+    return out
+
+
 def row_group_rows(path: Path) -> list[int]:
     metadata = pq.ParquetFile(path).metadata
     return [metadata.row_group(i).num_rows for i in range(metadata.num_row_groups)]
@@ -620,6 +627,118 @@ def test_progress_is_logged_and_nothing_reaches_stdout(
     assert any("rows=4" in m and "elapsed_s=" in m for m in messages)
     assert any("rows=18" in m and "elapsed_s=" in m for m in messages)
     assert capsys.readouterr().out == ""
+
+
+def test_the_id_ceiling_consumes_exactly_the_rows_at_or_below_it(
+    reference: Reference, tmp_path: Path
+) -> None:
+    out_dir = tmp_path / "out"
+    result = run_forward_pass(
+        reference.db_path,
+        out_dir,
+        [TouchEmitter()],
+        accumulators=[CountAccumulator()],
+        max_id=10,
+        **RESUME_KNOBS,
+    )
+    files = artifact(out_dir)
+
+    assert result.rows == 10
+    assert result.last_id == 10
+    assert sorted(files) == [
+        name
+        for name, rows in sorted(reference.artifact.items())
+        if any(r["id"] <= 10 for r in rows)
+    ]
+    for name, rows in files.items():
+        kept = [r for r in reference.artifact[name] if r["id"] <= 10]
+        assert rows == kept
+        assert pq.read_table(out_dir / name).equals(pa.Table.from_pylist(kept, schema=TOUCH_SCHEMA))
+
+
+def test_a_ceiling_above_the_last_id_is_the_same_as_no_ceiling(
+    reference: Reference, tmp_path: Path
+) -> None:
+    out_dir = tmp_path / "out"
+    result = run_forward_pass(
+        reference.db_path,
+        out_dir,
+        [TouchEmitter()],
+        accumulators=[CountAccumulator()],
+        max_id=10_000,
+        **RESUME_KNOBS,
+    )
+
+    assert result.rows == len(FIXTURE_ROWS)
+    assert result.last_id == 18
+    assert result.barriers == 5
+    assert artifact(out_dir) == reference.artifact
+    assert checkpoint_of(out_dir) == reference.checkpoint
+
+
+def test_a_pass_bounded_mid_barrier_resumes_to_the_uninterrupted_result(
+    reference: Reference, tmp_path: Path
+) -> None:
+    out_dir = tmp_path / "out"
+    bounded = run_forward_pass(
+        reference.db_path,
+        out_dir,
+        [TouchEmitter()],
+        accumulators=[CountAccumulator()],
+        max_id=10,
+        **RESUME_KNOBS,
+    )
+    assert bounded.barriers == 3
+    resumed = run_forward_pass(
+        reference.db_path,
+        out_dir,
+        [TouchEmitter()],
+        accumulators=[CountAccumulator()],
+        **RESUME_KNOBS,
+    )
+
+    assert resumed.rows == len(FIXTURE_ROWS) - 10
+    assert partitions(out_dir) == partitions(reference.out_dir)
+    final = checkpoint_of(out_dir)
+    assert final["ladders"] == reference.checkpoint["ladders"]
+    assert final["accumulators"] == reference.checkpoint["accumulators"]
+    assert final["id"] == reference.checkpoint["id"]
+
+
+def test_the_ceiling_bounds_the_end_and_leaves_the_checkpoint_to_bound_the_start(
+    reference: Reference, tmp_path: Path
+) -> None:
+    out_dir = tmp_path / "out"
+    first = run_forward_pass(
+        reference.db_path,
+        out_dir,
+        [TouchEmitter()],
+        accumulators=[CountAccumulator()],
+        max_id=8,
+        **RESUME_KNOBS,
+    )
+    second = run_forward_pass(
+        reference.db_path,
+        out_dir,
+        [TouchEmitter()],
+        accumulators=[CountAccumulator()],
+        max_id=14,
+        **RESUME_KNOBS,
+    )
+
+    assert (first.rows, first.last_id) == (8, 8)
+    assert (second.rows, second.last_id) == (6, 14)
+    assert [r["id"] for r in partitions(out_dir)["touch/KXHIGHDEN"]] == [
+        1,
+        2,
+        3,
+        6,
+        8,
+        10,
+        11,
+        12,
+        14,
+    ]
 
 
 def test_pass_result_reports_what_it_consumed(tmp_path: Path, db_path: Path) -> None:
