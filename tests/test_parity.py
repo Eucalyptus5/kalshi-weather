@@ -303,3 +303,67 @@ def test_depth_is_compared_as_int_and_never_quantized(tmp_path: Path) -> None:
     assert [type(value) for value in depths.values()] == [int, int, int, int]
     assert str(depths["yes_bid_depth"]) == "9"
     assert dict(outcome.pass_view.ladder)["yes"] == (("0.4000", "9.00"),)
+
+
+def _two_snapshot_tape() -> list[tuple[object, ...]]:
+    rows = [
+        book(1, DEN, 0.0, 1, "yes", "0.4000", "10.00", True),
+        book(2, DEN, 0.0, 1, "yes", "0.3900", "5.00", True),
+        book(3, DEN, 0.0, 1, "no", "0.5500", "7.00", True),
+        book(4, DEN, 0.0, 1, "no", "0.5400", "3.00", True),
+    ]
+    row_id = 5
+    for step in range(30):
+        rows.append(book(row_id, DEN, 1.0 + step * 0.1, 10 + step, "yes", "0.4000", "1.00"))
+        row_id += 1
+    rows.extend(
+        [
+            book(row_id, DEN, 10.0, 100, "yes", "0.3000", "6.00", True),
+            book(row_id + 1, DEN, 10.0, 100, "yes", "0.2900", "2.00", True),
+            book(row_id + 2, DEN, 10.0, 100, "no", "0.6000", "4.00", True),
+            book(row_id + 3, DEN, 11.0, 101, "yes", "0.3000", "1.00"),
+            book(row_id + 4, DEN, 12.0, 102, "no", "0.6000", "-1.00"),
+            book(row_id + 5, DEN, 13.0, 103, "no", "0.5900", "3.00"),
+            book(row_id + 6, DEN, 20.0, 104, "yes", "0.3100", "2.00"),
+        ]
+    )
+    return rows
+
+
+def test_the_fold_replays_the_whole_ticker_stream_not_just_the_governing_snapshot(
+    tmp_path: Path,
+) -> None:
+    rows = _two_snapshot_tape()
+    db_path = build_db(tmp_path / "state.db", rows)
+    stamps = [row[2] for row in rows]
+    cutoff = at(15.0).strftime(DB_TS)
+    governing = at(10.0).strftime(DB_TS)
+    whole_stream = sum(1 for stamp in stamps if stamp <= cutoff)
+    from_governing = sum(1 for stamp in stamps if governing <= stamp <= cutoff)
+    assert (whole_stream, from_governing) == (40, 6)
+
+    result = compare_points(db_path, [point(DEN, 15.0)], [])
+
+    outcome = result.results[0]
+    assert result.rows_read == whole_stream
+    assert outcome.blind is False
+    assert outcome.status == "agreed"
+    assert outcome.pass_view == outcome.oracle_view
+    assert dict(outcome.pass_view.ladder)["yes"] == (("0.3000", "7.00"), ("0.2900", "2.00"))
+
+
+IDS_OUT_OF_ORDER = [
+    book(1, DEN, 0.0, 1, "yes", "0.4000", "10.00", True),
+    book(2, DEN, 0.0, 1, "no", "0.5500", "7.00", True),
+    book(9, DEN, 1.0, 2, "yes", "0.4100", "2.00"),
+    book(5, DEN, 2.0, 3, "yes", "0.4200", "1.00"),
+]
+
+
+def test_the_fold_refuses_a_row_whose_id_falls_while_received_at_rises(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", IDS_OUT_OF_ORDER)
+
+    with pytest.raises(ValueError) as excinfo:
+        compare_points(db_path, [point(DEN, 3.0)], [])
+
+    assert str(excinfo.value) == f"{DEN} id 5 follows id 9 in received_at order"
