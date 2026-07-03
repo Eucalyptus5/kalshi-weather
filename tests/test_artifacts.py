@@ -137,6 +137,13 @@ DEPTH_ROWS = [
     _book(i + 1, DEN, 0, 1, "yes", f"0.{10 + i}00", f"{i + 1}.00", True) for i in range(8)
 ] + [_book(i + 9, DEN, 0, 1, "no", f"0.{20 + i}00", f"{i + 1}.00", True) for i in range(8)]
 
+RESUME_ROWS = [
+    _book(1, CHI, 0, 1, "yes", "0.1000", "5.00", True),
+    _book(2, RAIN, 0, 1, "yes", "0.3000", "5.00", True),
+    _book(3, LOW, 0, 1, "yes", "0.2000", "5.00", True),
+    _book(4, RAIN, 0, 2, "yes", "0.3100", "4.00", False),
+]
+
 TRADE_ROWS = [
     _trade(1, DEN, 0, "0.07", "3", "yes"),
     _trade(2, RAIN, 61, "0.2000", "12", "no"),
@@ -446,6 +453,30 @@ def test_the_inventory_records_the_ladder_scope_the_roots_it_hit_and_the_depth(
     assert scalars["ladder_scope"] == "KXHIGH,KXLOW"
     assert scalars["ladder_roots"] == "KXHIGHCHI,KXHIGHDEN"
     assert scalars["ladder_depth"] == "6"
+    assert scalars["tickers"] == "3"
+
+
+def test_the_inventory_names_every_root_the_pass_wrote_not_only_the_resumed_segment(
+    tmp_path: Path,
+) -> None:
+    out_dir = tmp_path / "out"
+    db = build_book_db(tmp_path / "resume.db", RESUME_ROWS)
+    run_forward_pass(db, out_dir, [LadderEmitter()], accumulators=[TickerInventory()], max_id=2)
+    emitter = LadderEmitter()
+    tickers = TickerInventory()
+    run_forward_pass(db, out_dir, [emitter], accumulators=[tickers])
+    inventory = build_inventory(ExclusionInventory([]), SeqBoundaryDetector(), tickers)
+    write_inventory(out_dir, inventory, FULL_BUDGET, ladder=emitter)
+
+    assert sorted(name for name in artifact(out_dir) if name.startswith("ladder/")) == [
+        "ladder/KXHIGHCHI-2026-07-19-b000001.parquet",
+        "ladder/KXLOWTCHI-2026-07-19-b000002.parquet",
+    ]
+    assert emitter.roots == {"KXLOWTCHI"}
+    scalars = {
+        r["name"]: r["value"] for r in artifact(out_dir)["inventory/scalars-b000000.parquet"]
+    }
+    assert scalars["ladder_roots"] == "KXHIGHCHI,KXLOWTCHI"
     assert scalars["tickers"] == "3"
 
 

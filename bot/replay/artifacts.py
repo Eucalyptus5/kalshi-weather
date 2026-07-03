@@ -379,7 +379,7 @@ def write_inventory(
         "budget_wal_bytes": str(budget.wal),
         "budget_bytes": str(budget.budget_bytes),
         "ladder_scope": "none" if ladder is None else ",".join(ladder.scope),
-        "ladder_roots": "none" if ladder is None else ",".join(sorted(ladder.roots)),
+        "ladder_roots": "none" if ladder is None else _emitted_roots(out_dir / ladder.name),
         "ladder_depth": "none" if ladder is None else str(ladder.depth),
         "bytes_written": str(bytes_written(out_dir)),
         **(extra or {}),
@@ -446,6 +446,12 @@ def write_inventory(
 # checkpoint's, so a hand-written artifact stamped this way survives a resume.
 def _stamped(directory: Path, name: str) -> Path:
     return directory / f"{name}-b000000.parquet"
+
+
+# A resumed pass re-reads only the rows above its checkpoint, so the emitter's in-process root
+# set names the last segment alone; the directory carries every root the pass ever wrote.
+def _emitted_roots(directory: Path) -> str:
+    return ",".join(sorted({path.name.split("-")[0] for path in directory.glob("*.parquet")}))
 
 
 def _live(levels: dict[Decimal, Decimal]) -> list[tuple[Decimal, Decimal]]:
