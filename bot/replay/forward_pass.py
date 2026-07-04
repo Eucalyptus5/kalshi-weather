@@ -186,10 +186,12 @@ class _Pass:
         self.since_barrier = 0
         self._checkpoint()
         logger.info(
-            "forward_pass barrier=%d id=%d rows=%d elapsed_s=%.3f",
+            "forward_pass barrier=%d id=%d rows=%d ladders=%d levels=%d elapsed_s=%.3f",
             self.barrier,
             self.last_id,
             self.rows,
+            len(self.ladders),
+            sum(len(side) for ladder in self.ladders.values() for side in ladder.levels.values()),
             time.monotonic() - self.started,
         )
 
