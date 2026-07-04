@@ -9,6 +9,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot.replay.parity import (  # noqa: E402
+    AGREED,
+    AGREED_ON_RAISE,
+    DISAGREED,
+    EXCLUDED,
     ParityResult,
     compare_points,
     gap_windows,
@@ -37,11 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def format_result(result: ParityResult, elapsed_s: float) -> str:
     counts = result.counts()
+    scalars = result.scalars()
     lines = [
         "== PARITY vs book_state_at",
-        f"points={len(result.results)}  compared={counts['agreed'] + counts['disagreed']}  "
-        f"agreed={counts['agreed']}  agreed_on_raise={counts['agreed_on_raise']}  "
-        f"excluded_tied_delta={counts['excluded_tied_delta']}  disagreed={counts['disagreed']}",
+        f"points={len(result.results)}  compared={scalars['parity_compared']}  "
+        f"agreed={counts[AGREED]}  agreed_on_raise={counts[AGREED_ON_RAISE]}  "
+        f"excluded_tied_delta={counts[EXCLUDED]}  disagreed={counts[DISAGREED]}",
         f"blind={sum(1 for r in result.results if r.blind)}  rows_read={result.rows_read}  "
         f"elapsed_s={elapsed_s:.1f}",
         "-- by kind",
@@ -50,7 +55,7 @@ def format_result(result: ParityResult, elapsed_s: float) -> str:
         "  " + "  ".join(f"{k}={n}" for k, n in sorted(result.cohorts().items())),
         "-- inventory scalars",
     ]
-    lines.extend(f"  {name}={value}" for name, value in sorted(result.scalars().items()))
+    lines.extend(f"  {name}={value}" for name, value in sorted(scalars.items()))
     lines.append("-- disagreements")
     if not result.disagreements():
         lines.append("  none")

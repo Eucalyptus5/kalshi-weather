@@ -39,6 +39,9 @@ _STREAM = (
     "SELECT id, received_at, seq, side, price, size, is_snapshot FROM ws_book_events "
     "WHERE ticker = ? AND received_at <= ? ORDER BY received_at, id"
 )
+# Copied from bot.lag.ws_book rather than imported, for the reason ladder._best gives, and must
+# stay identical to it: _oracle_levels has to govern off the same batch and deltas book_state_at
+# used, or the re-derived ladder describes a different book than the touch row it is compared to.
 _LATEST_SNAPSHOT = (
     "SELECT received_at, seq FROM ws_book_events "
     "WHERE ticker = ? AND is_snapshot = 1 AND received_at <= ? "
@@ -271,10 +274,18 @@ def _window_points(
     detected_at_db = _db(window.detected_at)
     candidates = [window.ticker] if window.ticker else [row[0] for row in ranked]
     ticker = next(
-        name
-        for name in candidates
-        if conn.execute(_SNAPSHOT_BEFORE, (name, detected_at_db)).fetchone() is not None
+        (
+            name
+            for name in candidates
+            if conn.execute(_SNAPSHOT_BEFORE, (name, detected_at_db)).fetchone() is not None
+        ),
+        None,
     )
+    if ticker is None:
+        raise ValueError(
+            f"ws gap {window.gap_id} has no ticker with a snapshot at or before it: "
+            f"ticker={window.ticker} detected_at={detected_at_db} reason={window.reason}"
+        )
     points = [SamplePoint(ticker, window.detected_at, "post_gap", "gap")]
     before = conn.execute(_LAST_BEFORE, (ticker, detected_at_db)).fetchone()
     points.append(SamplePoint(ticker, _parse(before[0]), "gap_edge", "gap"))

@@ -283,6 +283,31 @@ def test_the_sampled_slice_agrees_everywhere(tmp_path: Path) -> None:
     assert result.counts()["agreed"] > 20
 
 
+UNSUBSCRIBED_AT_THE_GAP = [
+    book(1, DEN, 0.0, 1, "yes", "0.4000", "10.00", True),
+    book(2, DEN, 0.0, 1, "no", "0.5500", "7.00", True),
+    book(3, CHI, 0.5, 2, "yes", "0.2000", "4.00", True),
+    book(4, CHI, 0.5, 2, "no", "0.7000", "6.00", True),
+    book(5, DEN, 2.0, 3, "yes", "0.4100", "2.00"),
+    book(6, BOS, 20.0, 4, "yes", "0.1000", "3.00", True),
+    book(7, BOS, 21.0, 5, "yes", "0.1000", "1.00"),
+]
+
+
+def test_a_ticker_scoped_gap_with_nothing_to_probe_names_the_gap(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", UNSUBSCRIBED_AT_THE_GAP, [gap(1, BOS, 11.0)])
+    windows = gap_windows(db_path)
+    assert [(w.gap_id, w.ticker) for w in windows] == [(1, BOS)]
+
+    with pytest.raises(ValueError) as excinfo:
+        sample_points(db_path, 40, windows)
+
+    assert str(excinfo.value) == (
+        f"ws gap 1 has no ticker with a snapshot at or before it: ticker={BOS} "
+        f"detected_at={at(11.0).strftime(DB_TS)} reason=connection_reset"
+    )
+
+
 FRACTIONAL = [
     book(1, DEN, 0.0, 1, "yes", "0.4000", "9.00", True),
     book(2, DEN, 0.0, 1, "no", "0.5500", "7.24", True),
