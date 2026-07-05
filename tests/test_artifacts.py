@@ -9,7 +9,9 @@ import pytest
 
 from bot.markets.parser import series_id
 from bot.replay.artifacts import (
+    LADDER_DEPTH,
     MIN_DISK_FREE_FRACTION,
+    TOUCH_SCHEMA,
     BudgetExceeded,
     BudgetGuard,
     ByteBudget,
@@ -355,6 +357,41 @@ def test_the_ladder_carries_six_levels_a_side_and_still_counts_them_all(tmp_path
     assert row["no_prices"] == ["0.2700", "0.2600", "0.2500", "0.2400", "0.2300", "0.2200"]
     assert row["no_sizes"] == ["8.00", "7.00", "6.00", "5.00", "4.00", "3.00"]
     assert row["no_levels"] == 8
+
+
+def test_the_depth_slice_does_not_shorten_the_level_count(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out"
+    run_forward_pass(
+        build_book_db(tmp_path / "count.db", DEPTH_ROWS),
+        out_dir,
+        [LadderEmitter()],
+        barrier_rows=10_000,
+    )
+
+    row = artifact(out_dir)["ladder/KXHIGHDEN-2026-07-19-b000001.parquet"][-1]
+    for side in ("yes", "no"):
+        prices = [Decimal(price) for price in row[f"{side}_prices"]]
+        assert len(prices) == LADDER_DEPTH
+        assert len(row[f"{side}_sizes"]) == LADDER_DEPTH
+        assert prices == sorted(prices, reverse=True)
+        assert row[f"{side}_levels"] == 8
+
+
+def test_the_ladder_row_carries_the_touch_row_verbatim(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out"
+    run_forward_pass(
+        build_book_db(tmp_path / "both.db", DEPTH_ROWS),
+        out_dir,
+        [TouchEmitter(), LadderEmitter()],
+        barrier_rows=10_000,
+    )
+    files = artifact(out_dir)
+
+    ladder_rows = files["ladder/KXHIGHDEN-2026-07-19-b000001.parquet"]
+    touch_rows = files["touch/KXHIGHDEN-2026-07-19-b000001.parquet"]
+    assert len(ladder_rows) == len(DEPTH_ROWS)
+    for mine, theirs in zip(ladder_rows, touch_rows, strict=True):
+        assert {name: mine[name] for name in TOUCH_SCHEMA.names} == theirs
 
 
 def test_trades_are_their_own_artifact_with_no_price_derived_in_decimal(

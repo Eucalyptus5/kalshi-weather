@@ -117,7 +117,10 @@ class TouchEmitter:
     schema = TOUCH_SCHEMA
 
     def emit(self, row: SourceRow, ladder: Ladder) -> Iterator[tuple[str, dict[str, object]]]:
-        yield partition_key(row.ticker, row.received_at), _touch_row(row, ladder)
+        yield (
+            partition_key(row.ticker, row.received_at),
+            _touch_row(row, ladder.live("yes"), ladder.live("no")),
+        )
 
 
 # A prefix on the series root rather than the roots this tape happens to hold: a KXHIGH root
@@ -136,9 +139,9 @@ class LadderEmitter:
         if not root.startswith(self.scope):
             return
         self.roots.add(root)
-        yes = _live(ladder.levels["yes"])
-        no = _live(ladder.levels["no"])
-        out = _touch_row(row, ladder)
+        yes = ladder.live("yes")
+        no = ladder.live("no")
+        out = _touch_row(row, yes, no)
         out["yes_prices"] = [str(price) for price, _ in yes[: self.depth]]
         out["yes_sizes"] = [str(size) for _, size in yes[: self.depth]]
         out["yes_levels"] = len(yes)
@@ -454,20 +457,19 @@ def _emitted_roots(directory: Path) -> str:
     return ",".join(sorted({path.name.split("-")[0] for path in directory.glob("*.parquet")}))
 
 
-def _live(levels: dict[Decimal, Decimal]) -> list[tuple[Decimal, Decimal]]:
-    return sorted(((p, s) for p, s in levels.items() if s > 0), reverse=True)
-
-
-def _best(levels: dict[Decimal, Decimal]) -> tuple[Decimal, Decimal]:
-    live = [(price, size) for price, size in levels.items() if size > 0]
+def _best(live: list[tuple[Decimal, Decimal]]) -> tuple[Decimal, Decimal]:
     if not live:
         return _ZERO_PRICE, _ZERO_SIZE
-    return max(live, key=lambda level: level[0])
+    return live[0]
 
 
-def _touch_row(row: SourceRow, ladder: Ladder) -> dict[str, object]:
-    yes_bid, yes_bid_depth = _best(ladder.levels["yes"])
-    no_bid, no_bid_depth = _best(ladder.levels["no"])
+def _touch_row(
+    row: SourceRow,
+    yes: list[tuple[Decimal, Decimal]],
+    no: list[tuple[Decimal, Decimal]],
+) -> dict[str, object]:
+    yes_bid, yes_bid_depth = _best(yes)
+    no_bid, no_bid_depth = _best(no)
     return {
         "id": row.id,
         "ticker": row.ticker,

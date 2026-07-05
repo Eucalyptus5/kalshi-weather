@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from bot.replay.ladder import BookEvent, Ladder
+from bot.replay.ladder import _ZERO, _best, BookEvent, Ladder
 
 
 UTC = timezone.utc
@@ -168,6 +168,58 @@ def test_empty_side_maps_to_one_at_zero_depth(ladder: Ladder) -> None:
     assert empty.no_ask == Decimal("1")
     assert empty.yes_bid_depth == 0
     assert empty.no_ask_depth == 0
+
+
+def test_live_is_price_descending(ladder: Ladder) -> None:
+    _composed(ladder)
+    assert ladder.live("yes") == [
+        (Decimal("0.4100"), Decimal("2.00")),
+        (Decimal("0.4000"), Decimal("10.00")),
+    ]
+    assert ladder.live("no") == [
+        (Decimal("0.5500"), Decimal("5.00")),
+        (Decimal("0.5400"), Decimal("3.00")),
+        (Decimal("0.5300"), Decimal("8.00")),
+    ]
+
+
+def test_live_drops_a_level_the_snapshot_recorded_at_zero(ladder: Ladder) -> None:
+    ladder.apply(_snapshot("yes", "0.4000", "10.00"))
+    ladder.apply(_snapshot("yes", "0.3900", "0.00"))
+    ladder.apply(_snapshot("yes", "0.3800", "2.00"))
+    assert ladder.levels["yes"][Decimal("0.3900")] == Decimal("0.00")
+    assert ladder.live("yes") == [
+        (Decimal("0.4000"), Decimal("10.00")),
+        (Decimal("0.3800"), Decimal("2.00")),
+    ]
+
+
+def test_live_reflects_the_apply_that_follows_it(ladder: Ladder) -> None:
+    ladder.apply(_snapshot("yes", "0.4000", "10.00"))
+    assert ladder.live("yes") == [(Decimal("0.4000"), Decimal("10.00"))]
+    ladder.apply(_delta("yes", "0.4100", "2.00"))
+    assert ladder.live("yes") == [
+        (Decimal("0.4100"), Decimal("2.00")),
+        (Decimal("0.4000"), Decimal("10.00")),
+    ]
+    ladder.apply(_delta("yes", "0.4100", "-2.00", seq=3))
+    assert ladder.live("yes") == [(Decimal("0.4000"), Decimal("10.00"))]
+
+
+def test_live_hands_back_one_list_between_applies(ladder: Ladder) -> None:
+    _composed(ladder)
+    first = ladder.live("yes")
+    assert ladder.live("yes") is first
+    assert ladder.live("no") is ladder.live("no")
+    ladder.apply(_delta("yes", "0.4200", "1.00", seq=6))
+    assert ladder.live("yes") is not first
+
+
+def test_empty_side_has_no_live_levels(ladder: Ladder) -> None:
+    ladder.apply(_snapshot("yes", "0.4000", "10.00"))
+    assert ladder.live("no") == []
+    assert _best(ladder.live("no")) == (_ZERO, 0)
+    assert Ladder(TICKER).live("yes") == []
 
 
 def test_price_that_does_not_fit_four_decimals_raises(ladder: Ladder) -> None:

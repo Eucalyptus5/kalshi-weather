@@ -29,8 +29,11 @@ class Ladder:
         self.ticker = ticker
         self.levels: dict[str, dict[Decimal, Decimal]] = {"yes": {}, "no": {}}
         self.batch_key: tuple[datetime, int] | None = None
+        self._live: dict[str, list[tuple[Decimal, Decimal]] | None] = {"yes": None, "no": None}
 
     def apply(self, event: BookEvent) -> None:
+        self._live["yes"] = None
+        self._live["no"] = None
         price = _quantized(self.ticker, "price", event.price, _PRICE_EXPONENT)
         size = _quantized(self.ticker, "size", event.size, _SIZE_EXPONENT)
         if event.is_snapshot:
@@ -53,9 +56,19 @@ class Ladder:
         else:
             levels[price] = total
 
+    def live(self, side: str) -> list[tuple[Decimal, Decimal]]:
+        cached = self._live[side]
+        if cached is None:
+            cached = sorted(
+                ((price, size) for price, size in self.levels[side].items() if size > _ZERO),
+                reverse=True,
+            )
+            self._live[side] = cached
+        return cached
+
     def row(self, at: datetime) -> OrderbookSnapshotRow:
-        yes_bid, yes_bid_depth = _best(self.levels["yes"])
-        no_bid, no_bid_depth = _best(self.levels["no"])
+        yes_bid, yes_bid_depth = _best(self.live("yes"))
+        no_bid, no_bid_depth = _best(self.live("no"))
         return OrderbookSnapshotRow(
             ticker=self.ticker,
             snapshot_at=at,
@@ -81,9 +94,8 @@ def _quantized(ticker: str, field: str, value: str, exponent: Decimal) -> Decima
 
 # Deliberately not imported from bot.lag.ws_book: the parity check compares the two touch
 # extractions against each other and shared code would make that comparison vacuous.
-def _best(levels: dict[Decimal, Decimal]) -> tuple[Decimal, int]:
-    live = [(price, size) for price, size in levels.items() if size > 0]
+def _best(live: list[tuple[Decimal, Decimal]]) -> tuple[Decimal, int]:
     if not live:
         return _ZERO, 0
-    price, size = max(live, key=lambda level: level[0])
+    price, size = live[0]
     return price, int(size)
