@@ -15,7 +15,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from bot.replay.forward_pass import JsonState, PassResult, SourceRow, run_forward_pass
+from bot.replay.forward_pass import (
+    JsonState,
+    PassResult,
+    SourceRow,
+    _PartitionWriter,
+    run_forward_pass,
+)
 from bot.replay.ladder import Ladder
 
 
@@ -49,6 +55,8 @@ TOUCH_SCHEMA = pa.schema(
         ("no_bid_depth", pa.int64()),
     ]
 )
+
+WRITER_SCHEMA = pa.schema([("id", pa.int64()), ("ticker", pa.string()), ("ts_ms", pa.int64())])
 
 
 def _ts(offset_s: int) -> str:
@@ -739,6 +747,66 @@ def test_the_ceiling_bounds_the_end_and_leaves_the_checkpoint_to_bound_the_start
         12,
         14,
     ]
+
+
+def test_a_null_field_shares_its_row_group_with_populated_rows(tmp_path: Path) -> None:
+    path = tmp_path / "nulls.parquet"
+    rows: list[dict[str, object]] = [
+        {"id": 1, "ticker": DEN, "ts_ms": 1_753_000_000_001},
+        {"id": 2, "ticker": DEN, "ts_ms": None},
+        {"id": 3, "ticker": CHI, "ts_ms": None},
+        {"id": 4, "ticker": CHI, "ts_ms": 1_753_000_000_004},
+    ]
+    writer = _PartitionWriter(path, WRITER_SCHEMA, 4)
+    for row in rows:
+        writer.add(row)
+    writer.close()
+
+    table = pq.read_table(path)
+    assert table.schema.equals(WRITER_SCHEMA)
+    assert table.to_pylist() == rows
+    assert table.column("ts_ms").null_count == 2
+    assert row_group_rows(path) == [4]
+
+
+def test_row_groups_close_at_exactly_the_row_group_size(tmp_path: Path) -> None:
+    path = tmp_path / "groups.parquet"
+    size = 5
+    writer = _PartitionWriter(path, WRITER_SCHEMA, size)
+    for row_id in range(2 * size + 1):
+        writer.add({"id": row_id, "ticker": DEN, "ts_ms": None})
+    writer.close()
+
+    assert row_group_rows(path) == [size, size, 1]
+    assert [r["id"] for r in pq.read_table(path).to_pylist()] == list(range(2 * size + 1))
+
+
+def test_close_writes_the_rows_left_in_a_partial_buffer(tmp_path: Path) -> None:
+    path = tmp_path / "partial.parquet"
+    writer = _PartitionWriter(path, WRITER_SCHEMA, 100)
+    for row_id in range(3):
+        writer.add({"id": row_id, "ticker": CHI, "ts_ms": row_id})
+    writer.close()
+
+    assert row_group_rows(path) == [3]
+    assert pq.read_table(path).to_pylist() == [
+        {"id": 0, "ticker": CHI, "ts_ms": 0},
+        {"id": 1, "ticker": CHI, "ts_ms": 1},
+        {"id": 2, "ticker": CHI, "ts_ms": 2},
+    ]
+
+
+def test_a_flush_leaves_nothing_behind_for_the_next_one(tmp_path: Path) -> None:
+    path = tmp_path / "cleared.parquet"
+    size = 4
+    writer = _PartitionWriter(path, WRITER_SCHEMA, size)
+    for row_id in range(2 * size):
+        writer.add({"id": row_id, "ticker": DEN, "ts_ms": None})
+    writer.close()
+
+    assert pq.ParquetFile(path).metadata.num_rows == 2 * size
+    assert row_group_rows(path) == [size, size]
+    assert [r["id"] for r in pq.read_table(path).to_pylist()] == list(range(2 * size))
 
 
 def test_pass_result_reports_what_it_consumed(tmp_path: Path, db_path: Path) -> None:

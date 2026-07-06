@@ -91,15 +91,18 @@ class _PartitionWriter:
         self._writer = pq.ParquetWriter(self._handle, schema)
         self._schema = schema
         self._row_group_rows = row_group_rows
-        self._buffer: list[dict[str, object]] = []
+        self._columns: dict[str, list[object]] = {name: [] for name in schema.names}
+        self._rows = 0
 
     def add(self, row: dict[str, object]) -> None:
-        self._buffer.append(row)
-        if len(self._buffer) == self._row_group_rows:
+        for name, column in self._columns.items():
+            column.append(row[name])
+        self._rows += 1
+        if self._rows == self._row_group_rows:
             self._flush()
 
     def close(self) -> None:
-        if self._buffer:
+        if self._rows:
             self._flush()
         self._writer.close()
         self._handle.flush()
@@ -107,9 +110,11 @@ class _PartitionWriter:
         self._handle.close()
 
     def _flush(self) -> None:
-        table = pa.Table.from_pylist(self._buffer, schema=self._schema)
+        table = pa.Table.from_pydict(self._columns, schema=self._schema)
         self._writer.write_table(table, row_group_size=self._row_group_rows)
-        self._buffer.clear()
+        for column in self._columns.values():
+            column.clear()
+        self._rows = 0
 
 
 class _Pass:
