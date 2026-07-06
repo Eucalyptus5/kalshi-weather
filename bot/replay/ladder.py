@@ -32,8 +32,7 @@ class Ladder:
         self._live: dict[str, list[tuple[Decimal, Decimal]] | None] = {"yes": None, "no": None}
 
     def apply(self, event: BookEvent) -> None:
-        self._live["yes"] = None
-        self._live["no"] = None
+        self._live[event.side] = None
         price = _quantized(self.ticker, "price", event.price, _PRICE_EXPONENT)
         size = _quantized(self.ticker, "size", event.size, _SIZE_EXPONENT)
         if event.is_snapshot:
@@ -42,6 +41,8 @@ class Ladder:
                 self.batch_key = key
                 self.levels["yes"].clear()
                 self.levels["no"].clear()
+                self._live["yes"] = None
+                self._live["no"] = None
             self.levels[event.side][price] = size
             return
         levels = self.levels[event.side]
@@ -56,8 +57,9 @@ class Ladder:
         else:
             levels[price] = total
 
-    # apply is the only invalidation point, so nothing may mutate self.levels outside it, and
-    # the caller gets the cached list itself rather than a copy. Both _best implementations read
+    # apply is the only invalidation point, so nothing may mutate self.levels outside it. It drops
+    # just the side it names, except on a snapshot-batch rollover, which resets both sides. The
+    # caller gets the cached list itself rather than a copy. Both _best implementations read
     # element zero rather than scanning, so the descending order is load-bearing.
     def live(self, side: str) -> list[tuple[Decimal, Decimal]]:
         cached = self._live[side]

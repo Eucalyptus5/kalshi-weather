@@ -215,6 +215,40 @@ def test_live_hands_back_one_list_between_applies(ladder: Ladder) -> None:
     assert ladder.live("yes") is not first
 
 
+def test_a_delta_leaves_the_other_sides_cached_list_alone(ladder: Ladder) -> None:
+    _composed(ladder)
+    yes_first = ladder.live("yes")
+    no_first = ladder.live("no")
+    ladder.apply(_delta("yes", "0.4200", "1.00", seq=6))
+    assert ladder.live("no") is no_first
+    assert ladder.live("yes") is not yes_first
+
+
+def test_snapshot_batch_rollover_drops_the_untouched_sides_cache(ladder: Ladder) -> None:
+    ladder.apply(_snapshot("yes", "0.4000", "10.00"))
+    ladder.apply(_snapshot("no", "0.5500", "7.00"))
+    assert ladder.live("no") == [(Decimal("0.5500"), Decimal("7.00"))]
+    ladder.apply(_snapshot("yes", "0.3000", "1.00", seq=3, at=T1))
+    assert ladder.live("no") == []
+    assert ladder.live("yes") == [(Decimal("0.3000"), Decimal("1.00"))]
+    assert ladder.row(T1).no_bid == Decimal("0")
+    assert ladder.row(T1).no_bid_depth == 0
+
+
+def test_snapshot_continuing_a_batch_leaves_the_other_side_intact(ladder: Ladder) -> None:
+    ladder.apply(_snapshot("yes", "0.4000", "10.00"))
+    ladder.apply(_snapshot("no", "0.5500", "7.00"))
+    no_first = ladder.live("no")
+    ladder.apply(_snapshot("yes", "0.3900", "5.00"))
+    assert ladder.live("no") is no_first
+    assert ladder.live("yes") == [
+        (Decimal("0.4000"), Decimal("10.00")),
+        (Decimal("0.3900"), Decimal("5.00")),
+    ]
+    assert ladder.row(T0).no_bid == Decimal("0.5500")
+    assert ladder.row(T0).yes_bid == Decimal("0.4000")
+
+
 def test_empty_side_has_no_live_levels(ladder: Ladder) -> None:
     ladder.apply(_snapshot("yes", "0.4000", "10.00"))
     assert ladder.live("no") == []
