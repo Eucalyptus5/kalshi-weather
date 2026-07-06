@@ -56,6 +56,9 @@ class Ladder:
         else:
             levels[price] = total
 
+    # apply is the only invalidation point, so nothing may mutate self.levels outside it, and
+    # the caller gets the cached list itself rather than a copy. Both _best implementations read
+    # element zero rather than scanning, so the descending order is load-bearing.
     def live(self, side: str) -> list[tuple[Decimal, Decimal]]:
         cached = self._live[side]
         if cached is None:
