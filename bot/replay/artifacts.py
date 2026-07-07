@@ -3,14 +3,20 @@ import os
 import sqlite3
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from bot.replay.forward_pass import ROW_GROUP_ROWS, _DB_TS, JsonState, SourceRow, _PartitionWriter
+from bot.replay.forward_pass import (
+    ROW_GROUP_ROWS,
+    JsonState,
+    SourceRow,
+    _PartitionWriter,
+    _decode_ts,
+)
 from bot.replay.inventory import PassInventory
 from bot.replay.ladder import _PRICE_EXPONENT, _SIZE_EXPONENT, _quantized, Ladder
 
@@ -490,7 +496,7 @@ def _trade_row(
     raw: tuple[int, str, str, str, str, str, str, int],
 ) -> tuple[str, dict[str, object]]:
     ticker = raw[1]
-    received_at = datetime.strptime(raw[2], _DB_TS).replace(tzinfo=timezone.utc)
+    received_at = _decode_ts(raw[2])
     yes_price = _quantized(ticker, "yes_price", raw[3], _PRICE_EXPONENT)
     return partition_key(ticker, received_at), {
         "id": raw[0],

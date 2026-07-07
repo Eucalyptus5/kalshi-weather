@@ -20,6 +20,7 @@ from bot.replay.forward_pass import (
     PassResult,
     SourceRow,
     _PartitionWriter,
+    _decode_ts,
     run_forward_pass,
 )
 from bot.replay.ladder import Ladder
@@ -807,6 +808,45 @@ def test_a_flush_leaves_nothing_behind_for_the_next_one(tmp_path: Path) -> None:
     assert pq.ParquetFile(path).metadata.num_rows == 2 * size
     assert row_group_rows(path) == [size, size]
     assert [r["id"] for r in pq.read_table(path).to_pylist()] == list(range(2 * size))
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        "2026-07-19 04:59:00.000000",
+        "2026-07-19 04:59:00.999999",
+        "2026-07-19 04:59:00.000042",
+        "2026-07-19 00:00:00.000000",
+        "2026-07-19 23:59:59.999999",
+        "2024-02-29 12:00:00.500000",
+        "2026-01-02 03:04:05.000007",
+    ],
+)
+def test_a_stored_stamp_decodes_to_what_strptime_returns(stamp: str) -> None:
+    expected = datetime.strptime(stamp, DB_TS).replace(tzinfo=UTC)
+    decoded = _decode_ts(stamp)
+
+    assert decoded == expected
+    assert decoded.tzinfo is expected.tzinfo
+    assert decoded.timetuple() == expected.timetuple()
+    assert decoded.microsecond == expected.microsecond
+
+
+def test_a_stamp_narrower_than_the_stored_width_decodes_its_microseconds_whole() -> None:
+    decoded = _decode_ts("2026-07-19 04:59:00.262")
+
+    assert decoded == datetime(2026, 7, 19, 4, 59, 0, 262000, tzinfo=UTC)
+    assert decoded.microsecond == 262000
+    assert decoded.tzinfo is UTC
+
+
+@pytest.mark.parametrize(
+    "stamp",
+    ["2026-13-45 99:99:99.000000", "2026-07-19 04:59:0x.155692", "nowhere near a timestamp"],
+)
+def test_a_malformed_stamp_raises(stamp: str) -> None:
+    with pytest.raises(ValueError):
+        _decode_ts(stamp)
 
 
 def test_pass_result_reports_what_it_consumed(tmp_path: Path, db_path: Path) -> None:

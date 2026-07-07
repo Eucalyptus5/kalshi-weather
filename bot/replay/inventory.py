@@ -1,11 +1,11 @@
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from bot.lag.ws_book import WsGapError
-from bot.replay.forward_pass import _DB_TS, JsonState, SourceRow
+from bot.replay.forward_pass import _DB_TS, JsonState, SourceRow, _decode_ts
 
 
 _GAPS = "SELECT id, ticker, detected_at, last_seq, reason FROM ws_gaps ORDER BY detected_at, id"
@@ -49,7 +49,7 @@ def read_gap_rows(db_path: Path) -> list[GapRow]:
         GapRow(
             id=row[0],
             ticker=row[1],
-            detected_at=_parse(row[2]),
+            detected_at=_decode_ts(row[2]),
             last_seq=row[3],
             reason=row[4],
         )
@@ -112,7 +112,7 @@ class ExclusionInventory:
     def restore(self, state: JsonState) -> None:
         self._last = _parse_optional(state["last"])
         self._edges = {
-            int(gap_id): (_parse_optional(edges[0]), _parse(edges[1]))
+            int(gap_id): (_parse_optional(edges[0]), _decode_ts(edges[1]))
             for gap_id, edges in state["edges"].items()
         }
         self._pending = [row for row in self._gaps if row.id not in self._edges]
@@ -178,11 +178,11 @@ class SeqBoundaryDetector:
 
     def restore(self, state: JsonState) -> None:
         last = state["last"]
-        self._last = None if last is None else (_parse(last[0]), last[1])
+        self._last = None if last is None else (_decode_ts(last[0]), last[1])
         self._boundaries = [
             SeqBoundary(
                 id=boundary["id"],
-                received_at=_parse(boundary["received_at"]),
+                received_at=_decode_ts(boundary["received_at"]),
                 prev_seq=boundary["prev_seq"],
                 seq=boundary["seq"],
                 kind=boundary["kind"],
@@ -235,8 +235,8 @@ class TickerInventory:
 
     def restore(self, state: JsonState) -> None:
         self._rows = dict(state["rows"])
-        self._first = {ticker: _parse(at) for ticker, at in state["first"].items()}
-        self._last = {ticker: _parse(at) for ticker, at in state["last"].items()}
+        self._first = {ticker: _decode_ts(at) for ticker, at in state["first"].items()}
+        self._last = {ticker: _decode_ts(at) for ticker, at in state["last"].items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,13 +265,9 @@ def build_inventory(
     )
 
 
-def _parse(value: str) -> datetime:
-    return datetime.strptime(value, _DB_TS).replace(tzinfo=timezone.utc)
-
-
 def _format(value: datetime | None) -> str | None:
     return None if value is None else value.strftime(_DB_TS)
 
 
 def _parse_optional(value: str | None) -> datetime | None:
-    return None if value is None else _parse(value)
+    return None if value is None else _decode_ts(value)

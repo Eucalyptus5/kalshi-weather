@@ -25,6 +25,7 @@ BARRIER_ROWS = 5_000_000
 CHECKPOINT_NAME = "checkpoint.json"
 
 _DB_TS = "%Y-%m-%d %H:%M:%S.%f"
+_DB_TS_WIDTH = 26
 _COLUMNS = "id, ticker, received_at, seq, side, price, size, is_snapshot, ts_ms"
 _SELECT = f"SELECT {_COLUMNS} FROM ws_book_events WHERE id > ? ORDER BY id LIMIT ?"
 _SELECT_BOUNDED = (
@@ -306,11 +307,30 @@ def run_forward_pass(
     )
 
 
+# SQLAlchemy renders a SQLite DATETIME with microseconds padded to six digits, so a stored stamp
+# is exactly 26 characters and these offsets are fixed. Slicing a narrower one is silently wrong
+# rather than an error: ".262" reads as 262 microseconds, not 262000. So the width gates the fast
+# path and anything else goes back through strptime.
+def _decode_ts(value: str) -> datetime:
+    if len(value) != _DB_TS_WIDTH:
+        return datetime.strptime(value, _DB_TS).replace(tzinfo=timezone.utc)
+    return datetime(
+        int(value[:4]),
+        int(value[5:7]),
+        int(value[8:10]),
+        int(value[11:13]),
+        int(value[14:16]),
+        int(value[17:19]),
+        int(value[20:]),
+        timezone.utc,
+    )
+
+
 def _source_row(raw: tuple[int, str, str, int, str, str, str, int, int | None]) -> SourceRow:
     return SourceRow(
         id=raw[0],
         ticker=raw[1],
-        received_at=datetime.strptime(raw[2], _DB_TS).replace(tzinfo=timezone.utc),
+        received_at=_decode_ts(raw[2]),
         seq=raw[3],
         side=raw[4],
         price=raw[5],
@@ -339,6 +359,5 @@ def _ladder_from_state(ticker: str, state: dict[str, JsonState]) -> Ladder:
     }
     batch_key = state["batch_key"]
     if batch_key is not None:
-        at = datetime.strptime(batch_key[0], _DB_TS).replace(tzinfo=timezone.utc)
-        ladder.batch_key = (at, batch_key[1])
+        ladder.batch_key = (_decode_ts(batch_key[0]), batch_key[1])
     return ladder
