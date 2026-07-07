@@ -828,8 +828,6 @@ def test_a_stored_stamp_decodes_to_what_strptime_returns(stamp: str) -> None:
 
     assert decoded == expected
     assert decoded.tzinfo is expected.tzinfo
-    assert decoded.timetuple() == expected.timetuple()
-    assert decoded.microsecond == expected.microsecond
 
 
 def test_a_stamp_narrower_than_the_stored_width_decodes_its_microseconds_whole() -> None:
@@ -845,6 +843,14 @@ def test_a_stamp_narrower_than_the_stored_width_decodes_its_microseconds_whole()
     ["2026-13-45 99:99:99.000000", "2026-07-19 04:59:0x.155692", "nowhere near a timestamp"],
 )
 def test_a_malformed_stamp_raises(stamp: str) -> None:
+    with pytest.raises(ValueError):
+        _decode_ts(stamp)
+
+
+@pytest.mark.parametrize(
+    "stamp", ["2026-07-19 04:59:00.155692+00:00", "2026-07-19 04:59:00.155692Z"]
+)
+def test_a_stamp_that_already_carries_an_offset_raises(stamp: str) -> None:
     with pytest.raises(ValueError):
         _decode_ts(stamp)
 

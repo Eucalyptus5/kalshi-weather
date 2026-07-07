@@ -8,7 +8,7 @@ from pathlib import Path
 
 from bot.lag.event_study import OrderbookSnapshotRow
 from bot.lag.ws_book import WsGapError, book_state_at
-from bot.replay.forward_pass import _COLUMNS, _DB_TS, SourceRow, _source_row
+from bot.replay.forward_pass import _COLUMNS, _DB_TS, SourceRow, _decode_ts, _source_row
 from bot.replay.inventory import (
     ExclusionInventory,
     ExclusionWindow,
@@ -241,7 +241,7 @@ def _ticker_points(
     for index, (received_at_db, seq, is_snapshot) in enumerate(
         conn.execute(_TICKER_STREAM, (ticker,))
     ):
-        received_at = _parse(received_at_db)
+        received_at = _decode_ts(received_at_db)
         if is_snapshot and (received_at_db, seq) != batch_key:
             batch_key = (received_at_db, seq)
             if previous is not None:
@@ -288,11 +288,11 @@ def _window_points(
         )
     points = [SamplePoint(ticker, window.detected_at, "post_gap", "gap")]
     before = conn.execute(_LAST_BEFORE, (ticker, detected_at_db)).fetchone()
-    points.append(SamplePoint(ticker, _parse(before[0]), "gap_edge", "gap"))
+    points.append(SamplePoint(ticker, _decode_ts(before[0]), "gap_edge", "gap"))
     after = conn.execute(_FIRST_AT_OR_AFTER, (ticker, detected_at_db)).fetchone()
     if after is not None:
-        points.append(SamplePoint(ticker, _parse(after[0]), "gap_edge", "gap"))
-        points.append(SamplePoint(ticker, _parse(after[0]) + TICK, "gap_edge", "gap"))
+        points.append(SamplePoint(ticker, _decode_ts(after[0]), "gap_edge", "gap"))
+        points.append(SamplePoint(ticker, _decode_ts(after[0]) + TICK, "gap_edge", "gap"))
     return points
 
 
@@ -433,7 +433,7 @@ def _pass_views(
             raise ValueError(f"{ticker} id {row_id} follows id {last_id} in received_at order")
         last_id = row_id
         rows += 1
-        received_at = _parse(received_at_db)
+        received_at = _decode_ts(received_at_db)
         while pending and pending[0] < received_at:
             t = pending.pop(0)
             out[t] = _view(ticker, ladder.row(t), ladder.levels)
@@ -512,7 +512,3 @@ def _connect(db_path: Path) -> sqlite3.Connection:
 
 def _db(t: datetime) -> str:
     return t.astimezone(timezone.utc).strftime(_DB_TS)
-
-
-def _parse(value: str) -> datetime:
-    return datetime.strptime(value, _DB_TS).replace(tzinfo=timezone.utc)
