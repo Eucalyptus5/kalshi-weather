@@ -63,6 +63,10 @@ class Emitter(Protocol):
 
     def emit(self, row: SourceRow, ladder: Ladder) -> Iterable[tuple[str, dict[str, object]]]: ...
 
+    def state(self) -> JsonState: ...
+
+    def restore(self, state: JsonState) -> None: ...
+
 
 class Accumulator(Protocol):
     name: str
@@ -157,6 +161,8 @@ class _Pass:
             self.poisoned_rows = dict(payload["poisoned_rows"])
             for accumulator in self.accumulators:
                 accumulator.restore(payload["accumulators"][accumulator.name])
+            for emitter in self.emitters:
+                emitter.restore(payload["emitters"][emitter.name])
             logger.info(
                 "forward_pass resume barrier=%d id=%d ladders=%d poisoned=%d",
                 self.barrier,
@@ -246,6 +252,7 @@ class _Pass:
             "poisoned": sorted(self.poisoned),
             "poisoned_rows": self.poisoned_rows,
             "accumulators": {a.name: a.state() for a in self.accumulators},
+            "emitters": {e.name: e.state() for e in self.emitters},
         }
         temp = self.out_dir / f"{CHECKPOINT_NAME}.tmp"
         with temp.open("w") as handle:

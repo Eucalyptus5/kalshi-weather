@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import sqlite3
@@ -128,6 +129,14 @@ class TouchEmitter:
             _touch_row(row, ladder.live("yes"), ladder.live("no")),
         )
 
+    # A touch row is a function of the ladder the pass already carries, so there is nothing here
+    # a barrier could lose.
+    def state(self) -> JsonState:
+        return None
+
+    def restore(self, state: JsonState) -> None:
+        pass
+
 
 # A prefix on the series root rather than the roots this tape happens to hold: a KXHIGH root
 # first recorded after the roots were counted would otherwise drop out of the artifact silently.
@@ -155,6 +164,15 @@ class LadderEmitter:
         out["no_sizes"] = [str(size) for _, size in no[: self.depth]]
         out["no_levels"] = len(no)
         yield partition_key(row.ticker, row.received_at), out
+
+    # Neither of the two other places this list could come from survives: a resume re-reads only
+    # the rows above its checkpoint, so the live set names the last segment alone, and the drain
+    # unlinks each parquet file once it is uploaded, so the directory empties out behind the pass.
+    def state(self) -> JsonState:
+        return sorted(self.roots)
+
+    def restore(self, state: JsonState) -> None:
+        self.roots = set(state)
 
 
 class BudgetExceeded(RuntimeError):
@@ -388,7 +406,7 @@ def write_inventory(
         "budget_wal_bytes": str(budget.wal),
         "budget_bytes": str(budget.budget_bytes),
         "ladder_scope": "none" if ladder is None else ",".join(ladder.scope),
-        "ladder_roots": "none" if ladder is None else _emitted_roots(out_dir / ladder.name),
+        "ladder_roots": "none" if ladder is None else ",".join(sorted(ladder.roots)),
         "ladder_depth": "none" if ladder is None else str(ladder.depth),
         "bytes_written": str(bytes_written(out_dir)),
         **(extra or {}),
@@ -457,10 +475,15 @@ def _stamped(directory: Path, name: str) -> Path:
     return directory / f"{name}-b000000.parquet"
 
 
-# A resumed pass re-reads only the rows above its checkpoint, so the emitter's in-process root
-# set names the last segment alone; the directory carries every root the pass ever wrote.
-def _emitted_roots(directory: Path) -> str:
-    return ",".join(sorted({path.name.split("-")[0] for path in directory.glob("*.parquet")}))
+def directory_roots(directory: Path) -> set[str]:
+    return {path.name.split("-")[0] for path in directory.glob("*.parquet")}
+
+
+# The drain unlinks every file it ships, so a pass whose inventory predates the checkpointed root
+# list is reconstructed as the manifest unioned with whatever the drain has not caught up to.
+def manifest_roots(manifest_path: Path, kind: str) -> set[str]:
+    records = (json.loads(line) for line in manifest_path.read_text().splitlines() if line)
+    return {record["name"].split("-")[0] for record in records if record["kind"] == kind}
 
 
 def _best(live: list[tuple[Decimal, Decimal]]) -> tuple[Decimal, Decimal]:

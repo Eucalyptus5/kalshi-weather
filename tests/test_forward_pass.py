@@ -125,13 +125,16 @@ class TouchEmitter:
 
     def __init__(self, die_at: int = 0) -> None:
         self.die_at = die_at
+        self.roots: set[str] = set()
 
     def emit(self, row: SourceRow, ladder: Ladder) -> Iterator[tuple[str, dict[str, object]]]:
         if row.id == self.die_at:
             os._exit(KILL_CODE)
         book = ladder.row(row.received_at)
+        root = row.ticker.split("-")[0]
+        self.roots.add(root)
         yield (
-            row.ticker.split("-")[0],
+            root,
             {
                 "id": row.id,
                 "ticker": row.ticker,
@@ -142,6 +145,12 @@ class TouchEmitter:
                 "no_bid_depth": book.no_bid_depth,
             },
         )
+
+    def state(self) -> JsonState:
+        return sorted(self.roots)
+
+    def restore(self, state: JsonState) -> None:
+        self.roots = set(state)
 
 
 class ProbeEmitter:
@@ -156,6 +165,12 @@ class ProbeEmitter:
         if row.id == self.at_id:
             self.action()
         return ()
+
+    def state(self) -> JsonState:
+        return None
+
+    def restore(self, state: JsonState) -> None:
+        pass
 
 
 class CountAccumulator:
@@ -316,6 +331,7 @@ def test_kill_at_every_id_resumes_to_the_uninterrupted_result(
     final = checkpoint_of(out_dir)
     assert final["ladders"] == reference.checkpoint["ladders"]
     assert final["accumulators"] == reference.checkpoint["accumulators"]
+    assert final["emitters"] == reference.checkpoint["emitters"]
     assert final["id"] == reference.checkpoint["id"]
     assert final["barrier"] == reference.checkpoint["barrier"]
 
@@ -479,6 +495,21 @@ def test_checkpoint_carries_the_barrier_row_ladders_and_accumulators(
     }
     assert at_end["poisoned"] == []
     assert at_end["poisoned_rows"] == {}
+
+
+def test_the_checkpoint_carries_emitter_state_across_a_resume(
+    tmp_path: Path, db_path: Path
+) -> None:
+    out_dir = tmp_path / "out"
+    build_db(tmp_path / "early.db", FIXTURE_ROWS[:3])
+    run_forward_pass(tmp_path / "early.db", out_dir, [TouchEmitter()], barrier_rows=3)
+    assert checkpoint_of(out_dir)["emitters"] == {"touch": ["KXHIGHDEN"]}
+
+    emitter = TouchEmitter()
+    run_forward_pass(db_path, out_dir, [emitter], barrier_rows=3)
+
+    assert emitter.roots == {"KXHIGHDEN", "KXHIGHCHI"}
+    assert checkpoint_of(out_dir)["emitters"] == {"touch": ["KXHIGHCHI", "KXHIGHDEN"]}
 
 
 def test_checkpoint_at_a_barrier_inside_a_snapshot_batch(tmp_path: Path) -> None:

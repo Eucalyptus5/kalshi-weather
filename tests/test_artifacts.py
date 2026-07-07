@@ -1,3 +1,4 @@
+import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,8 @@ from bot.replay.artifacts import (
     TouchEmitter,
     byte_budget,
     bytes_written,
+    directory_roots,
+    manifest_roots,
     measure_byte_budget,
     partition_key,
     project_artifact_bytes,
@@ -160,6 +163,24 @@ FULL_BUDGET = byte_budget(
     ws_raw_daily_bytes=387_000_000,
     pass_hours=Decimal("12"),
 )
+
+
+def drain_record(name: str, kind: str) -> dict[str, object]:
+    return {
+        "object": f"forward-pass/f5b-20260808/{kind}/{name}",
+        "name": name,
+        "kind": kind,
+        "size": 174888,
+        "md5": "tEAAXk2CohCKDaUi5Mma+w==",
+        "rows": 5051,
+        "generation": "1786157919502358",
+    }
+
+
+def write_manifest(path: Path, records: list[dict[str, object] | None]) -> Path:
+    lines = ["" if record is None else json.dumps(record) for record in records]
+    path.write_text("".join(f"{line}\n" for line in lines))
+    return path
 
 
 def build_book_db(path: Path, rows: list[tuple[object, ...]]) -> Path:
@@ -509,12 +530,85 @@ def test_the_inventory_names_every_root_the_pass_wrote_not_only_the_resumed_segm
         "ladder/KXHIGHCHI-2026-07-19-b000001.parquet",
         "ladder/KXLOWTCHI-2026-07-19-b000002.parquet",
     ]
-    assert emitter.roots == {"KXLOWTCHI"}
+    assert emitter.roots == {"KXHIGHCHI", "KXLOWTCHI"}
     scalars = {
         r["name"]: r["value"] for r in artifact(out_dir)["inventory/scalars-b000000.parquet"]
     }
     assert scalars["ladder_roots"] == "KXHIGHCHI,KXLOWTCHI"
     assert scalars["tickers"] == "3"
+
+
+def test_the_inventory_names_every_root_after_the_drain_unlinks_the_files(
+    tmp_path: Path, db_path: Path
+) -> None:
+    out_dir = tmp_path / "out"
+    tickers = TickerInventory()
+    emitter = LadderEmitter()
+    run_forward_pass(db_path, out_dir, [emitter], accumulators=[tickers], barrier_rows=10_000)
+    for path in (out_dir / "ladder").glob("*.parquet"):
+        path.unlink()
+    inventory = build_inventory(ExclusionInventory([]), SeqBoundaryDetector(), tickers)
+    write_inventory(out_dir, inventory, FULL_BUDGET, ladder=emitter)
+
+    assert list((out_dir / "ladder").glob("*.parquet")) == []
+    scalars = {
+        r["name"]: r["value"] for r in artifact(out_dir)["inventory/scalars-b000000.parquet"]
+    }
+    assert scalars["ladder_roots"] == "KXHIGHCHI,KXHIGHDEN"
+
+
+def test_the_inventory_names_every_root_after_a_resume_and_a_drain(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out"
+    db = build_book_db(tmp_path / "resume.db", RESUME_ROWS)
+    run_forward_pass(db, out_dir, [LadderEmitter()], accumulators=[TickerInventory()], max_id=2)
+    emitter = LadderEmitter()
+    tickers = TickerInventory()
+    run_forward_pass(db, out_dir, [emitter], accumulators=[tickers])
+    for path in (out_dir / "ladder").glob("*.parquet"):
+        path.unlink()
+    inventory = build_inventory(ExclusionInventory([]), SeqBoundaryDetector(), tickers)
+    write_inventory(out_dir, inventory, FULL_BUDGET, ladder=emitter)
+
+    assert emitter.roots == {"KXHIGHCHI", "KXLOWTCHI"}
+    scalars = {
+        r["name"]: r["value"] for r in artifact(out_dir)["inventory/scalars-b000000.parquet"]
+    }
+    assert scalars["ladder_roots"] == "KXHIGHCHI,KXLOWTCHI"
+
+
+def test_the_manifest_yields_the_roots_of_the_kind_asked_for_and_nothing_else(
+    tmp_path: Path,
+) -> None:
+    path = write_manifest(
+        tmp_path / "manifest.jsonl",
+        [
+            drain_record("KXHIGHAUS-2026-07-17-b000001.parquet", "ladder"),
+            drain_record("KXHIGHAUS-2026-07-18-b000002.parquet", "ladder"),
+            None,
+            drain_record("KXLOWTCHI-2026-07-17-b000001.parquet", "ladder"),
+            drain_record("KXRAINCHIM-2026-07-17-b000001.parquet", "touch"),
+            drain_record("KXHIGHDEN", "ladder"),
+        ],
+    )
+
+    assert manifest_roots(path, "ladder") == {"KXHIGHAUS", "KXLOWTCHI", "KXHIGHDEN"}
+    assert manifest_roots(path, "touch") == {"KXRAINCHIM"}
+    assert manifest_roots(path, "trades") == set()
+
+
+def test_the_reconstructed_roots_are_the_manifest_unioned_with_what_is_still_on_disk(
+    tmp_path: Path, db_path: Path
+) -> None:
+    out_dir = tmp_path / "out"
+    run_forward_pass(db_path, out_dir, [LadderEmitter()], barrier_rows=10_000)
+    shipped = write_manifest(
+        tmp_path / "manifest.jsonl",
+        [drain_record("KXHIGHAUS-2026-07-17-b000001.parquet", "ladder")],
+    )
+    on_disk = directory_roots(out_dir / "ladder")
+
+    assert on_disk == {"KXHIGHCHI", "KXHIGHDEN"}
+    assert manifest_roots(shipped, "ladder") | on_disk == {"KXHIGHAUS", "KXHIGHCHI", "KXHIGHDEN"}
 
 
 def test_the_byte_budget_deducts_the_floor_from_total_not_from_free() -> None:
