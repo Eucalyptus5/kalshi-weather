@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 MIN_DISK_FREE_FRACTION = Decimal("0.20")
 RECORDER_DAILY_BYTES = 5_100_000_000
 TRADES_BATCH_ROWS = 50_000
+# Well under the 1024 descriptor soft limit that 1163 unbounded writers blew through; the cost
+# of dropping it further is another full scan of ws_trades per step.
+MAX_OPEN_WRITERS = 128
 BUDGET_CHECK_ROWS = 100_000
 LADDER_SCOPE = ("KXHIGH", "KXLOW")
 # Six, not five: five populated levels span only four ticks of price, one short of the
@@ -42,6 +45,8 @@ _TRADES_SELECT = f"SELECT {_TRADES_COLUMNS} FROM ws_trades WHERE id > ? ORDER BY
 _TRADES_SELECT_BOUNDED = (
     f"SELECT {_TRADES_COLUMNS} FROM ws_trades WHERE id > ? AND id <= ? ORDER BY id LIMIT ?"
 )
+_TRADES_PARTITION_SELECT = "SELECT ticker, received_at FROM ws_trades"
+_TRADES_PARTITION_SELECT_BOUNDED = "SELECT ticker, received_at FROM ws_trades WHERE id <= ?"
 
 _KEYS = [
     ("id", pa.int64()),
@@ -351,42 +356,63 @@ def write_trades(
     batch_rows: int = TRADES_BATCH_ROWS,
     row_group_rows: int = ROW_GROUP_ROWS,
     max_id: int | None = None,
+    max_open_writers: int = MAX_OPEN_WRITERS,
 ) -> int:
     preflight(budget)
-    writers: dict[str, _PartitionWriter] = {}
     rows = 0
     last_id = 0
     select = _TRADES_SELECT if max_id is None else _TRADES_SELECT_BOUNDED
     bound = () if max_id is None else (max_id,)
     conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
     try:
-        while True:
-            batch = conn.execute(select, (last_id, *bound, batch_rows)).fetchall()
-            if not batch:
-                break
-            for raw in batch:
-                last_id = raw[0]
-                rows += 1
-                partition, out = _trade_row(raw)
-                writer = writers.get(partition)
-                if writer is None:
-                    writer = _PartitionWriter(
-                        _stamped(out_dir / "trades", partition), TRADES_SCHEMA, row_group_rows
+        partitions = _trade_partitions(conn, max_id)
+        # Closing a writer seals its parquet footer, so an evicted partition could only come back
+        # as a second file. The tape is rescanned per chunk instead, which leaves each writer the
+        # same rows in the same id order and so the same row groups and the same bytes.
+        for start in range(0, len(partitions), max_open_writers):
+            chunk = set(partitions[start : start + max_open_writers])
+            writers: dict[str, _PartitionWriter] = {}
+            last_id = 0
+            while True:
+                batch = conn.execute(select, (last_id, *bound, batch_rows)).fetchall()
+                if not batch:
+                    break
+                for raw in batch:
+                    last_id = raw[0]
+                    received_at = _decode_ts(raw[2])
+                    partition = partition_key(raw[1], received_at)
+                    if partition not in chunk:
+                        continue
+                    rows += 1
+                    writer = writers.get(partition)
+                    if writer is None:
+                        writer = _PartitionWriter(
+                            _stamped(out_dir / "trades", partition), TRADES_SCHEMA, row_group_rows
+                        )
+                        writers[partition] = writer
+                    writer.add(_trade_row(raw, received_at))
+                written = bytes_written(out_dir)
+                if written >= budget.budget_bytes:
+                    raise BudgetExceeded(
+                        f"trades hit the byte budget at id={last_id}: "
+                        f"written={written} budget={budget.budget_bytes}"
                     )
-                    writers[partition] = writer
-                writer.add(out)
-            written = bytes_written(out_dir)
-            if written >= budget.budget_bytes:
-                raise BudgetExceeded(
-                    f"trades hit the byte budget at id={last_id}: "
-                    f"written={written} budget={budget.budget_bytes}"
-                )
+            for writer in writers.values():
+                writer.close()
     finally:
         conn.close()
-    for writer in writers.values():
-        writer.close()
-    logger.info("trades rows=%d id=%d partitions=%d", rows, last_id, len(writers))
+    logger.info("trades rows=%d id=%d partitions=%d", rows, last_id, len(partitions))
     return rows
+
+
+def _trade_partitions(conn: sqlite3.Connection, max_id: int | None) -> list[str]:
+    select = _TRADES_PARTITION_SELECT if max_id is None else _TRADES_PARTITION_SELECT_BOUNDED
+    bound = () if max_id is None else (max_id,)
+    keys = {
+        partition_key(ticker, _decode_ts(received_at))
+        for ticker, received_at in conn.execute(select, bound)
+    }
+    return sorted(keys)
 
 
 def write_inventory(
@@ -520,12 +546,11 @@ def _touch_row(
 
 
 def _trade_row(
-    raw: tuple[int, str, str, str, str, str, str, int],
-) -> tuple[str, dict[str, object]]:
+    raw: tuple[int, str, str, str, str, str, str, int], received_at: datetime
+) -> dict[str, object]:
     ticker = raw[1]
-    received_at = _decode_ts(raw[2])
     yes_price = _quantized(ticker, "yes_price", raw[3], _PRICE_EXPONENT)
-    return partition_key(ticker, received_at), {
+    return {
         "id": raw[0],
         "ticker": ticker,
         "received_at": received_at,

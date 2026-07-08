@@ -8,7 +8,14 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
-from bot.replay.artifacts import BudgetExceeded, ByteBudget, byte_budget, ws_raw_daily_bytes
+from bot.replay.artifacts import (
+    MAX_OPEN_WRITERS,
+    BudgetExceeded,
+    ByteBudget,
+    byte_budget,
+    write_trades,
+    ws_raw_daily_bytes,
+)
 from bot.replay.forward_pass import BARRIER_ROWS, READ_BATCH_ROWS, ROW_GROUP_ROWS
 from scripts import replay_forward
 from scripts.replay_forward import DEFAULT_PASS_HOURS, build_parser, run
@@ -68,6 +75,7 @@ def test_help_smoke() -> None:
     assert "--max-id" in result.stdout
     assert "--trades-max-id" in result.stdout
     assert "--pass-hours" in result.stdout
+    assert "--max-open-writers" in result.stdout
 
 
 def test_default_arg_values() -> None:
@@ -80,6 +88,7 @@ def test_default_arg_values() -> None:
     assert args.read_batch == READ_BATCH_ROWS
     assert args.row_group == ROW_GROUP_ROWS
     assert args.barrier_rows == BARRIER_ROWS
+    assert args.max_open_writers == MAX_OPEN_WRITERS
     assert args.trades is True
 
 
@@ -175,6 +184,30 @@ def test_the_trades_ceiling_bounds_the_trades_artifact_alone(
     assert stats["trades_rows"] == 1
     assert [p.name for p in (out / "trades").glob("*.parquet")] == [
         "KXHIGHDEN-2026-07-19-b000000.parquet"
+    ]
+
+
+def test_the_open_writer_bound_reaches_the_trades_writer_and_the_run_summary(
+    tape: Path, raw_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "out"
+    seen: dict[str, int | None] = {}
+
+    def recorded(db: Path, out_dir: Path, budget: ByteBudget, **kwargs: int | None) -> int:
+        seen.update(kwargs)
+        return write_trades(db, out_dir, budget, **kwargs)
+
+    monkeypatch.setattr(replay_forward, "write_trades", recorded)
+
+    run(_args(tape, raw_dir, out, "--max-open-writers", "1"))
+
+    assert seen["max_open_writers"] == 1
+    stats = json.loads((out / "run_stats.json").read_text())
+    assert stats["max_open_writers"] == 1
+    assert stats["trades_rows"] == 2
+    assert sorted(p.name for p in (out / "trades").glob("*.parquet")) == [
+        "KXHIGHDEN-2026-07-19-b000000.parquet",
+        "KXRAINCHIM-2026-07-20-b000000.parquet",
     ]
 
 

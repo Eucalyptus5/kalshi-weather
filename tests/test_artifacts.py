@@ -5,12 +5,15 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
 from bot.markets.parser import series_id
+from bot.replay import artifacts
 from bot.replay.artifacts import (
     LADDER_DEPTH,
+    MAX_OPEN_WRITERS,
     MIN_DISK_FREE_FRACTION,
     TOUCH_SCHEMA,
     BudgetExceeded,
@@ -159,6 +162,14 @@ TRADE_PAGE_IDS = [1, 2, 3, 5, 8, 13, 14, 15, 21, 22, 30, 31]
 TRADE_PAGE_ROWS = [_trade(row_id, DEN, 0, "0.4000", "2.00", "yes") for row_id in TRADE_PAGE_IDS]
 TRADE_PAGE_FILE = "trades/KXHIGHDEN-2026-07-19-b000000.parquet"
 
+# Ten roots over two received_at dates, round-robin by id, so every partition holds rows a scan
+# reaches only by running the whole tape.
+WIDE_TRADE_ROWS = [
+    _trade(i + 1, f"KXHIGHW{i % 10}-26JUL19-B85.5", 86_400 * (i // 10 % 2), "0.4000", "2.00", "yes")
+    for i in range(60)
+]
+WIDE_PARTITIONS = 20
+
 GAP_ROWS = [(1, "", _ts(62), 5, "connection_reset", _ts(62))]
 
 FULL_BUDGET = byte_budget(
@@ -228,6 +239,44 @@ def db_path(tmp_path: Path) -> Path:
 @pytest.fixture
 def trades_db(tmp_path: Path) -> Path:
     return build_trades_db(tmp_path / "trades.db", TRADE_PAGE_ROWS)
+
+
+@pytest.fixture
+def wide_db(tmp_path: Path) -> Path:
+    return build_trades_db(tmp_path / "wide.db", WIDE_TRADE_ROWS)
+
+
+class WriterCensus:
+    def __init__(self) -> None:
+        self.live = 0
+        self.peak = 0
+
+
+def track_open_writers(monkeypatch: pytest.MonkeyPatch) -> WriterCensus:
+    census = WriterCensus()
+    base = artifacts._PartitionWriter
+
+    class Counted(base):
+        def __init__(self, path: Path, schema: pa.Schema, row_group_rows: int) -> None:
+            super().__init__(path, schema, row_group_rows)
+            census.live += 1
+            census.peak = max(census.peak, census.live)
+
+        def close(self) -> None:
+            super().close()
+            census.live -= 1
+
+    monkeypatch.setattr(artifacts, "_PartitionWriter", Counted)
+    return census
+
+
+def parquet_bytes(out_dir: Path) -> dict[str, bytes]:
+    return {path.name: path.read_bytes() for path in (out_dir / "trades").glob("*.parquet")}
+
+
+def row_groups(path: Path) -> list[int]:
+    metadata = pq.ParquetFile(path).metadata
+    return [metadata.row_group(i).num_rows for i in range(metadata.num_row_groups)]
 
 
 def artifact(out_dir: Path) -> dict[str, list[dict[str, object]]]:
@@ -499,6 +548,83 @@ def test_no_trades_ceiling_reads_the_table_to_its_end(tmp_path: Path, trades_db:
         TRADE_PAGE_ROWS
     )
     assert (unbounded / TRADE_PAGE_FILE).read_bytes() == (ceiling / TRADE_PAGE_FILE).read_bytes()
+
+
+def test_the_open_trade_writers_never_outnumber_the_bound(
+    tmp_path: Path, wide_db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out_dir = tmp_path / "out"
+    census = track_open_writers(monkeypatch)
+
+    rows = write_trades(wide_db, out_dir, FULL_BUDGET, max_open_writers=4)
+
+    assert rows == len(WIDE_TRADE_ROWS)
+    assert len(parquet_bytes(out_dir)) == WIDE_PARTITIONS
+    assert census.peak == 4
+    assert census.live == 0
+
+
+def test_the_bound_leaves_every_trades_file_byte_identical(tmp_path: Path, wide_db: Path) -> None:
+    bounded = tmp_path / "bounded"
+    loose = tmp_path / "loose"
+
+    write_trades(wide_db, bounded, FULL_BUDGET, max_open_writers=4)
+    write_trades(wide_db, loose, FULL_BUDGET, max_open_writers=1_000)
+
+    assert len(parquet_bytes(bounded)) == WIDE_PARTITIONS
+    assert parquet_bytes(bounded) == parquet_bytes(loose)
+
+
+def test_the_bound_does_not_recut_the_row_groups(tmp_path: Path, wide_db: Path) -> None:
+    bounded = tmp_path / "bounded"
+    loose = tmp_path / "loose"
+
+    write_trades(wide_db, bounded, FULL_BUDGET, row_group_rows=2, max_open_writers=3)
+    write_trades(wide_db, loose, FULL_BUDGET, row_group_rows=2, max_open_writers=1_000)
+
+    name = "trades/KXHIGHW0-2026-07-19-b000000.parquet"
+    assert row_groups(bounded / name) == [2, 1]
+    assert row_groups(bounded / name) == row_groups(loose / name)
+    assert parquet_bytes(bounded) == parquet_bytes(loose)
+
+
+def test_the_trades_count_is_the_whole_tape_not_a_chunk_and_not_a_chunk_per_scan(
+    tmp_path: Path, wide_db: Path
+) -> None:
+    out_dir = tmp_path / "out"
+
+    rows = write_trades(wide_db, out_dir, FULL_BUDGET, max_open_writers=3)
+
+    assert rows == len(WIDE_TRADE_ROWS)
+    assert sum(len(written) for written in artifact(out_dir).values()) == len(WIDE_TRADE_ROWS)
+
+
+def test_the_trades_ceiling_bounds_the_partition_sweep_and_every_scan_under_it(
+    tmp_path: Path, wide_db: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="bot.replay.artifacts")
+    bounded = tmp_path / "bounded"
+    loose = tmp_path / "loose"
+
+    rows = write_trades(wide_db, bounded, FULL_BUDGET, max_id=15, max_open_writers=4)
+
+    assert rows == 15
+    assert "trades rows=15 id=15 partitions=15" in caplog.text
+    assert write_trades(wide_db, loose, FULL_BUDGET, max_id=15, max_open_writers=1_000) == 15
+    assert parquet_bytes(bounded) == parquet_bytes(loose)
+
+
+def test_a_partition_count_under_the_bound_keeps_every_writer_open_at_once(
+    tmp_path: Path, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out_dir = tmp_path / "out"
+    census = track_open_writers(monkeypatch)
+
+    rows = write_trades(db_path, out_dir, FULL_BUDGET, max_open_writers=MAX_OPEN_WRITERS)
+
+    assert rows == len(TRADE_ROWS)
+    assert census.peak == 2
+    assert census.live == 0
 
 
 def test_the_inventory_carries_the_three_tables_the_scalars_and_the_budget(

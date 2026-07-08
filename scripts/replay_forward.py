@@ -17,6 +17,7 @@ import pyarrow.parquet as pq
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot.replay.artifacts import (  # noqa: E402
+    MAX_OPEN_WRITERS,
     BudgetGuard,
     ByteBudget,
     LadderEmitter,
@@ -145,6 +146,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--read-batch", type=int, default=READ_BATCH_ROWS)
     parser.add_argument("--row-group", type=int, default=ROW_GROUP_ROWS)
     parser.add_argument("--barrier-rows", type=int, default=BARRIER_ROWS)
+    parser.add_argument(
+        "--max-open-writers",
+        type=int,
+        default=MAX_OPEN_WRITERS,
+        help="trade partitions written per scan; the tape is rescanned once per chunk",
+    )
     parser.add_argument("--trades", action=argparse.BooleanOptionalAction, default=True)
     return parser
 
@@ -178,7 +185,12 @@ def run(args: argparse.Namespace) -> int:
     if args.trades:
         # ws_trades and ws_book_events carry independent rowids, so --max-id cannot bound this.
         trades_rows = write_trades(
-            args.db, args.out, budget, row_group_rows=args.row_group, max_id=args.trades_max_id
+            args.db,
+            args.out,
+            budget,
+            row_group_rows=args.row_group,
+            max_id=args.trades_max_id,
+            max_open_writers=args.max_open_writers,
         )
 
     stats = _stats(args, result, census, budget, cpu_s, block_bytes, trades_rows)
@@ -240,6 +252,7 @@ def _stats(
         "read_batch": args.read_batch,
         "row_group": args.row_group,
         "barrier_rows": args.barrier_rows,
+        "max_open_writers": args.max_open_writers,
         "rows": result.rows,
         "last_id": result.last_id,
         "barriers": result.barriers,
