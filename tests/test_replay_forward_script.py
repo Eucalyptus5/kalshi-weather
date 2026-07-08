@@ -66,6 +66,7 @@ def test_help_smoke() -> None:
     assert "--db" in result.stdout
     assert "--out" in result.stdout
     assert "--max-id" in result.stdout
+    assert "--trades-max-id" in result.stdout
     assert "--pass-hours" in result.stdout
 
 
@@ -74,6 +75,7 @@ def test_default_arg_values() -> None:
     assert args.db == REPO_ROOT / "data" / "state.db"
     assert args.raw_dir == REPO_ROOT / "data" / "ws_raw"
     assert args.max_id is None
+    assert args.trades_max_id is None
     assert args.pass_hours == DEFAULT_PASS_HOURS
     assert args.read_batch == READ_BATCH_ROWS
     assert args.row_group == ROW_GROUP_ROWS
@@ -144,6 +146,36 @@ def test_the_id_ceiling_bounds_the_run(tape: Path, raw_dir: Path, tmp_path: Path
     assert stats["last_id"] == 5
     assert stats["trades_rows"] == 0
     assert not (out / "trades").exists()
+
+
+def test_the_book_ceiling_alone_leaves_the_trades_artifact_unbounded(
+    tape: Path, raw_dir: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+
+    run(_args(tape, raw_dir, out, "--max-id", "1"))
+
+    stats = json.loads((out / "run_stats.json").read_text())
+    assert stats["rows"] == 1
+    assert stats["trades_rows"] == 2
+    assert stats["trades_max_id"] is None
+
+
+def test_the_trades_ceiling_bounds_the_trades_artifact_alone(
+    tape: Path, raw_dir: Path, tmp_path: Path
+) -> None:
+    out = tmp_path / "out"
+
+    run(_args(tape, raw_dir, out, "--trades-max-id", "1"))
+
+    stats = json.loads((out / "run_stats.json").read_text())
+    assert stats["rows"] == 10
+    assert stats["max_id"] is None
+    assert stats["trades_max_id"] == 1
+    assert stats["trades_rows"] == 1
+    assert [p.name for p in (out / "trades").glob("*.parquet")] == [
+        "KXHIGHDEN-2026-07-19-b000000.parquet"
+    ]
 
 
 def test_a_negative_budget_stops_before_anything_is_written(

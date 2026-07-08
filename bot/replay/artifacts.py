@@ -37,9 +37,10 @@ _ZERO_PRICE = Decimal("0").quantize(_PRICE_EXPONENT)
 _ZERO_SIZE = Decimal("0").quantize(_SIZE_EXPONENT)
 _ONE = Decimal("1")
 _HOURS_PER_DAY = Decimal(24)
-_TRADES_SELECT = (
-    "SELECT id, ticker, received_at, yes_price, count, taker_side, trade_id, ts_ms "
-    "FROM ws_trades WHERE id > ? ORDER BY id LIMIT ?"
+_TRADES_COLUMNS = "id, ticker, received_at, yes_price, count, taker_side, trade_id, ts_ms"
+_TRADES_SELECT = f"SELECT {_TRADES_COLUMNS} FROM ws_trades WHERE id > ? ORDER BY id LIMIT ?"
+_TRADES_SELECT_BOUNDED = (
+    f"SELECT {_TRADES_COLUMNS} FROM ws_trades WHERE id > ? AND id <= ? ORDER BY id LIMIT ?"
 )
 
 _KEYS = [
@@ -349,15 +350,18 @@ def write_trades(
     *,
     batch_rows: int = TRADES_BATCH_ROWS,
     row_group_rows: int = ROW_GROUP_ROWS,
+    max_id: int | None = None,
 ) -> int:
     preflight(budget)
     writers: dict[str, _PartitionWriter] = {}
     rows = 0
     last_id = 0
+    select = _TRADES_SELECT if max_id is None else _TRADES_SELECT_BOUNDED
+    bound = () if max_id is None else (max_id,)
     conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
     try:
         while True:
-            batch = conn.execute(_TRADES_SELECT, (last_id, batch_rows)).fetchall()
+            batch = conn.execute(select, (last_id, *bound, batch_rows)).fetchall()
             if not batch:
                 break
             for raw in batch:

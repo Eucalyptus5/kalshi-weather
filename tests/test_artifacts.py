@@ -154,6 +154,11 @@ TRADE_ROWS = [
     _trade(2, RAIN, 61, "0.2000", "12", "no"),
 ]
 
+# Gapped on purpose: under contiguous ids a ceiling and a row limit select the same set.
+TRADE_PAGE_IDS = [1, 2, 3, 5, 8, 13, 14, 15, 21, 22, 30, 31]
+TRADE_PAGE_ROWS = [_trade(row_id, DEN, 0, "0.4000", "2.00", "yes") for row_id in TRADE_PAGE_IDS]
+TRADE_PAGE_FILE = "trades/KXHIGHDEN-2026-07-19-b000000.parquet"
+
 GAP_ROWS = [(1, "", _ts(62), 5, "connection_reset", _ts(62))]
 
 FULL_BUDGET = byte_budget(
@@ -192,6 +197,15 @@ def build_book_db(path: Path, rows: list[tuple[object, ...]]) -> Path:
     return path
 
 
+def build_trades_db(path: Path, rows: list[tuple[object, ...]]) -> Path:
+    conn = sqlite3.connect(path)
+    conn.execute(TRADES_SQL)
+    conn.executemany("INSERT INTO ws_trades VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    conn.commit()
+    conn.close()
+    return path
+
+
 def build_db(path: Path) -> None:
     conn = sqlite3.connect(path)
     conn.execute(BOOK_SQL)
@@ -209,6 +223,11 @@ def db_path(tmp_path: Path) -> Path:
     path = tmp_path / "state.db"
     build_db(path)
     return path
+
+
+@pytest.fixture
+def trades_db(tmp_path: Path) -> Path:
+    return build_trades_db(tmp_path / "trades.db", TRADE_PAGE_ROWS)
 
 
 def artifact(out_dir: Path) -> dict[str, list[dict[str, object]]]:
@@ -439,6 +458,47 @@ def test_trades_are_their_own_artifact_with_no_price_derived_in_decimal(
         "trade_id": "t1",
     }
     assert str(1 - float("0.07")) == "0.9299999999999999"
+
+
+def test_the_trades_ceiling_keeps_its_own_id_and_drops_every_id_above(
+    tmp_path: Path, trades_db: Path
+) -> None:
+    out_dir = tmp_path / "out"
+
+    rows = write_trades(trades_db, out_dir, FULL_BUDGET, max_id=14)
+
+    assert rows == 7
+    assert [row["id"] for row in artifact(out_dir)[TRADE_PAGE_FILE]] == [1, 2, 3, 5, 8, 13, 14]
+
+
+def test_the_trades_ceiling_holds_where_it_falls_mid_batch(tmp_path: Path, trades_db: Path) -> None:
+    out_dir = tmp_path / "out"
+
+    rows = write_trades(trades_db, out_dir, FULL_BUDGET, batch_rows=3, max_id=14)
+
+    assert rows == 7
+    assert [row["id"] for row in artifact(out_dir)[TRADE_PAGE_FILE]] == [1, 2, 3, 5, 8, 13, 14]
+
+
+def test_a_trades_ceiling_under_every_id_writes_nothing(tmp_path: Path, trades_db: Path) -> None:
+    out_dir = tmp_path / "out"
+
+    assert write_trades(trades_db, out_dir, FULL_BUDGET, max_id=0) == 0
+    assert list(out_dir.rglob("*.parquet")) == []
+
+
+def test_no_trades_ceiling_reads_the_table_to_its_end(tmp_path: Path, trades_db: Path) -> None:
+    unbounded = tmp_path / "unbounded"
+    ceiling = tmp_path / "ceiling"
+
+    rows = write_trades(trades_db, unbounded, FULL_BUDGET)
+
+    assert rows == len(TRADE_PAGE_ROWS)
+    assert [row["id"] for row in artifact(unbounded)[TRADE_PAGE_FILE]] == TRADE_PAGE_IDS
+    assert write_trades(trades_db, ceiling, FULL_BUDGET, max_id=TRADE_PAGE_IDS[-1]) == len(
+        TRADE_PAGE_ROWS
+    )
+    assert (unbounded / TRADE_PAGE_FILE).read_bytes() == (ceiling / TRADE_PAGE_FILE).read_bytes()
 
 
 def test_the_inventory_carries_the_three_tables_the_scalars_and_the_budget(

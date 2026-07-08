@@ -131,6 +131,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="bound the last id consumed; a pass still starts at id 1 or a checkpoint",
     )
     parser.add_argument(
+        "--trades-max-id",
+        type=int,
+        default=None,
+        help="bound the last ws_trades id consumed; a rowid space of its own, not --max-id's",
+    )
+    parser.add_argument(
         "--pass-hours",
         type=Decimal,
         default=DEFAULT_PASS_HOURS,
@@ -170,7 +176,10 @@ def run(args: argparse.Namespace) -> int:
 
     trades_rows = 0
     if args.trades:
-        trades_rows = write_trades(args.db, args.out, budget, row_group_rows=args.row_group)
+        # ws_trades and ws_book_events carry independent rowids, so --max-id cannot bound this.
+        trades_rows = write_trades(
+            args.db, args.out, budget, row_group_rows=args.row_group, max_id=args.trades_max_id
+        )
 
     stats = _stats(args, result, census, budget, cpu_s, block_bytes, trades_rows)
     write_inventory(
@@ -227,6 +236,7 @@ def _stats(
         "db": str(args.db),
         "out": str(args.out),
         "max_id": args.max_id,
+        "trades_max_id": args.trades_max_id,
         "read_batch": args.read_batch,
         "row_group": args.row_group,
         "barrier_rows": args.barrier_rows,
