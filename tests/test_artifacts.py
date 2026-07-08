@@ -1,6 +1,7 @@
 import json
 import logging
 import sqlite3
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -32,7 +33,7 @@ from bot.replay.artifacts import (
     write_trades,
     ws_raw_daily_bytes,
 )
-from bot.replay.forward_pass import run_forward_pass
+from bot.replay.forward_pass import SourceRow, run_forward_pass
 from bot.replay.inventory import (
     ExclusionInventory,
     SeqBoundaryDetector,
@@ -268,6 +269,25 @@ def track_open_writers(monkeypatch: pytest.MonkeyPatch) -> WriterCensus:
 
     monkeypatch.setattr(artifacts, "_PartitionWriter", Counted)
     return census
+
+
+def unlink_mid_scan(monkeypatch: pytest.MonkeyPatch, victim: Path) -> None:
+    listing = Path.rglob
+    is_file = Path.is_file
+
+    # Sorting materializes the walk before any unlink can perturb it, and sorts the victim ahead
+    # of the last file, so a scan that ended at the missing path would total 100, not 500.
+    def ordered(self: Path, pattern: str) -> Iterator[Path]:
+        return iter(sorted(listing(self, pattern)))
+
+    def drained(self: Path) -> bool:
+        alive = is_file(self)
+        if self == victim:
+            self.unlink()
+        return alive
+
+    monkeypatch.setattr(Path, "rglob", ordered)
+    monkeypatch.setattr(Path, "is_file", drained)
 
 
 def parquet_bytes(out_dir: Path) -> dict[str, bytes]:
@@ -889,6 +909,61 @@ def test_the_pass_aborts_at_the_budget_instead_of_filling_the_disk(
     written = sorted(r["id"] for rows in artifact(out_dir).values() for r in rows)
     assert written == [1, 2, 3]
     assert bytes_written(out_dir) >= tight.budget_bytes
+
+
+def test_the_byte_count_walks_every_subdirectory_and_skips_the_directories(tmp_path: Path) -> None:
+    out_dir = tmp_path / "out"
+    (out_dir / "touch").mkdir(parents=True)
+    (out_dir / "ladder" / "2026-07-19").mkdir(parents=True)
+    (out_dir / "empty").mkdir()
+    (out_dir / "touch" / "KXHIGHDEN-2026-07-19-b000001.parquet").write_bytes(b"a" * 100)
+    (out_dir / "ladder" / "2026-07-19" / "KXHIGHCHI-b000001.parquet").write_bytes(b"b" * 250)
+
+    assert bytes_written(out_dir) == 350
+
+
+def test_a_file_the_drain_unlinks_mid_scan_drops_out_without_ending_the_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "a-b000001.parquet").write_bytes(b"a" * 100)
+    (out_dir / "b-b000001.parquet").write_bytes(b"b" * 200)
+    (out_dir / "c-b000001.parquet").write_bytes(b"c" * 400)
+    victim = out_dir / "b-b000001.parquet"
+    unlink_mid_scan(monkeypatch, victim)
+
+    assert bytes_written(out_dir) == 500
+    assert not victim.exists()
+
+
+def test_the_guard_still_stops_the_pass_when_the_surviving_bytes_pass_the_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "a-b000001.parquet").write_bytes(b"a" * 100)
+    (out_dir / "b-b000001.parquet").write_bytes(b"b" * 200)
+    (out_dir / "c-b000001.parquet").write_bytes(b"c" * 400)
+    tight = ByteBudget(free=500, floor=0, recorder_day=0, ws_raw_day=0, wal=0, budget_bytes=500)
+    guard = BudgetGuard(out_dir, tight, check_rows=1)
+    row = SourceRow(
+        id=7,
+        ticker=DEN,
+        received_at=T0,
+        seq=1,
+        side="yes",
+        price="0.4000",
+        size="10.00",
+        is_snapshot=True,
+        ts_ms=None,
+    )
+    unlink_mid_scan(monkeypatch, out_dir / "b-b000001.parquet")
+
+    with pytest.raises(BudgetExceeded) as caught:
+        guard.observe(row)
+
+    assert "written=500 budget=500" in str(caught.value)
 
 
 def test_the_projection_states_both_denominators_and_names_the_binding_one() -> None:

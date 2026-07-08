@@ -259,7 +259,17 @@ def preflight(budget: ByteBudget) -> None:
 
 
 def bytes_written(out_dir: Path) -> int:
-    return sum(path.stat().st_size for path in out_dir.rglob("*") if path.is_file())
+    total = 0
+    for path in out_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        # The drain unlinks each file it ships, so the stat can lose a path the listing just
+        # handed over.
+        try:
+            total += path.stat().st_size
+        except FileNotFoundError:
+            continue
+    return total
 
 
 class BudgetGuard:
