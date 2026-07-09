@@ -6,7 +6,7 @@ import pytest
 
 from bot.lag.ws_book import WsGapError, book_state_at
 from bot.replay.inventory import check_excluded
-from bot.replay.parity import SamplePoint, compare_points, gap_windows, sample_points
+from bot.replay.parity import TICK, SamplePoint, compare_points, gap_windows, sample_points
 
 
 UTC = timezone.utc
@@ -15,6 +15,7 @@ DB_TS = "%Y-%m-%d %H:%M:%S.%f"
 DEN = "KXHIGHDEN-26JUL19-B85"
 CHI = "KXHIGHCHI-26JUL19-B75"
 BOS = "KXHIGHTBOS-26JUL19-B70"
+NYC = "KXHIGHNY-26JUL19-B80"
 
 BOOK_SCHEMA = """
 CREATE TABLE ws_book_events (
@@ -34,6 +35,12 @@ CREATE TABLE ws_gaps (
 
 def at(offset_s: float) -> datetime:
     return T0 + timedelta(seconds=offset_s)
+
+
+SINCE = at(10.0)
+UNTIL = at(30.0)
+WHOLE_SINCE = at(-1.0)
+WHOLE_UNTIL = at(3600.0)
 
 
 def book(
@@ -202,7 +209,7 @@ GAPPED = [
 
 def test_both_paths_raise_inside_a_connection_wide_gap(tmp_path: Path) -> None:
     db_path = build_db(tmp_path / "state.db", GAPPED, [gap(1, "", 11.0)])
-    windows = gap_windows(db_path)
+    windows = gap_windows(db_path, since=WHOLE_SINCE, until=WHOLE_UNTIL)
     assert [(w.gap_id, w.ticker, w.start, w.end) for w in windows] == [(1, "", at(2.0), at(20.0))]
 
     with pytest.raises(WsGapError):
@@ -220,7 +227,7 @@ def test_both_paths_raise_inside_a_connection_wide_gap(tmp_path: Path) -> None:
 
 def test_a_point_outside_the_gap_window_has_neither_path_raising(tmp_path: Path) -> None:
     db_path = build_db(tmp_path / "state.db", GAPPED, [gap(1, "", 11.0)])
-    windows = gap_windows(db_path)
+    windows = gap_windows(db_path, since=WHOLE_SINCE, until=WHOLE_UNTIL)
 
     assert book_state_at(db_path, DEN, at(2.0)) is not None
     assert book_state_at(db_path, DEN, at(20.0)) is not None
@@ -256,10 +263,10 @@ def _tape() -> list[tuple[object, ...]]:
 
 def test_the_sample_is_deterministic_and_covers_every_class(tmp_path: Path) -> None:
     db_path = build_db(tmp_path / "state.db", _tape(), [gap(1, "", 11.0)])
-    windows = gap_windows(db_path)
+    windows = gap_windows(db_path, since=WHOLE_SINCE, until=WHOLE_UNTIL)
 
-    first = sample_points(db_path, 40, windows)
-    second = sample_points(db_path, 40, windows)
+    first = sample_points(db_path, 40, windows, since=WHOLE_SINCE, until=WHOLE_UNTIL)
+    second = sample_points(db_path, 40, windows, since=WHOLE_SINCE, until=WHOLE_UNTIL)
 
     assert first == second
     assert len(first) == len(set(first))
@@ -274,9 +281,11 @@ def test_the_sample_is_deterministic_and_covers_every_class(tmp_path: Path) -> N
 
 def test_the_sampled_slice_agrees_everywhere(tmp_path: Path) -> None:
     db_path = build_db(tmp_path / "state.db", _tape(), [gap(1, "", 11.0)])
-    windows = gap_windows(db_path)
+    windows = gap_windows(db_path, since=WHOLE_SINCE, until=WHOLE_UNTIL)
 
-    result = compare_points(db_path, sample_points(db_path, 40, windows), windows)
+    result = compare_points(
+        db_path, sample_points(db_path, 40, windows, since=WHOLE_SINCE, until=WHOLE_UNTIL), windows
+    )
 
     assert result.disagreements() == ()
     assert result.counts()["agreed_on_raise"] == 1
@@ -296,11 +305,11 @@ UNSUBSCRIBED_AT_THE_GAP = [
 
 def test_a_ticker_scoped_gap_with_nothing_to_probe_names_the_gap(tmp_path: Path) -> None:
     db_path = build_db(tmp_path / "state.db", UNSUBSCRIBED_AT_THE_GAP, [gap(1, BOS, 11.0)])
-    windows = gap_windows(db_path)
+    windows = gap_windows(db_path, since=WHOLE_SINCE, until=WHOLE_UNTIL)
     assert [(w.gap_id, w.ticker) for w in windows] == [(1, BOS)]
 
     with pytest.raises(ValueError) as excinfo:
-        sample_points(db_path, 40, windows)
+        sample_points(db_path, 40, windows, since=WHOLE_SINCE, until=WHOLE_UNTIL)
 
     assert str(excinfo.value) == (
         f"ws gap 1 has no ticker with a snapshot at or before it: ticker={BOS} "
@@ -392,3 +401,144 @@ def test_the_fold_refuses_a_row_whose_id_falls_while_received_at_rises(tmp_path:
         compare_points(db_path, [point(DEN, 3.0)], [])
 
     assert str(excinfo.value) == f"{DEN} id 5 follows id 9 in received_at order"
+
+
+def _tape_rows(
+    events: list[tuple[float, str, int, str, str, str, bool]],
+) -> list[tuple[object, ...]]:
+    return [
+        book(index + 1, ticker, offset, seq, side, price, size, is_snapshot)
+        for index, (offset, ticker, seq, side, price, size, is_snapshot) in enumerate(
+            sorted(events, key=lambda event: event[0])
+        )
+    ]
+
+
+def _windowed_tape() -> list[tuple[object, ...]]:
+    events: list[tuple[float, str, int, str, str, str, bool]] = [
+        (0.0, NYC, 1, "yes", "0.5000", "9.00", True),
+        (0.0, NYC, 1, "no", "0.6000", "4.00", True),
+        (0.5, BOS, 2, "yes", "0.1000", "3.00", True),
+        (0.5, BOS, 2, "no", "0.8000", "5.00", True),
+        (1.0, NYC, 3, "yes", "0.5000", "1.00", False),
+        (2.0, NYC, 4, "yes", "0.5000", "1.00", False),
+        (3.0, NYC, 5, "yes", "0.5000", "1.00", False),
+        (4.0, DEN, 6, "yes", "0.4000", "10.00", True),
+        (4.0, DEN, 6, "no", "0.5500", "7.00", True),
+        (4.2, CHI, 7, "yes", "0.2000", "4.00", True),
+        (4.2, CHI, 7, "no", "0.7000", "6.00", True),
+        (10.0, DEN, 20, "yes", "0.3000", "8.00", True),
+        (10.0, DEN, 20, "no", "0.6500", "5.00", True),
+        (10.5, CHI, 21, "yes", "0.2500", "5.00", True),
+        (10.5, CHI, 21, "no", "0.7200", "3.00", True),
+        (16.0, DEN, 40, "yes", "0.3100", "6.00", True),
+        (16.0, DEN, 40, "no", "0.6400", "4.00", True),
+        (30.0, DEN, 88, "yes", "0.3100", "1.00", False),
+        (35.0, DEN, 90, "yes", "0.3100", "1.00", False),
+        (35.5, CHI, 91, "yes", "0.2500", "1.00", False),
+    ]
+    events.extend((0.9 + k * 0.4, BOS, 10 + k, "yes", "0.1000", "1.00", False) for k in range(18))
+    events.extend((11.0 + k, DEN, 30 + k, "yes", "0.3000", "1.00", False) for k in range(5))
+    events.extend((17.0 + k, DEN, 50 + k, "yes", "0.3100", "1.00", False) for k in range(4))
+    events.extend((11.5 + k, CHI, 60 + k, "yes", "0.2500", "1.00", False) for k in range(6))
+    events.extend((12.1 + k, BOS, 70 + k, "yes", "0.1000", "1.00", False) for k in range(2))
+    return _tape_rows(events)
+
+
+def test_a_ticker_with_no_rows_in_the_window_is_never_sampled(tmp_path: Path) -> None:
+    tape = _windowed_tape()
+    db_path = build_db(tmp_path / "state.db", tape)
+    assert sum(1 for row in tape if row[1] == NYC) == 5
+
+    points = sample_points(db_path, 40, [], since=SINCE, until=UNTIL)
+
+    assert {p.ticker for p in points} == {DEN, CHI, BOS}
+
+
+def test_every_sampled_point_but_the_trailing_one_falls_inside_the_window(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", _windowed_tape())
+
+    points = sample_points(db_path, 40, [], since=SINCE, until=UNTIL)
+
+    assert all(SINCE <= p.t < UNTIL for p in points if p.kind != "blind")
+    assert {(p.ticker, p.t) for p in points if p.kind == "blind"} == {
+        (DEN, at(20.0) + TICK),
+        (CHI, at(16.5) + TICK),
+        (BOS, at(13.1) + TICK),
+    }
+    assert at(30.0) not in {p.t for p in points}
+
+
+def test_cohort_rank_counts_only_the_rows_inside_the_window(tmp_path: Path) -> None:
+    tape = _windowed_tape()
+    db_path = build_db(tmp_path / "state.db", tape)
+    overall = {name: sum(1 for row in tape if row[1] == name) for name in (DEN, CHI, BOS, NYC)}
+    assert overall[BOS] > overall[DEN] > overall[CHI]
+
+    points = sample_points(db_path, 40, [], since=SINCE, until=UNTIL)
+
+    assert {p.ticker: p.cohort for p in points} == {DEN: "spread", CHI: "chicago", BOS: "quiet"}
+
+
+def test_only_a_gap_inside_the_window_yields_an_exclusion_and_points(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", _windowed_tape(), [gap(1, "", 5.0), gap(2, "", 25.0)])
+    assert [w.gap_id for w in gap_windows(db_path, since=at(0.0), until=at(100.0))] == [1, 2]
+
+    windows = gap_windows(db_path, since=SINCE, until=UNTIL)
+    points = sample_points(db_path, 40, windows, since=SINCE, until=UNTIL)
+
+    assert [(w.gap_id, w.ticker) for w in windows] == [(2, "")]
+    assert [p.t for p in points if p.kind == "post_gap"] == [at(25.0)]
+    assert at(5.0) not in {p.t for p in points}
+
+
+def _straddling_tape() -> list[tuple[object, ...]]:
+    events: list[tuple[float, str, int, str, str, str, bool]] = [
+        (0.0, DEN, 1, "yes", "0.4000", "10.00", True),
+        (0.0, DEN, 1, "no", "0.5500", "7.00", True),
+        (10.2, CHI, 20, "yes", "0.2000", "4.00", True),
+        (10.2, CHI, 20, "no", "0.7000", "6.00", True),
+    ]
+    events.extend((1.0 + k, DEN, 2 + k, "yes", "0.4000", "1.00", False) for k in range(9))
+    events.extend((11.0 + k, DEN, 30 + k, "yes", "0.4000", "1.00", False) for k in range(10))
+    events.extend((12.2 + k * 2, CHI, 40 + k, "yes", "0.2000", "1.00", False) for k in range(3))
+    return _tape_rows(events)
+
+
+def test_a_ticker_straddling_since_is_folded_from_its_first_recorded_row(tmp_path: Path) -> None:
+    tape = _straddling_tape()
+    db_path = build_db(tmp_path / "state.db", tape)
+    since_db = SINCE.strftime(DB_TS)
+    den_cutoff = (at(20.0) + TICK).strftime(DB_TS)
+    chi_cutoff = (at(16.2) + TICK).strftime(DB_TS)
+    whole_stream = sum(1 for row in tape if row[1] == DEN and row[2] <= den_cutoff)
+    from_the_edge = sum(1 for row in tape if row[1] == DEN and since_db <= row[2] <= den_cutoff)
+    chi_stream = sum(1 for row in tape if row[1] == CHI and row[2] <= chi_cutoff)
+    assert (whole_stream, from_the_edge, chi_stream) == (21, 10, 5)
+
+    points = sample_points(db_path, 40, [], since=SINCE, until=UNTIL)
+    result = compare_points(db_path, points, [])
+
+    assert max(p.t for p in points if p.ticker == DEN) == at(20.0) + TICK
+    assert result.rows_read == whole_stream + chi_stream
+    assert result.disagreements() == ()
+    early = next(r for r in result.results if r.point.ticker == DEN and r.point.t == at(12.0))
+    assert dict(early.pass_view.ladder)["yes"] == (("0.4000", "21.00"),)
+    assert dict(early.pass_view.ladder)["no"] == (("0.5500", "7.00"),)
+
+
+def test_a_bound_in_the_wrong_timestamp_form_matches_no_rows(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", _windowed_tape())
+    counted = "SELECT COUNT(*) FROM ws_book_events WHERE received_at >= ? AND received_at < ?"
+    conn = sqlite3.connect(db_path)
+    try:
+        iso = conn.execute(counted, (SINCE.isoformat(), UNTIL.isoformat())).fetchone()[0]
+        stored = conn.execute(counted, (SINCE.strftime(DB_TS), UNTIL.strftime(DB_TS))).fetchone()[0]
+    finally:
+        conn.close()
+    assert (iso, stored) == (0, 23)
+
+    points = sample_points(db_path, 40, [], since=SINCE, until=UNTIL)
+
+    assert {p.ticker for p in points} == {DEN, CHI, BOS}
+    assert len(points) == 18

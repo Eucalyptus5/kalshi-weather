@@ -65,10 +65,13 @@ _MIN_ID = "SELECT MIN(id) FROM ws_book_events"
 _MAX_ID = "SELECT MAX(id) FROM ws_book_events"
 _ID_AT_OR_AFTER = "SELECT id, received_at FROM ws_book_events WHERE id >= ? ORDER BY id LIMIT 1"
 _RUN_UP_TO_ID = f"SELECT {_COLUMNS} FROM ws_book_events WHERE id <= ? ORDER BY id DESC LIMIT ?"
-_TICKER_COUNTS = "SELECT ticker, COUNT(*) FROM ws_book_events GROUP BY ticker"
+_TICKER_COUNTS = (
+    "SELECT ticker, COUNT(*) FROM ws_book_events "
+    "WHERE received_at >= ? AND received_at < ? GROUP BY ticker"
+)
 _TICKER_STREAM = (
     "SELECT received_at, seq, is_snapshot FROM ws_book_events "
-    "WHERE ticker = ? ORDER BY received_at, id"
+    "WHERE ticker = ? AND received_at >= ? AND received_at < ? ORDER BY received_at, id"
 )
 _SNAPSHOT_BEFORE = (
     "SELECT received_at FROM ws_book_events "
@@ -190,13 +193,21 @@ def sample_points(
     db_path: Path,
     budget: int,
     windows: Sequence[ExclusionWindow],
+    *,
+    since: datetime,
+    until: datetime,
 ) -> list[SamplePoint]:
+    since_db = _db(since)
+    until_db = _db(until)
     conn = _connect(db_path)
     try:
-        ranked = sorted(conn.execute(_TICKER_COUNTS).fetchall(), key=lambda row: (-row[1], row[0]))
+        ranked = sorted(
+            conn.execute(_TICKER_COUNTS, (since_db, until_db)).fetchall(),
+            key=lambda row: (-row[1], row[0]),
+        )
         points: list[SamplePoint] = []
         for cohort, ticker, rows in _cohorts(ranked, budget):
-            points.extend(_ticker_points(conn, ticker, rows, cohort))
+            points.extend(_ticker_points(conn, ticker, rows, cohort, since_db, until_db))
         for window in windows:
             points.extend(_window_points(conn, ranked, window))
     finally:
@@ -230,6 +241,8 @@ def _ticker_points(
     ticker: str,
     rows: int,
     cohort: str,
+    since_db: str,
+    until_db: str,
 ) -> list[SamplePoint]:
     ranks = iter(sorted({rows * (i + 1) // (INTERIOR_ROWS + 1) for i in range(INTERIOR_ROWS)}))
     target = next(ranks, None)
@@ -239,7 +252,7 @@ def _ticker_points(
     previous: datetime | None = None
     last = None
     for index, (received_at_db, seq, is_snapshot) in enumerate(
-        conn.execute(_TICKER_STREAM, (ticker,))
+        conn.execute(_TICKER_STREAM, (ticker, since_db, until_db))
     ):
         received_at = _decode_ts(received_at_db)
         if is_snapshot and (received_at_db, seq) != batch_key:
@@ -296,8 +309,8 @@ def _window_points(
     return points
 
 
-def gap_windows(db_path: Path) -> list[ExclusionWindow]:
-    gaps = read_gap_rows(db_path)
+def gap_windows(db_path: Path, *, since: datetime, until: datetime) -> list[ExclusionWindow]:
+    gaps = [row for row in read_gap_rows(db_path) if since <= row.detected_at < until]
     inventory = ExclusionInventory(gaps)
     conn = _connect(db_path)
     try:

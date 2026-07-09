@@ -3,15 +3,18 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from scripts.replay_parity import DEFAULT_POINTS, build_parser, run
-from tests.test_parity import CHI, DEN, at, book, build_db, gap
+from tests.test_parity import CHI, DEN, WHOLE_SINCE, WHOLE_UNTIL, at, book, build_db, gap
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+UTC = timezone.utc
+BOUNDS = ["--since", "2026-07-18T00:00:00+00:00", "--until", "2026-08-02T00:00:00+00:00"]
 
 CLEAN = [
     book(1, DEN, 0.0, 1, "yes", "0.4000", "10.00", True),
@@ -37,7 +40,7 @@ DELTA_BEFORE_ANY_SNAPSHOT = [
 
 
 def _namespace(db_path: Path, points: int = 20) -> argparse.Namespace:
-    return argparse.Namespace(db=db_path, points=points)
+    return argparse.Namespace(db=db_path, points=points, since=WHOLE_SINCE, until=WHOLE_UNTIL)
 
 
 def test_help_smoke() -> None:
@@ -51,17 +54,36 @@ def test_help_smoke() -> None:
     assert "usage" in result.stdout.lower()
     assert "--db" in result.stdout
     assert "--points" in result.stdout
+    assert "--since" in result.stdout
+    assert "--until" in result.stdout
 
 
 def test_default_arg_values() -> None:
-    args = build_parser().parse_args([])
+    args = build_parser().parse_args(BOUNDS)
     assert args.db == REPO_ROOT / "data" / "state.db"
     assert args.points == DEFAULT_POINTS
     assert DEFAULT_POINTS >= 200
+    assert args.since == datetime(2026, 7, 18, tzinfo=UTC)
+    assert args.until == datetime(2026, 8, 2, tzinfo=UTC)
 
 
 def test_points_budget_is_an_int_override() -> None:
-    assert build_parser().parse_args(["--points", "512"]).points == 512
+    assert build_parser().parse_args([*BOUNDS, "--points", "512"]).points == 512
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [[], ["--since", "2026-07-18T00:00:00+00:00"], ["--until", "2026-08-02T00:00:00+00:00"]],
+)
+def test_the_window_bounds_have_no_default(argv: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(argv)
+
+
+def test_a_bound_without_an_offset_is_read_as_utc() -> None:
+    args = build_parser().parse_args(["--since", "2026-07-18", "--until", "2026-08-02T06:00:00"])
+    assert args.since == datetime(2026, 7, 18, tzinfo=UTC)
+    assert args.until == datetime(2026, 8, 2, 6, tzinfo=UTC)
 
 
 def test_a_clean_tape_reports_agreement_and_exits_zero(
@@ -81,6 +103,20 @@ def test_a_clean_tape_reports_agreement_and_exits_zero(
     assert "parity_points=" in out
     assert "post_gap=1" in out
     assert out.rstrip().endswith("none")
+
+
+def test_a_window_that_ends_before_the_gap_drops_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = build_db(tmp_path / "state.db", CLEAN, [gap(1, "", 11.0)])
+    args = argparse.Namespace(db=db_path, points=20, since=WHOLE_SINCE, until=at(10.0))
+
+    rc = run(args)
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "agreed_on_raise=0" in out
+    assert "post_gap" not in out
 
 
 def test_a_point_the_oracle_cannot_answer_exits_one_and_names_it(

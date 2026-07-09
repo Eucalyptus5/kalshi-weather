@@ -4,6 +4,7 @@ import argparse
 import logging
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -25,6 +26,13 @@ DEFAULT_DB = REPO_ROOT / "data" / "state.db"
 DEFAULT_POINTS = 200
 
 
+def parse_utc(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="parity gate for the forward pass against book_state_at"
@@ -35,6 +43,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_POINTS,
         help="point budget; the realized sample is at least this large",
+    )
+    parser.add_argument(
+        "--since",
+        type=parse_utc,
+        required=True,
+        help="accrual window start, inclusive, e.g. 2026-07-18T00:00:00+00:00",
+    )
+    parser.add_argument(
+        "--until",
+        type=parse_utc,
+        required=True,
+        help="accrual window end, exclusive, e.g. 2026-08-02T00:00:00+00:00",
     )
     return parser
 
@@ -65,8 +85,8 @@ def format_result(result: ParityResult, elapsed_s: float) -> str:
 
 def run(args: argparse.Namespace) -> int:
     started = time.monotonic()
-    windows = gap_windows(args.db)
-    points = sample_points(args.db, args.points, windows)
+    windows = gap_windows(args.db, since=args.since, until=args.until)
+    points = sample_points(args.db, args.points, windows, since=args.since, until=args.until)
     result = compare_points(args.db, points, windows)
     print(format_result(result, time.monotonic() - started))
     return 1 if result.disagreements() else 0
