@@ -8,8 +8,20 @@ from pathlib import Path
 
 import pytest
 
-from scripts.replay_parity import DEFAULT_POINTS, build_parser, run
-from tests.test_parity import CHI, DEN, WHOLE_SINCE, WHOLE_UNTIL, at, book, build_db, gap
+from bot.replay.parity import compare_points
+from scripts.replay_parity import DEFAULT_POINTS, build_parser, format_result, run
+from tests.test_parity import (
+    CHI,
+    DELTAS_BEFORE_THE_FIRST_SNAPSHOT,
+    DEN,
+    WHOLE_SINCE,
+    WHOLE_UNTIL,
+    at,
+    book,
+    build_db,
+    gap,
+    point,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -30,6 +42,13 @@ CLEAN = [
 ]
 
 DELTA_BEFORE_ANY_SNAPSHOT = [
+    book(1, CHI, 0.0, 1, "yes", "0.2000", "4.00", True),
+    book(2, DEN, 0.5, 2, "yes", "0.4000", "3.00"),
+    book(3, DEN, 2.0, 4, "yes", "0.4100", "2.00"),
+    book(4, CHI, 3.0, 5, "yes", "0.2100", "1.00"),
+]
+
+DELTA_BEFORE_A_LATER_SNAPSHOT = [
     book(1, CHI, 0.0, 1, "yes", "0.2000", "4.00", True),
     book(2, DEN, 0.5, 2, "yes", "0.4000", "3.00"),
     book(3, DEN, 1.0, 3, "yes", "0.4000", "10.00", True),
@@ -119,6 +138,19 @@ def test_a_window_that_ends_before_the_gap_drops_it(
     assert "post_gap" not in out
 
 
+def test_an_unanchored_point_is_counted_and_listed_apart_from_the_disagreements(
+    tmp_path: Path,
+) -> None:
+    db_path = build_db(tmp_path / "state.db", DELTAS_BEFORE_THE_FIRST_SNAPSHOT)
+    result = compare_points(db_path, [point(DEN, 2.0)], [])
+
+    out = format_result(result, 0.5)
+
+    assert "excluded_no_anchor=1" in out
+    assert f"{DEN} {at(2.0).isoformat()}" in out.split("-- excluded, no oracle anchor")[1]
+    assert out.split("-- disagreements")[1].strip() == "none"
+
+
 def test_a_point_the_oracle_cannot_answer_exits_one_and_names_it(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -128,6 +160,24 @@ def test_a_point_the_oracle_cannot_answer_exits_one_and_names_it(
 
     out = capsys.readouterr().out
     assert rc == 1
-    assert "disagreed=2" in out
+    assert "disagreed=3" in out
     assert DEN in out.split("-- disagreements")[1]
     assert at(0.5).isoformat() in out.split("-- disagreements")[1]
+
+
+def test_a_point_before_a_later_snapshot_is_excluded_and_exits_zero(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db_path = build_db(tmp_path / "state.db", DELTA_BEFORE_A_LATER_SNAPSHOT)
+
+    rc = run(_namespace(db_path))
+
+    out = capsys.readouterr().out
+    excluded = out.split("-- excluded, no oracle anchor")[1].split("-- disagreements")[0]
+    disagreements = out.split("-- disagreements")[1]
+    assert rc == 0
+    assert "excluded_no_anchor=2" in out
+    assert f"{DEN} {at(0.5).isoformat()}" in excluded
+    assert DEN not in disagreements
+    assert at(0.5).isoformat() not in disagreements
+    assert disagreements.strip() == "none"

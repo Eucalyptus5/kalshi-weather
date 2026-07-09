@@ -14,6 +14,7 @@ from bot.replay.parity import (  # noqa: E402
     AGREED_ON_RAISE,
     DISAGREED,
     EXCLUDED,
+    NO_ANCHOR,
     ParityResult,
     compare_points,
     gap_windows,
@@ -66,7 +67,8 @@ def format_result(result: ParityResult, elapsed_s: float) -> str:
         "== PARITY vs book_state_at",
         f"points={len(result.results)}  compared={scalars['parity_compared']}  "
         f"agreed={counts[AGREED]}  agreed_on_raise={counts[AGREED_ON_RAISE]}  "
-        f"excluded_tied_delta={counts[EXCLUDED]}  disagreed={counts[DISAGREED]}",
+        f"excluded_tied_delta={counts[EXCLUDED]}  excluded_no_anchor={counts[NO_ANCHOR]}  "
+        f"disagreed={counts[DISAGREED]}",
         f"blind={sum(1 for r in result.results if r.blind)}  rows_read={result.rows_read}  "
         f"elapsed_s={elapsed_s:.1f}",
         "-- by kind",
@@ -76,6 +78,11 @@ def format_result(result: ParityResult, elapsed_s: float) -> str:
         "-- inventory scalars",
     ]
     lines.extend(f"  {name}={value}" for name, value in sorted(scalars.items()))
+    unanchored = [outcome for outcome in result.results if outcome.status == NO_ANCHOR]
+    lines.append("-- excluded, no oracle anchor")
+    if not unanchored:
+        lines.append("  none")
+    lines.extend(f"  {o.point.ticker} {o.point.t.isoformat()}" for o in unanchored)
     lines.append("-- disagreements")
     if not result.disagreements():
         lines.append("  none")

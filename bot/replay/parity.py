@@ -24,6 +24,7 @@ AGREED = "agreed"
 AGREED_ON_RAISE = "agreed_on_raise"
 DISAGREED = "disagreed"
 EXCLUDED = "excluded_tied_delta"
+NO_ANCHOR = "excluded_no_anchor"
 
 GAP_EDGE_ROWS = 4
 INTERIOR_ROWS = 5
@@ -56,6 +57,10 @@ _DELTAS = (
     "SELECT side, price, size FROM ws_book_events "
     "WHERE ticker = ? AND is_snapshot = 0 AND received_at > ? AND received_at <= ? "
     "ORDER BY received_at, id"
+)
+_FIRST_SNAPSHOT = (
+    "SELECT received_at FROM ws_book_events "
+    "WHERE ticker = ? AND is_snapshot = 1 ORDER BY received_at LIMIT 1"
 )
 _TIED_DELTA = (
     "SELECT 1 FROM ws_book_events WHERE ticker = ? AND is_snapshot = 0 AND received_at = ? LIMIT 1"
@@ -119,7 +124,7 @@ class ParityResult:
     rows_read: int
 
     def counts(self) -> dict[str, int]:
-        out = {AGREED: 0, AGREED_ON_RAISE: 0, DISAGREED: 0, EXCLUDED: 0}
+        out = {AGREED: 0, AGREED_ON_RAISE: 0, DISAGREED: 0, EXCLUDED: 0, NO_ANCHOR: 0}
         for result in self.results:
             out[result.status] = out.get(result.status, 0) + 1
         return out
@@ -395,6 +400,13 @@ def _evaluate(
             f"{oracle_raised or pass_raised}"
         )
         return PointResult(point, DISAGREED, blind, detail, None, None)
+    # A both-sides-empty opening snapshot writes no rows, so the ticker's first rows are deltas and
+    # the oracle cannot anchor until the next snapshot. Asked as its own query rather than off a
+    # None from _oracle_levels: a ticker with no snapshot row at all is a different cause that has
+    # to stay a disagreement.
+    first_snapshot = conn.execute(_FIRST_SNAPSHOT, (point.ticker,)).fetchone()
+    if first_snapshot is not None and first_snapshot[0] > t_db:
+        return PointResult(point, NO_ANCHOR, blind, "", None, None)
     governing = _oracle_levels(conn, point.ticker, t_db)
     if governing is None:
         detail = f"{point.ticker} {point.t.isoformat()} has no oracle snapshot at or before t"

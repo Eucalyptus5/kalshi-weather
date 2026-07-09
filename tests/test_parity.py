@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from bot.lag.ws_book import WsGapError, book_state_at
-from bot.replay.inventory import check_excluded
+from bot.replay.inventory import ExclusionWindow, check_excluded
 from bot.replay.parity import TICK, SamplePoint, compare_points, gap_windows, sample_points
 
 
@@ -183,6 +183,92 @@ def test_the_tie_rule_skips_only_the_tied_point_and_counts_it(tmp_path: Path) ->
     assert scalars["parity_compared"] == "1"
     assert all(name.startswith("parity_") for name in scalars)
     assert all(type(value) is str for value in scalars.values())
+
+
+DELTAS_BEFORE_THE_FIRST_SNAPSHOT = [
+    book(1, DEN, 0.0, 1, "yes", "0.4000", "3.00"),
+    book(2, DEN, 1.0, 2, "no", "0.5500", "4.00"),
+    book(3, DEN, 5.0, 3, "yes", "0.4000", "10.00", True),
+    book(4, DEN, 5.0, 3, "no", "0.5500", "7.00", True),
+]
+
+
+def test_a_point_before_the_tickers_first_snapshot_row_is_excluded_not_compared(
+    tmp_path: Path,
+) -> None:
+    db_path = build_db(tmp_path / "state.db", DELTAS_BEFORE_THE_FIRST_SNAPSHOT)
+
+    result = compare_points(db_path, [point(DEN, 2.0)], [])
+
+    assert result.results[0].status == "excluded_no_anchor"
+    assert result.disagreements() == ()
+    scalars = result.scalars()
+    assert scalars["parity_excluded_no_anchor"] == "1"
+    assert scalars["parity_agreed"] == "0"
+    assert scalars["parity_compared"] == "0"
+
+
+NEVER_SNAPSHOTTED = [
+    book(1, DEN, 0.0, 1, "yes", "0.4000", "3.00"),
+    book(2, DEN, 1.0, 2, "no", "0.5500", "4.00"),
+]
+
+
+def test_a_ticker_the_recorder_never_snapshotted_stays_a_disagreement(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", NEVER_SNAPSHOTTED)
+    assert book_state_at(db_path, DEN, at(2.0)) is None
+
+    result = compare_points(db_path, [point(DEN, 2.0)], [])
+
+    outcome = result.results[0]
+    assert outcome.status == "disagreed"
+    assert DEN in outcome.detail
+    assert at(2.0).isoformat() in outcome.detail
+    assert result.scalars()["parity_excluded_no_anchor"] == "0"
+
+
+def test_an_anchored_point_is_untouched_by_the_no_anchor_rule(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", COMPOSED)
+
+    result = compare_points(db_path, [point(DEN, 6.0)], [])
+
+    assert result.results[0].status == "agreed"
+    assert result.scalars()["parity_excluded_no_anchor"] == "0"
+
+
+def test_a_one_sided_raise_outranks_the_no_anchor_rule(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", DELTAS_BEFORE_THE_FIRST_SNAPSHOT)
+    window = ExclusionWindow(
+        gap_id=1,
+        ticker=DEN,
+        start=at(1.0),
+        end=at(5.0),
+        detected_at=at(3.0),
+        last_seq=2,
+        reason="connection_reset",
+    )
+    assert book_state_at(db_path, DEN, at(2.0)) is None
+    with pytest.raises(WsGapError):
+        check_excluded([window], DEN, at(2.0))
+
+    result = compare_points(db_path, [point(DEN, 2.0)], [window])
+
+    outcome = result.results[0]
+    assert outcome.status == "disagreed"
+    assert "only the pass path raised" in outcome.detail
+    assert result.scalars()["parity_excluded_no_anchor"] == "0"
+
+
+def test_the_no_anchor_rule_is_scoped_to_the_point_not_the_ticker(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", DELTAS_BEFORE_THE_FIRST_SNAPSHOT)
+
+    result = compare_points(db_path, [point(DEN, 2.0), point(DEN, 6.0)], [])
+
+    assert [outcome.status for outcome in result.results] == ["excluded_no_anchor", "agreed"]
+    scalars = result.scalars()
+    assert scalars["parity_excluded_no_anchor"] == "1"
+    assert scalars["parity_agreed"] == "1"
+    assert scalars["parity_compared"] == "1"
 
 
 def test_a_point_past_the_last_recorded_row_is_flagged_blind_and_still_compared(
