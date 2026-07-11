@@ -147,7 +147,8 @@ def test_an_unanchored_point_is_counted_and_listed_apart_from_the_disagreements(
     out = format_result(result, 0.5)
 
     assert "excluded_no_anchor=1" in out
-    assert f"{DEN} {at(2.0).isoformat()}" in out.split("-- excluded, no oracle anchor")[1]
+    excluded = out.split("-- excluded, no oracle anchor")[1].split("-- disagreements")[0]
+    assert excluded.strip() == f"{DEN} {at(2.0).isoformat()} kind=interior"
     assert out.split("-- disagreements")[1].strip() == "none"
 
 

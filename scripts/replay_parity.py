@@ -82,7 +82,9 @@ def format_result(result: ParityResult, elapsed_s: float) -> str:
     lines.append("-- excluded, no oracle anchor")
     if not unanchored:
         lines.append("  none")
-    lines.extend(f"  {o.point.ticker} {o.point.t.isoformat()}" for o in unanchored)
+    lines.extend(
+        f"  {o.point.ticker} {o.point.t.isoformat()} kind={o.point.kind}" for o in unanchored
+    )
     lines.append("-- disagreements")
     if not result.disagreements():
         lines.append("  none")
