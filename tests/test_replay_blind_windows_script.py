@@ -44,8 +44,7 @@ def db_path(tmp_path: Path) -> Path:
 
 def raw_dir(tmp_path: Path, frames: list[tuple[object, str]]) -> Path:
     directory = tmp_path / "ws_raw"
-    directory.mkdir(exist_ok=True)
-    write_tape(directory / f"{DAY}.jsonl.gz", frames)
+    write_tape(directory, frames)
     return directory
 
 
@@ -180,6 +179,34 @@ def test_a_validated_day_reports_the_sample_and_the_three_tallies(
     assert "tape_wider=0" in printed
     assert "tape_extra_frames=0" in printed
     assert "tape_falsified=0" in printed
+
+
+def test_a_day_named_twice_is_scanned_once(
+    db_path: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    directory = raw_dir(tmp_path, AGREEING_TAPE)
+    out = tmp_path / "blind.parquet"
+
+    rc = run(
+        args_for(
+            db_path,
+            out,
+            "--raw-dir",
+            str(directory),
+            "--validate-day",
+            DAY,
+            "--validate-day",
+            DAY,
+        )
+    )
+
+    printed = capsys.readouterr().out
+    assert rc == 0
+    assert f"validated_days={DAY}" in printed
+    assert "validated_windows=1" in printed
+    assert "tape_agreed=1" in printed
+    assert "tape_wider=0" in printed
+    assert "tape_extra_frames=0" in printed
 
 
 def test_a_falsified_window_is_named_and_fails_the_run(

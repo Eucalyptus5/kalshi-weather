@@ -19,7 +19,8 @@ from bot.replay.blind_windows import (
     scan_blind_windows,
     write_blind_windows,
 )
-from bot.replay.inventory import GapRow
+from bot.replay.forward_pass import SourceRow
+from bot.replay.inventory import GapRow, SeqBoundaryDetector
 
 
 UTC = timezone.utc
@@ -90,6 +91,20 @@ def gap_row(row_id: int, detected_at: datetime, reason: str = "connection_reset"
     return GapRow(id=row_id, ticker="", detected_at=detected_at, last_seq=0, reason=reason)
 
 
+def source_row(row_id: int, offset_us: int, seq: int) -> SourceRow:
+    return SourceRow(
+        id=row_id,
+        ticker="KXHIGHDEN-26JUL30-B85",
+        received_at=at(offset_us),
+        seq=seq,
+        side="yes",
+        price="0.4000",
+        size="1.00",
+        is_snapshot=False,
+        ts_ms=None,
+    )
+
+
 MIXED_ROWS = [
     book(1, 0, 1),
     book(2, 0, 1),
@@ -156,6 +171,18 @@ def test_the_detector_needs_no_database() -> None:
         detector.observe(row_id, at(offset_us).strftime(DB_TS), seq)
 
     assert detector.windows() == [window(3, 2, at(SECOND), at(3 * SECOND), prev_seq=5, seq=1)]
+
+
+def test_a_seq_that_repeats_is_a_boundary_the_shipped_detector_also_counts() -> None:
+    stream = ((1, 0, 4), (2, SECOND, 5), (3, 3 * SECOND, 5))
+    detector = BlindWindowDetector()
+    shipped = SeqBoundaryDetector()
+    for row_id, offset_us, seq in stream:
+        detector.observe(row_id, at(offset_us).strftime(DB_TS), seq)
+        shipped.observe(source_row(row_id, offset_us, seq))
+
+    assert detector.windows() == [window(3, 2, at(SECOND), at(3 * SECOND), prev_seq=5, seq=5)]
+    assert (shipped.resubscribes(), shipped.skips()) == (1, 0)
 
 
 def test_blind_us_is_a_whole_microsecond_count(tmp_path: Path) -> None:

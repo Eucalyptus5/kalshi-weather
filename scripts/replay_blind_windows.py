@@ -55,18 +55,23 @@ def run(args: argparse.Namespace) -> int:
         "out": str(args.out),
         "max_id": args.max_id,
         "rows_scanned": rows,
-        **{name: _plain(value) for name, value in asdict(build_summary(windows)).items()},
+        **{
+            name: value.isoformat() if isinstance(value, datetime) else value
+            for name, value in asdict(build_summary(windows)).items()
+        },
         "unmatched_gap_rows": len(unmatched),
     }
 
     check = None
     if args.validate_day:
-        days = set(args.validate_day)
+        # A day named twice would otherwise be scanned twice and count every frame twice, which
+        # reads as the database window being wider than the tape.
+        days = sorted(set(args.validate_day))
         sample = [window for window in windows if window.start.date() in days]
-        paths = [args.raw_dir / f"{day.isoformat()}.jsonl.gz" for day in args.validate_day]
+        paths = [args.raw_dir / f"{day.isoformat()}.jsonl.gz" for day in days]
         check = check_tape_counts(sample, count_frames_in_windows(paths, sample))
         payload |= {
-            "validated_days": ",".join(day.isoformat() for day in sorted(days)),
+            "validated_days": ",".join(day.isoformat() for day in days),
             "validated_windows": check.sampled,
             "tape_agreed": check.agreed,
             "tape_wider": check.wider,
@@ -90,10 +95,6 @@ def format_report(payload: Mapping[str, object], falsifying: Sequence[BlindWindo
         for window in falsifying
     )
     return "\n".join(lines)
-
-
-def _plain(value: object) -> object:
-    return value.isoformat() if isinstance(value, datetime) else value
 
 
 def main(argv: list[str] | None = None) -> int:

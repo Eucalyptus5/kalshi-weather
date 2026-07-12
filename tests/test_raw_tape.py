@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
+from bot.main import WsRawTape
 from bot.replay.blind_windows import BlindWindow
 from bot.replay.raw_tape import check_tape_counts, count_frames_in_windows
 
@@ -20,12 +21,12 @@ def frame(kind: str, seq: int = 1) -> str:
     return json.dumps({"type": kind, "sid": 1, "seq": seq, "msg": {"market_ticker": AUS}}) + "\n"
 
 
-def write_tape(path: Path, frames: Sequence[tuple[datetime, str]]) -> Path:
-    with gzip.open(path, "ab") as handle:
-        for received_at, raw in frames:
-            payload = {"received_at": received_at.isoformat(), "raw": raw}
-            handle.write(json.dumps(payload).encode() + b"\n")
-    return path
+def write_tape(directory: Path, frames: Sequence[tuple[datetime, str]]) -> list[Path]:
+    tape = WsRawTape(directory)
+    for received_at, raw in frames:
+        tape.write(raw, received_at)
+    tape.close()
+    return sorted(directory.glob("*.jsonl.gz"))
 
 
 def window(boundary_id: int, start: datetime, end: datetime) -> BlindWindow:
@@ -47,8 +48,8 @@ def test_a_window_that_agrees_with_the_tape_counts_the_boundary_frame_alone(
     tmp_path: Path,
 ) -> None:
     boundary = window(10, at(3, 1, 1), at(3, 1, 2, 398_909))
-    path = write_tape(
-        tmp_path / "2026-07-30.jsonl.gz",
+    paths = write_tape(
+        tmp_path,
         [
             (at(3, 1, 0, 999_990), frame("orderbook_delta")),
             (at(3, 1, 0, 999_995), frame("orderbook_delta", 2)),
@@ -57,15 +58,16 @@ def test_a_window_that_agrees_with_the_tape_counts_the_boundary_frame_alone(
         ],
     )
 
-    assert count_frames_in_windows([path], [boundary]) == {10: 1}
+    assert [path.name for path in paths] == ["2026-07-30.jsonl.gz"]
+    assert count_frames_in_windows(paths, [boundary]) == {10: 1}
 
 
 def test_frames_the_database_never_kept_make_the_window_wider_than_the_tape(
     tmp_path: Path,
 ) -> None:
     boundary = window(10, at(3, 1, 1), at(3, 1, 5))
-    path = write_tape(
-        tmp_path / "2026-07-30.jsonl.gz",
+    paths = write_tape(
+        tmp_path,
         [
             (at(3, 1, 0, 999_990), frame("orderbook_delta")),
             (at(3, 1, 2), frame("orderbook_delta", 2)),
@@ -74,7 +76,7 @@ def test_frames_the_database_never_kept_make_the_window_wider_than_the_tape(
         ],
     )
 
-    counts = count_frames_in_windows([path], [boundary])
+    counts = count_frames_in_windows(paths, [boundary])
     check = check_tape_counts([boundary], counts)
 
     assert counts == {10: 3}
@@ -84,15 +86,15 @@ def test_frames_the_database_never_kept_make_the_window_wider_than_the_tape(
 
 def test_a_tape_with_nothing_inside_the_window_falsifies_it(tmp_path: Path) -> None:
     boundary = window(10, at(3, 1, 1), at(3, 1, 2))
-    path = write_tape(
-        tmp_path / "2026-07-30.jsonl.gz",
+    paths = write_tape(
+        tmp_path,
         [
             (at(3, 1, 0, 900_000), frame("orderbook_delta")),
             (at(3, 1, 2, 500_000), frame("orderbook_delta", 2)),
         ],
     )
 
-    counts = count_frames_in_windows([path], [boundary])
+    counts = count_frames_in_windows(paths, [boundary])
     check = check_tape_counts([boundary], counts)
 
     assert counts == {10: 0}
@@ -103,8 +105,8 @@ def test_a_tape_with_nothing_inside_the_window_falsifies_it(tmp_path: Path) -> N
 
 def test_only_orderbook_frames_are_counted(tmp_path: Path) -> None:
     boundary = window(10, at(3, 1, 1), at(3, 1, 5))
-    path = write_tape(
-        tmp_path / "2026-07-30.jsonl.gz",
+    paths = write_tape(
+        tmp_path,
         [
             (at(3, 1, 2), frame("trade")),
             (at(3, 1, 2, 500_000), frame("ticker_v2")),
@@ -113,14 +115,14 @@ def test_only_orderbook_frames_are_counted(tmp_path: Path) -> None:
         ],
     )
 
-    assert count_frames_in_windows([path], [boundary]) == {10: 1}
+    assert count_frames_in_windows(paths, [boundary]) == {10: 1}
 
 
 def test_a_stamp_without_microseconds_lands_on_the_right_side_of_a_bound(tmp_path: Path) -> None:
     early = window(10, at(4, 59, 59), at(5, 0, 0))
     late = window(20, at(6, 0, 0), at(6, 0, 1))
-    path = write_tape(
-        tmp_path / "2026-07-30.jsonl.gz",
+    paths = write_tape(
+        tmp_path,
         [
             (at(4, 59, 59, 500_000), frame("orderbook_delta")),
             (at(5, 0, 0), frame("orderbook_delta", 2)),
@@ -129,9 +131,9 @@ def test_a_stamp_without_microseconds_lands_on_the_right_side_of_a_bound(tmp_pat
         ],
     )
 
-    lines = gzip.decompress(path.read_bytes()).splitlines()
+    lines = gzip.decompress(paths[0].read_bytes()).splitlines()
     assert json.loads(lines[1])["received_at"] == "2026-07-30T05:00:00+00:00"
-    assert count_frames_in_windows([path], [early, late]) == {10: 1, 20: 1}
+    assert count_frames_in_windows(paths, [early, late]) == {10: 1, 20: 1}
 
 
 def test_several_days_are_scanned_into_one_tally(tmp_path: Path) -> None:
@@ -140,18 +142,19 @@ def test_several_days_are_scanned_into_one_tally(tmp_path: Path) -> None:
 
     first = window(10, at(3, 1, 1), at(3, 1, 3))
     second = window(20, next_day(0), next_day(2))
-    one = write_tape(tmp_path / "2026-07-30.jsonl.gz", [(at(3, 1, 2), frame("orderbook_delta"))])
-    two = write_tape(
-        tmp_path / "2026-07-31.jsonl.gz",
+    paths = write_tape(
+        tmp_path,
         [
-            (next_day(1), frame("orderbook_delta")),
-            (next_day(1, 500_000), frame("orderbook_delta", 2)),
+            (at(3, 1, 2), frame("orderbook_delta")),
+            (next_day(1), frame("orderbook_delta", 2)),
+            (next_day(1, 500_000), frame("orderbook_delta", 3)),
         ],
     )
 
-    counts = count_frames_in_windows([one, two], [first, second])
+    counts = count_frames_in_windows(paths, [first, second])
     check = check_tape_counts([first, second], counts)
 
+    assert [path.name for path in paths] == ["2026-07-30.jsonl.gz", "2026-07-31.jsonl.gz"]
     assert counts == {10: 1, 20: 2}
     assert (check.sampled, check.agreed, check.wider, check.extra_frames) == (2, 1, 1, 1)
 
