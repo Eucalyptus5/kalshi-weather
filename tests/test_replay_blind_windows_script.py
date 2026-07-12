@@ -26,6 +26,18 @@ BOOK_ROWS = [
 ]
 GAP_ROWS = [gap(1, 2 * SECOND + 500_000)]
 
+CEILING_ROWS = [
+    book(1, 0, 1),
+    book(2, SECOND, 2),
+    book(3, 2 * SECOND, 1),
+    book(4, 3 * SECOND, 2),
+    book(5, 5 * SECOND, 1),
+    book(6, 6 * SECOND, 2),
+    book(7, 20 * SECOND, 1),
+    book(8, 21 * SECOND, 2),
+]
+CEILING_GAP_ROWS = [gap(1, 2 * SECOND + 500_000), gap(2, 20 * SECOND + 500_000)]
+
 AGREEING_TAPE = [
     (at(SECOND - 10), frame("orderbook_delta")),
     (at(2 * SECOND + 398_900), frame("orderbook_snapshot")),
@@ -136,6 +148,22 @@ def test_a_gap_row_the_scan_cannot_place_is_counted(
     assert run(args_for(db, tmp_path / "blind.parquet")) == 0
 
     assert "unmatched_gap_rows=1" in capsys.readouterr().out
+
+
+def test_a_gap_row_above_the_ceiling_reaches_no_window_below_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = build_db(tmp_path / "state.db", CEILING_ROWS, CEILING_GAP_ROWS)
+    out = tmp_path / "blind.parquet"
+
+    assert run(args_for(db, out, "--max-id", "6")) == 0
+
+    assert [row["gap_id"] for row in pq.read_table(out).to_pylist()] == [1, None]
+    printed = capsys.readouterr().out
+    assert "windows=2" in printed
+    assert "with_gap_row=1" in printed
+    assert "without_gap_row=1" in printed
+    assert "unmatched_gap_rows=1" in printed
 
 
 def test_the_ceiling_bounds_what_the_run_inventories(

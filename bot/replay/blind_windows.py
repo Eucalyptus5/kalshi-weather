@@ -104,13 +104,20 @@ class BlindWindowDetector:
         return list(self._windows)
 
 
+@dataclass(frozen=True, slots=True)
+class BlindScan:
+    windows: tuple[BlindWindow, ...]
+    rows: int
+    last_received_at: datetime | None
+
+
 def scan_blind_windows(
     db_path: Path,
     *,
     max_id: int | None = None,
     batch_rows: int = SCAN_BATCH_ROWS,
     progress_rows: int = PROGRESS_ROWS,
-) -> tuple[list[BlindWindow], int]:
+) -> BlindScan:
     detector = BlindWindowDetector()
     select = _SELECT if max_id is None else _SELECT_BOUNDED
     bound = () if max_id is None else (max_id,)
@@ -118,6 +125,7 @@ def scan_blind_windows(
     rows = 0
     since_log = 0
     last_id = 0
+    last_received_at: datetime | None = None
     conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
     conn.execute("PRAGMA query_only=ON")
     try:
@@ -130,6 +138,7 @@ def scan_blind_windows(
             for row_id, received_at, seq in batch:
                 detector.observe(row_id, received_at, seq)
             last_id = batch[-1][0]
+            last_received_at = _decode_ts(batch[-1][1])
             rows += len(batch)
             since_log += len(batch)
             if since_log >= progress_rows:
@@ -138,7 +147,7 @@ def scan_blind_windows(
     finally:
         conn.close()
     _log_progress(rows, last_id, len(detector.windows()), started)
-    return detector.windows(), rows
+    return BlindScan(tuple(detector.windows()), rows, last_received_at)
 
 
 def _log_progress(rows: int, last_id: int, windows: int, started: float) -> None:
@@ -154,17 +163,20 @@ def _log_progress(rows: int, last_id: int, windows: int, started: float) -> None
 
 
 def attach_gap_rows(
-    windows: Sequence[BlindWindow], gaps: Sequence[GapRow]
+    windows: Sequence[BlindWindow], gaps: Sequence[GapRow], *, scanned_through: datetime | None
 ) -> tuple[list[BlindWindow], list[GapRow]]:
     ordered = sorted(windows, key=lambda window: window.start)
     starts = [window.start for window in ordered]
+    bounds = [*starts[1:], scanned_through]
     matched: dict[int, GapRow] = {}
     unmatched: list[GapRow] = []
     # detected_at is stamped at persist, after the reconnect slept its backoff, so a gap row
-    # always falls at or after the start of the boundary that produced it.
+    # always falls at or after the start of the boundary that produced it and can fall after its
+    # end. The window it belongs to runs to where the next one starts, and the last one runs to
+    # where the scan stopped reading: past that lie boundaries the scan never saw.
     for row in sorted(gaps, key=lambda row: (row.detected_at, row.id)):
         index = bisect_right(starts, row.detected_at) - 1
-        if index < 0 or index in matched:
+        if index < 0 or index in matched or row.detected_at >= bounds[index]:
             unmatched.append(row)
         else:
             matched[index] = row

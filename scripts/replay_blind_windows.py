@@ -47,14 +47,16 @@ def run(args: argparse.Namespace) -> int:
     if args.validate_day and args.raw_dir is None:
         raise ValueError("--validate-day needs --raw-dir")
     started = time.monotonic()
-    scanned, rows = scan_blind_windows(args.db, max_id=args.max_id)
-    windows, unmatched = attach_gap_rows(scanned, read_gap_rows(args.db))
+    scan = scan_blind_windows(args.db, max_id=args.max_id)
+    windows, unmatched = attach_gap_rows(
+        scan.windows, read_gap_rows(args.db), scanned_through=scan.last_received_at
+    )
     write_blind_windows(args.out, windows)
     payload: dict[str, object] = {
         "db": str(args.db),
         "out": str(args.out),
         "max_id": args.max_id,
-        "rows_scanned": rows,
+        "rows_scanned": scan.rows,
         **{
             name: value.isoformat() if isinstance(value, datetime) else value
             for name, value in asdict(build_summary(windows)).items()

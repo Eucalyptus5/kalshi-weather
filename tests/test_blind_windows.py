@@ -12,6 +12,7 @@ from bot.replay.blind_windows import (
     BLIND_WINDOWS_SCHEMA,
     FROZEN_END,
     FROZEN_START,
+    BlindScan,
     BlindWindow,
     BlindWindowDetector,
     attach_gap_rows,
@@ -105,6 +106,8 @@ def source_row(row_id: int, offset_us: int, seq: int) -> SourceRow:
     )
 
 
+SCAN_END = at(30 * SECOND)
+
 MIXED_ROWS = [
     book(1, 0, 1),
     book(2, 0, 1),
@@ -123,7 +126,7 @@ def test_a_monotone_stream_holds_no_boundary(tmp_path: Path) -> None:
         tmp_path / "state.db", [book(1, 0, 1), book(2, SECOND, 2), book(3, 2 * SECOND, 3)]
     )
 
-    assert scan_blind_windows(db_path) == ([], 3)
+    assert scan_blind_windows(db_path) == BlindScan((), 3, at(2 * SECOND))
 
 
 def test_a_backwards_seq_is_one_window_bounded_by_the_messages_either_side(
@@ -132,10 +135,10 @@ def test_a_backwards_seq_is_one_window_bounded_by_the_messages_either_side(
     rows = [book(1, 0, 1), book(2, SECOND, 2), book(3, 4 * SECOND, 1), book(4, 5 * SECOND, 2)]
     db_path = build_db(tmp_path / "state.db", rows)
 
-    windows, scanned = scan_blind_windows(db_path)
+    scan = scan_blind_windows(db_path)
 
-    assert scanned == 4
-    assert windows == [window(3, 2, at(SECOND), at(4 * SECOND))]
+    assert scan.rows == 4
+    assert scan.windows == (window(3, 2, at(SECOND), at(4 * SECOND)),)
 
 
 def test_rows_of_one_message_collapse_and_the_left_edge_is_the_message_before(
@@ -152,17 +155,17 @@ def test_rows_of_one_message_collapse_and_the_left_edge_is_the_message_before(
     ]
     db_path = build_db(tmp_path / "state.db", rows)
 
-    windows, scanned = scan_blind_windows(db_path)
+    scan = scan_blind_windows(db_path)
 
-    assert scanned == 7
-    assert windows == [window(4, 3, at(SECOND), at(4 * SECOND))]
+    assert scan.rows == 7
+    assert scan.windows == (window(4, 3, at(SECOND), at(4 * SECOND)),)
 
 
 def test_a_forward_seq_skip_is_not_a_boundary(tmp_path: Path) -> None:
     rows = [book(1, 0, 1), book(2, SECOND, 2), book(3, 2 * SECOND, 9), book(4, 3 * SECOND, 10)]
     db_path = build_db(tmp_path / "state.db", rows)
 
-    assert scan_blind_windows(db_path) == ([], 4)
+    assert scan_blind_windows(db_path) == BlindScan((), 4, at(3 * SECOND))
 
 
 def test_the_detector_needs_no_database() -> None:
@@ -188,7 +191,7 @@ def test_a_seq_that_repeats_is_a_boundary_the_shipped_detector_also_counts() -> 
 def test_blind_us_is_a_whole_microsecond_count(tmp_path: Path) -> None:
     db_path = build_db(tmp_path / "state.db", [book(1, 0, 5), book(2, 845_123, 1)])
 
-    blind = scan_blind_windows(db_path)[0][0].blind_us
+    blind = scan_blind_windows(db_path).windows[0].blind_us
 
     assert blind == 845_123
     assert isinstance(blind, int)
@@ -201,20 +204,33 @@ def test_batching_does_not_change_what_the_scan_finds(tmp_path: Path) -> None:
     many = scan_blind_windows(db_path, batch_rows=10_000)
 
     assert one == many
-    assert one[1] == len(MIXED_ROWS)
-    assert one[0] == [
+    assert one.rows == len(MIXED_ROWS)
+    assert one.windows == (
         window(4, 3, at(SECOND), at(4 * SECOND)),
         window(8, 7, at(6 * SECOND), at(20 * SECOND), prev_seq=3, seq=1),
-    ]
+    )
 
 
 def test_max_id_drops_a_boundary_above_the_ceiling(tmp_path: Path) -> None:
     db_path = build_db(tmp_path / "state.db", MIXED_ROWS)
 
-    windows, scanned = scan_blind_windows(db_path, max_id=7)
+    scan = scan_blind_windows(db_path, max_id=7)
 
-    assert scanned == 7
-    assert windows == [window(4, 3, at(SECOND), at(4 * SECOND))]
+    assert scan.rows == 7
+    assert scan.windows == (window(4, 3, at(SECOND), at(4 * SECOND)),)
+
+
+def test_the_scan_reports_the_received_at_of_the_last_row_it_read(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", MIXED_ROWS)
+
+    assert scan_blind_windows(db_path).last_received_at == at(21 * SECOND)
+    assert scan_blind_windows(db_path, max_id=7).last_received_at == at(6 * SECOND)
+
+
+def test_a_scan_that_reads_nothing_has_no_last_row(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", [])
+
+    assert scan_blind_windows(db_path) == BlindScan((), 0, None)
 
 
 def test_each_read_is_its_own_statement_and_the_source_is_read_only(
@@ -266,7 +282,7 @@ def test_a_gap_row_attaches_to_the_window_whose_start_it_follows() -> None:
     ]
     row = gap_row(7, at(5 * SECOND), reason="seq_skip")
 
-    attached, unmatched = attach_gap_rows(windows, [row])
+    attached, unmatched = attach_gap_rows(windows, [row], scanned_through=SCAN_END)
 
     assert unmatched == []
     assert (attached[0].gap_id, attached[0].gap_reason) == (7, "seq_skip")
@@ -285,10 +301,70 @@ def test_a_gap_row_earlier_than_every_window_matches_nothing() -> None:
     ]
     row = gap_row(7, at(0))
 
-    attached, unmatched = attach_gap_rows(windows, [row])
+    attached, unmatched = attach_gap_rows(windows, [row], scanned_through=SCAN_END)
 
     assert unmatched == [row]
     assert [w.gap_id for w in attached] == [None, None]
+
+
+def test_a_gap_row_later_than_the_scanned_range_matches_nothing() -> None:
+    windows = [
+        window(3, 2, at(SECOND), at(4 * SECOND)),
+        window(9, 8, at(20 * SECOND), at(24 * SECOND)),
+    ]
+    row = gap_row(7, at(120 * SECOND))
+
+    attached, unmatched = attach_gap_rows(windows, [row], scanned_through=SCAN_END)
+
+    assert unmatched == [row]
+    assert [w.gap_id for w in attached] == [None, None]
+
+
+@pytest.mark.parametrize(("detected_at", "reached"), [(SCAN_END - TICK, True), (SCAN_END, False)])
+def test_the_last_window_runs_to_where_the_scan_stopped_reading(
+    detected_at: datetime, reached: bool
+) -> None:
+    windows = [
+        window(3, 2, at(SECOND), at(4 * SECOND)),
+        window(9, 8, at(20 * SECOND), at(24 * SECOND)),
+    ]
+    row = gap_row(7, detected_at)
+
+    attached, unmatched = attach_gap_rows(windows, [row], scanned_through=SCAN_END)
+
+    assert (attached[1].gap_id == 7) is reached
+    assert unmatched == ([] if reached else [row])
+
+
+@pytest.mark.parametrize(
+    ("detected_at", "reached"), [(at(20 * SECOND) - TICK, 3), (at(20 * SECOND), 9)]
+)
+def test_a_gap_row_stops_at_the_next_windows_start(detected_at: datetime, reached: int) -> None:
+    windows = [
+        window(3, 2, at(SECOND), at(4 * SECOND)),
+        window(9, 8, at(20 * SECOND), at(24 * SECOND)),
+    ]
+
+    attached, unmatched = attach_gap_rows(
+        windows, [gap_row(7, detected_at)], scanned_through=SCAN_END
+    )
+
+    assert unmatched == []
+    assert [w.boundary_id for w in attached if w.gap_id == 7] == [reached]
+
+
+def test_a_gap_row_stamped_after_the_window_closed_still_belongs_to_it() -> None:
+    windows = [
+        window(3, 2, at(SECOND), at(4 * SECOND)),
+        window(9, 8, at(20 * SECOND), at(24 * SECOND)),
+    ]
+    row = gap_row(7, at(19 * SECOND))
+
+    attached, unmatched = attach_gap_rows(windows, [row], scanned_through=SCAN_END)
+
+    assert unmatched == []
+    assert attached[0].gap_id == 7
+    assert attached[0].gap_detected_at > attached[0].end
 
 
 def test_the_earliest_gap_row_wins_a_window_and_the_rest_go_unmatched() -> None:
@@ -296,7 +372,7 @@ def test_the_earliest_gap_row_wins_a_window_and_the_rest_go_unmatched() -> None:
     first = gap_row(7, at(5 * SECOND))
     second = gap_row(8, at(6 * SECOND))
 
-    attached, unmatched = attach_gap_rows(windows, [second, first])
+    attached, unmatched = attach_gap_rows(windows, [second, first], scanned_through=SCAN_END)
 
     assert attached[0].gap_id == 7
     assert unmatched == [second]
@@ -331,9 +407,9 @@ def test_the_split_counts_the_windows_a_gap_row_reached() -> None:
     windows = [
         window(3, 2, at(SECOND), at(4 * SECOND)),
         window(9, 8, at(20 * SECOND), at(24 * SECOND)),
-        window(15, 14, at(40 * SECOND), at(41 * SECOND)),
+        window(15, 14, at(25 * SECOND), at(26 * SECOND)),
     ]
-    attached, _ = attach_gap_rows(windows, [gap_row(7, at(5 * SECOND))])
+    attached, _ = attach_gap_rows(windows, [gap_row(7, at(5 * SECOND))], scanned_through=SCAN_END)
 
     summary = build_summary(attached)
 
@@ -367,7 +443,9 @@ def test_the_parquet_round_trips_every_column(tmp_path: Path) -> None:
         window(3, 2, at(SECOND), at(2 * SECOND + 398_909)),
         window(9, 8, FROZEN_START - TICK, FROZEN_START),
     ]
-    attached, _ = attach_gap_rows(windows, [gap_row(7, at(5 * SECOND), reason="seq_skip")])
+    attached, _ = attach_gap_rows(
+        windows, [gap_row(7, at(5 * SECOND), reason="seq_skip")], scanned_through=SCAN_END
+    )
 
     write_blind_windows(path, attached)
     table = pq.read_table(path)
