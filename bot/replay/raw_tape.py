@@ -1,8 +1,10 @@
 import gzip
+import json
 import logging
 from bisect import bisect_left
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from bot.replay.blind_windows import BlindWindow
@@ -17,6 +19,32 @@ _STAMP_AT = len('{"received_at": "')
 _SECONDS_CHARS = len("2026-07-30T03:01:02")
 _ZERO_MICROSECOND_CHARS = len("2026-07-30T03:01:02+00:00")
 _TAPE_TS = "%Y-%m-%dT%H:%M:%S.%f+00:00"
+
+
+@dataclass(frozen=True, slots=True)
+class ClearFrame:
+    received_at: datetime
+    ticker: str
+    seq: int
+
+
+# An empty side is the absence of the key, so a snapshot clearing the book carries neither
+# yes_dollars_fp nor no_dollars_fp and decodes to no rows at all. Twenty million lines a day are
+# too many to parse, hence the byte screen ahead of json.loads.
+def read_clear_frames(path: Path) -> Iterator[ClearFrame]:
+    with gzip.open(path, "rb") as handle:
+        for line in handle:
+            if b"orderbook_snapshot" not in line or b"dollars_fp" in line:
+                continue
+            record = json.loads(line)
+            frame = json.loads(record["raw"])
+            if frame["type"] != "orderbook_snapshot":
+                continue
+            yield ClearFrame(
+                received_at=datetime.fromisoformat(record["received_at"]),
+                ticker=frame["msg"]["market_ticker"],
+                seq=frame["seq"],
+            )
 
 
 @dataclass(frozen=True, slots=True)

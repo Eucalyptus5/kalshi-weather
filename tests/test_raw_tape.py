@@ -6,19 +6,33 @@ from pathlib import Path
 
 from bot.main import WsRawTape
 from bot.replay.blind_windows import BlindWindow
-from bot.replay.raw_tape import check_tape_counts, count_frames_in_windows
+from bot.replay.raw_tape import (
+    ClearFrame,
+    check_tape_counts,
+    count_frames_in_windows,
+    read_clear_frames,
+)
 
 
 UTC = timezone.utc
 AUS = "KXHIGHAUS-26JUL29-B100.5"
+DEN = "KXHIGHDEN-26JUL29-B85.5"
 
 
 def at(hour: int, minute: int, second: int, microsecond: int = 0) -> datetime:
     return datetime(2026, 7, 30, hour, minute, second, microsecond, tzinfo=UTC)
 
 
-def frame(kind: str, seq: int = 1) -> str:
-    return json.dumps({"type": kind, "sid": 1, "seq": seq, "msg": {"market_ticker": AUS}}) + "\n"
+def frame(kind: str, seq: int = 1, ticker: str = AUS) -> str:
+    msg = {"market_ticker": ticker, "market_id": "68b7d0a1"}
+    return json.dumps({"type": kind, "sid": 1, "seq": seq, "msg": msg}) + "\n"
+
+
+def levelled(kind: str, seq: int, *sides: str, ticker: str = AUS) -> str:
+    msg: dict[str, object] = {"market_ticker": ticker, "market_id": "68b7d0a1"}
+    for side in sides:
+        msg[side] = [["0.0800", "300.00"], ["0.2200", "333.00"]]
+    return json.dumps({"type": kind, "sid": 1, "seq": seq, "msg": msg}) + "\n"
 
 
 def write_tape(directory: Path, frames: Sequence[tuple[datetime, str]]) -> list[Path]:
@@ -157,6 +171,39 @@ def test_several_days_are_scanned_into_one_tally(tmp_path: Path) -> None:
     assert [path.name for path in paths] == ["2026-07-30.jsonl.gz", "2026-07-31.jsonl.gz"]
     assert counts == {10: 1, 20: 2}
     assert (check.sampled, check.agreed, check.wider, check.extra_frames) == (2, 1, 1, 1)
+
+
+def test_only_a_snapshot_carrying_neither_side_reads_as_a_clear(tmp_path: Path) -> None:
+    paths = write_tape(
+        tmp_path,
+        [
+            (at(3, 1, 0), frame("orderbook_snapshot", 1)),
+            (at(3, 1, 1), levelled("orderbook_snapshot", 2, "no_dollars_fp")),
+            (at(3, 1, 2), levelled("orderbook_snapshot", 3, "yes_dollars_fp")),
+            (at(3, 1, 3), levelled("orderbook_snapshot", 4, "yes_dollars_fp", "no_dollars_fp")),
+            (at(3, 1, 4), frame("trade", 5)),
+            (at(3, 1, 5), frame("orderbook_delta", 6)),
+            (at(3, 1, 6, 398_909), frame("orderbook_snapshot", 7, ticker=DEN)),
+        ],
+    )
+
+    assert list(read_clear_frames(paths[0])) == [
+        ClearFrame(received_at=at(3, 1, 0), ticker=AUS, seq=1),
+        ClearFrame(received_at=at(3, 1, 6, 398_909), ticker=DEN, seq=7),
+    ]
+
+
+def test_a_tape_with_no_clear_yields_nothing(tmp_path: Path) -> None:
+    paths = write_tape(
+        tmp_path,
+        [
+            (at(3, 1, 0), levelled("orderbook_snapshot", 1, "yes_dollars_fp", "no_dollars_fp")),
+            (at(3, 1, 1), frame("orderbook_delta", 2)),
+            (at(3, 1, 2), frame("trade", 3)),
+        ],
+    )
+
+    assert list(read_clear_frames(paths[0])) == []
 
 
 def test_the_verdict_names_every_falsifying_window() -> None:
