@@ -25,7 +25,6 @@ _TAPE_TS = "%Y-%m-%dT%H:%M:%S.%f+00:00"
 class ClearFrame:
     received_at: datetime
     ticker: str
-    seq: int
 
 
 # An empty side is the absence of the key, so a snapshot clearing the book carries neither
@@ -43,7 +42,6 @@ def read_clear_frames(path: Path) -> Iterator[ClearFrame]:
             yield ClearFrame(
                 received_at=datetime.fromisoformat(record["received_at"]),
                 ticker=frame["msg"]["market_ticker"],
-                seq=frame["seq"],
             )
 
 

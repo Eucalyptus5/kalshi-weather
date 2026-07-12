@@ -47,10 +47,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args: argparse.Namespace) -> int:
-    started = time.monotonic()
     # A day named twice would otherwise be scanned twice and count every clear on it twice.
     days = sorted(set(args.day)) if args.day else list(FROZEN_DAYS)
     paths = [args.raw_dir / f"{day.isoformat()}.jsonl.gz" for day in days]
+    # Fifteen days of tape take hours, and both of these otherwise surface at the end of them.
+    if args.out.exists():
+        raise FileExistsError(f"refusing to overwrite {args.out}")
+    missing = [str(path) for path in paths if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"no tape at {' '.join(missing)}")
+
+    started = time.monotonic()
     scan = scan_clears(args.db, paths)
     write_mid_life_clears(args.out, scan.mid_life)
     payload: dict[str, object] = {

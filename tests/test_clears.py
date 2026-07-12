@@ -325,8 +325,10 @@ def test_each_day_reports_its_own_progress(
     scan_clears(db_path, paths)
 
     messages = [record.getMessage() for record in caplog.records]
-    assert len(messages) == 2
-    assert all("2026-07-3" in message and "clears=" in message for message in messages), messages
+    assert len(messages) == 4
+    assert all("2026-07-3" in message for message in messages), messages
+    assert sum("reading" in message and "bytes=" in message for message in messages) == 2
+    assert sum("elapsed_s=" in message and "bytes_per_s=" in message for message in messages) == 2
     assert capsys.readouterr().out == ""
 
 

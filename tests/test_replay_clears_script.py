@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import subprocess
 import sys
 from datetime import date
@@ -153,6 +154,34 @@ def test_an_unresolved_clear_reports_no_corrective_snapshot(
     printed = capsys.readouterr().out
     assert "unresolved=1" in printed
     assert f"clear={AUS} 2026-07-30T03:00:10+00:00 next_snapshot=none " in printed
+
+
+def test_a_table_already_on_disk_stops_the_run_before_it_reads_a_day(
+    db_path: Path, raw_dir: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="bot.replay.clears")
+    out = tmp_path / "clears.parquet"
+    out.write_bytes(b"PAR1")
+
+    with pytest.raises(FileExistsError, match=str(out)):
+        run(args_for(db_path, raw_dir, out, "--day", DAY))
+
+    assert out.read_bytes() == b"PAR1"
+    assert caplog.records == []
+
+
+def test_a_day_with_no_tape_stops_the_run_before_it_reads_a_day(
+    db_path: Path, raw_dir: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="bot.replay.clears")
+    out = tmp_path / "clears.parquet"
+    absent = raw_dir / "2026-07-31.jsonl.gz"
+
+    with pytest.raises(FileNotFoundError, match=str(absent)):
+        run(args_for(db_path, raw_dir, out, "--day", DAY, "--day", "2026-07-31"))
+
+    assert not out.exists()
+    assert caplog.records == []
 
 
 def test_the_summary_is_written_as_json(db_path: Path, raw_dir: Path, tmp_path: Path) -> None:

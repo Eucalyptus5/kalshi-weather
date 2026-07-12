@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -104,13 +105,7 @@ class ClearSummary:
     with_stale_rows: int
 
 
-def scan_clears(
-    db_path: Path,
-    paths: Sequence[Path],
-    *,
-    since: datetime = FROZEN_START,
-    until: datetime = FROZEN_END,
-) -> ClearScan:
+def scan_clears(db_path: Path, paths: Sequence[Path]) -> ClearScan:
     counts = {TERMINAL: 0, NO_ANCHOR: 0, EMPTY_BOOK: 0}
     mid_life: list[MidLifeClear] = []
     seen: dict[str, list[datetime]] = {}
@@ -118,9 +113,12 @@ def scan_clears(
     conn = _connect(db_path)
     try:
         for path in paths:
+            size = path.stat().st_size
+            logger.info("clears reading path=%s bytes=%d", path.name, size)
+            started = time.monotonic()
             found = 0
             for frame in read_clear_frames(path):
-                if not since <= frame.received_at < until:
+                if not FROZEN_START <= frame.received_at < FROZEN_END:
                     continue
                 found += 1
                 earlier = seen.setdefault(frame.ticker, [])
@@ -131,12 +129,15 @@ def scan_clears(
                 else:
                     mid_life.append(clear)
             clears += found
+            elapsed = time.monotonic() - started
             logger.info(
-                "clears path=%s found=%d clears=%d mid_life=%d",
+                "clears path=%s found=%d clears=%d mid_life=%d elapsed_s=%.3f bytes_per_s=%.0f",
                 path.name,
                 found,
                 clears,
                 len(mid_life),
+                elapsed,
+                size / elapsed,
             )
     finally:
         conn.close()

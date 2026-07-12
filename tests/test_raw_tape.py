@@ -188,8 +188,8 @@ def test_only_a_snapshot_carrying_neither_side_reads_as_a_clear(tmp_path: Path) 
     )
 
     assert list(read_clear_frames(paths[0])) == [
-        ClearFrame(received_at=at(3, 1, 0), ticker=AUS, seq=1),
-        ClearFrame(received_at=at(3, 1, 6, 398_909), ticker=DEN, seq=7),
+        ClearFrame(received_at=at(3, 1, 0), ticker=AUS),
+        ClearFrame(received_at=at(3, 1, 6, 398_909), ticker=DEN),
     ]
 
 
