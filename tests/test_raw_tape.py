@@ -1,6 +1,6 @@
 import gzip
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,16 +23,26 @@ def at(hour: int, minute: int, second: int, microsecond: int = 0) -> datetime:
     return datetime(2026, 7, 30, hour, minute, second, microsecond, tzinfo=UTC)
 
 
+# The exchange sends compact json and terminates every frame with a newline, and the byte screen
+# under test matches that spelling of the type field, so fixtures have to carry it too.
+def wire(payload: Mapping[str, object]) -> str:
+    return json.dumps(payload, separators=(",", ":")) + "\n"
+
+
 def frame(kind: str, seq: int = 1, ticker: str = AUS) -> str:
     msg = {"market_ticker": ticker, "market_id": "68b7d0a1"}
-    return json.dumps({"type": kind, "sid": 1, "seq": seq, "msg": msg}) + "\n"
+    return wire({"type": kind, "sid": 1, "seq": seq, "msg": msg})
 
 
 def levelled(kind: str, seq: int, *sides: str, ticker: str = AUS) -> str:
     msg: dict[str, object] = {"market_ticker": ticker, "market_id": "68b7d0a1"}
     for side in sides:
         msg[side] = [["0.0800", "300.00"], ["0.2200", "333.00"]]
-    return json.dumps({"type": kind, "sid": 1, "seq": seq, "msg": msg}) + "\n"
+    return wire({"type": kind, "sid": 1, "seq": seq, "msg": msg})
+
+
+def ack(channel: str, sid: int = 1) -> str:
+    return wire({"type": "subscribed", "id": 10, "msg": {"channel": channel, "sid": sid}})
 
 
 def write_tape(directory: Path, frames: Sequence[tuple[datetime, str]]) -> list[Path]:
@@ -132,6 +142,26 @@ def test_only_orderbook_frames_are_counted(tmp_path: Path) -> None:
     assert count_frames_in_windows(paths, [boundary]) == {10: 1}
 
 
+def test_a_subscribe_ack_naming_an_orderbook_channel_is_not_counted(tmp_path: Path) -> None:
+    boundary = window(10, at(5, 0, 12), at(5, 0, 14))
+    paths = write_tape(
+        tmp_path,
+        [
+            (at(5, 0, 13, 3_749), ack("orderbook_delta")),
+            (at(5, 0, 13, 100_000), ack("orderbook_snapshot", 2)),
+            (at(5, 0, 13, 200_000), frame("orderbook_delta", 2)),
+        ],
+    )
+
+    first = gzip.decompress(paths[0].read_bytes()).splitlines()[0].decode()
+    assert first == (
+        '{"received_at": "2026-07-30T05:00:13.003749+00:00", "raw": '
+        '"{\\"type\\":\\"subscribed\\",\\"id\\":10,\\"msg\\":'
+        '{\\"channel\\":\\"orderbook_delta\\",\\"sid\\":1}}\\n"}'
+    )
+    assert count_frames_in_windows(paths, [boundary]) == {10: 1}
+
+
 def test_a_stamp_without_microseconds_lands_on_the_right_side_of_a_bound(tmp_path: Path) -> None:
     early = window(10, at(4, 59, 59), at(5, 0, 0))
     late = window(20, at(6, 0, 0), at(6, 0, 1))
@@ -184,6 +214,7 @@ def test_only_a_snapshot_carrying_neither_side_reads_as_a_clear(tmp_path: Path) 
             (at(3, 1, 4), frame("trade", 5)),
             (at(3, 1, 5), frame("orderbook_delta", 6)),
             (at(3, 1, 6, 398_909), frame("orderbook_snapshot", 7, ticker=DEN)),
+            (at(3, 1, 7), ack("orderbook_snapshot")),
         ],
     )
 

@@ -20,6 +20,12 @@ _SECONDS_CHARS = len("2026-07-30T03:01:02")
 _ZERO_MICROSECOND_CHARS = len("2026-07-30T03:01:02+00:00")
 _TAPE_TS = "%Y-%m-%dT%H:%M:%S.%f+00:00"
 
+# The frame is escaped into the record's raw string, so the exchange's compact type field survives
+# as these bytes. Screening on the channel name alone also matches the subscribe ack that names the
+# channel, and an ack lands inside a blind window by construction.
+_SNAPSHOT_TYPE = rb"\"type\":\"orderbook_snapshot\""
+_DELTA_TYPE = rb"\"type\":\"orderbook_delta\""
+
 
 @dataclass(frozen=True, slots=True)
 class ClearFrame:
@@ -33,12 +39,10 @@ class ClearFrame:
 def read_clear_frames(path: Path) -> Iterator[ClearFrame]:
     with gzip.open(path, "rb") as handle:
         for line in handle:
-            if b"orderbook_snapshot" not in line or b"dollars_fp" in line:
+            if _SNAPSHOT_TYPE not in line or b"dollars_fp" in line:
                 continue
             record = json.loads(line)
             frame = json.loads(record["raw"])
-            if frame["type"] != "orderbook_snapshot":
-                continue
             yield ClearFrame(
                 received_at=datetime.fromisoformat(record["received_at"]),
                 ticker=frame["msg"]["market_ticker"],
@@ -69,7 +73,7 @@ def count_frames_in_windows(
         with gzip.open(path, "rb") as handle:
             for line in handle:
                 lines += 1
-                if b"orderbook_snapshot" not in line and b"orderbook_delta" not in line:
+                if _SNAPSHOT_TYPE not in line and _DELTA_TYPE not in line:
                     continue
                 stamp = line[_STAMP_AT : line.index(b'"', _STAMP_AT)]
                 if len(stamp) == _ZERO_MICROSECOND_CHARS:
