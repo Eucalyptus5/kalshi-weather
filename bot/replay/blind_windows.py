@@ -24,7 +24,7 @@ FROZEN_START = datetime(2026, 7, 18, tzinfo=timezone.utc)
 FROZEN_END = datetime(2026, 8, 2, tzinfo=timezone.utc)
 
 _MICROSECOND = timedelta(microseconds=1)
-_COLUMNS = "id, received_at, seq"
+_COLUMNS = "id, received_at, seq, is_snapshot"
 _SELECT = f"SELECT {_COLUMNS} FROM ws_book_events WHERE id > ? ORDER BY id LIMIT ?"
 _SELECT_BOUNDED = (
     f"SELECT {_COLUMNS} FROM ws_book_events WHERE id > ? AND id <= ? ORDER BY id LIMIT ?"
@@ -34,6 +34,7 @@ BLIND_WINDOWS_SCHEMA = pa.schema(
     [
         ("boundary_id", pa.int64()),
         ("prev_id", pa.int64()),
+        ("end_id", pa.int64()),
         ("ticker", pa.string()),
         ("start", pa.timestamp("us", tz="UTC")),
         ("end", pa.timestamp("us", tz="UTC")),
@@ -53,6 +54,7 @@ BLIND_WINDOWS_SCHEMA = pa.schema(
 class BlindWindow:
     boundary_id: int
     prev_id: int
+    end_id: int
     # A boundary tears down the whole connection, so the window belongs to every subscribed
     # ticker at once and names none of them.
     ticker: str
@@ -74,8 +76,9 @@ class BlindWindowDetector:
         self._message: tuple[str, int] | None = None
         self._last_id = 0
         self._windows: list[BlindWindow] = []
+        self._open: BlindWindow | None = None
 
-    def observe(self, row_id: int, received_at: str, seq: int) -> None:
+    def observe(self, row_id: int, received_at: str, seq: int, is_snapshot: bool) -> None:
         message = (received_at, seq)
         if message == self._message:
             self._last_id = row_id
@@ -83,25 +86,37 @@ class BlindWindowDetector:
         previous, prev_id = self._message, self._last_id
         self._message = message
         self._last_id = row_id
-        if previous is None or seq > previous[1]:
+        boundary = previous is not None and seq <= previous[1]
+        # The re-delivered burst runs to the last snapshot before the new series resumes its
+        # deltas, so an open window closes on the message before whatever ends the burst.
+        if self._open is not None and (boundary or not is_snapshot):
+            self._windows.append(replace(self._open, end=_decode_ts(previous[0]), end_id=prev_id))
+            self._open = None
+        if not boundary:
             return
-        self._windows.append(
-            BlindWindow(
-                boundary_id=row_id,
-                prev_id=prev_id,
-                ticker="",
-                start=_decode_ts(previous[0]),
-                end=_decode_ts(received_at),
-                prev_seq=previous[1],
-                seq=seq,
-                gap_id=None,
-                gap_reason=None,
-                gap_detected_at=None,
-            )
+        window = BlindWindow(
+            boundary_id=row_id,
+            prev_id=prev_id,
+            end_id=row_id,
+            ticker="",
+            start=_decode_ts(previous[0]),
+            end=_decode_ts(received_at),
+            prev_seq=previous[1],
+            seq=seq,
+            gap_id=None,
+            gap_reason=None,
+            gap_detected_at=None,
         )
+        if is_snapshot:
+            self._open = window
+        else:
+            self._windows.append(window)
 
     def windows(self) -> list[BlindWindow]:
-        return list(self._windows)
+        if self._open is None:
+            return list(self._windows)
+        closed = replace(self._open, end=_decode_ts(self._message[0]), end_id=self._last_id)
+        return [*self._windows, closed]
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,8 +150,8 @@ def scan_blind_windows(
             batch = conn.execute(select, (last_id, *bound, batch_rows)).fetchall()
             if not batch:
                 break
-            for row_id, received_at, seq in batch:
-                detector.observe(row_id, received_at, seq)
+            for row_id, received_at, seq, is_snapshot in batch:
+                detector.observe(row_id, received_at, seq, bool(is_snapshot))
             last_id = batch[-1][0]
             last_received_at = _decode_ts(batch[-1][1])
             rows += len(batch)
@@ -258,6 +273,7 @@ def write_blind_windows(path: Path, windows: Sequence[BlindWindow]) -> None:
         {
             "boundary_id": window.boundary_id,
             "prev_id": window.prev_id,
+            "end_id": window.end_id,
             "ticker": window.ticker,
             "start": window.start,
             "end": window.end,

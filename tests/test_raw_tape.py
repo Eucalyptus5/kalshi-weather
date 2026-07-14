@@ -57,6 +57,7 @@ def window(boundary_id: int, start: datetime, end: datetime) -> BlindWindow:
     return BlindWindow(
         boundary_id=boundary_id,
         prev_id=boundary_id - 1,
+        end_id=boundary_id,
         ticker="",
         start=start,
         end=end,

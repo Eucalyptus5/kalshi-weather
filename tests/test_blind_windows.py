@@ -32,7 +32,8 @@ TICK = timedelta(microseconds=1)
 
 BOOK_SCHEMA = """
 CREATE TABLE ws_book_events (
-    id INTEGER NOT NULL, received_at DATETIME NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY (id))
+    id INTEGER NOT NULL, received_at DATETIME NOT NULL, seq INTEGER NOT NULL,
+    is_snapshot BOOLEAN NOT NULL, PRIMARY KEY (id))
 """
 GAP_SCHEMA = """
 CREATE TABLE ws_gaps (
@@ -45,8 +46,8 @@ def at(offset_us: int = 0) -> datetime:
     return T0 + timedelta(microseconds=offset_us)
 
 
-def book(row_id: int, offset_us: int, seq: int) -> tuple[object, ...]:
-    return (row_id, at(offset_us).strftime(DB_TS), seq)
+def book(row_id: int, offset_us: int, seq: int, is_snapshot: bool = False) -> tuple[object, ...]:
+    return (row_id, at(offset_us).strftime(DB_TS), seq, is_snapshot)
 
 
 def gap(row_id: int, offset_us: int, reason: str = "connection_reset") -> tuple[object, ...]:
@@ -59,7 +60,7 @@ def build_db(
     conn = sqlite3.connect(path)
     conn.execute(BOOK_SCHEMA)
     conn.execute(GAP_SCHEMA)
-    conn.executemany("INSERT INTO ws_book_events VALUES (?, ?, ?)", list(rows))
+    conn.executemany("INSERT INTO ws_book_events VALUES (?, ?, ?, ?)", list(rows))
     conn.executemany("INSERT INTO ws_gaps VALUES (?, ?, ?, ?, ?)", list(gaps))
     conn.commit()
     conn.close()
@@ -73,10 +74,12 @@ def window(
     end: datetime,
     prev_seq: int = 2,
     seq: int = 1,
+    end_id: int | None = None,
 ) -> BlindWindow:
     return BlindWindow(
         boundary_id=boundary_id,
         prev_id=prev_id,
+        end_id=boundary_id if end_id is None else end_id,
         ticker="",
         start=start,
         end=end,
@@ -120,6 +123,17 @@ MIXED_ROWS = [
     book(9, 21 * SECOND, 2),
 ]
 
+BURST_ROWS = [
+    book(1, 0, 1),
+    book(2, SECOND, 2),
+    book(3, 4 * SECOND, 1, True),
+    book(4, 4 * SECOND, 1, True),
+    book(5, 5 * SECOND, 2, True),
+    book(6, 6 * SECOND, 3),
+    book(7, 20 * SECOND, 1, True),
+    book(8, 21 * SECOND, 2, True),
+]
+
 
 def test_a_monotone_stream_holds_no_boundary(tmp_path: Path) -> None:
     db_path = build_db(
@@ -161,6 +175,128 @@ def test_rows_of_one_message_collapse_and_the_left_edge_is_the_message_before(
     assert scan.windows == (window(4, 3, at(SECOND), at(4 * SECOND)),)
 
 
+def test_the_window_runs_to_the_last_snapshot_of_the_redelivered_burst(tmp_path: Path) -> None:
+    rows = [
+        book(1, 0, 1),
+        book(2, SECOND, 2),
+        book(3, 4 * SECOND, 1, True),
+        book(4, 5 * SECOND, 2, True),
+        book(5, 6 * SECOND, 3),
+    ]
+    db_path = build_db(tmp_path / "state.db", rows)
+
+    scan = scan_blind_windows(db_path)
+
+    assert scan.windows == (window(3, 2, at(SECOND), at(5 * SECOND), end_id=4),)
+
+
+def test_a_boundary_that_is_a_delta_closes_where_it_lands(tmp_path: Path) -> None:
+    rows = [
+        book(1, 0, 1),
+        book(2, SECOND, 2),
+        book(3, 4 * SECOND, 1),
+        book(4, 5 * SECOND, 2, True),
+        book(5, 6 * SECOND, 3),
+    ]
+    db_path = build_db(tmp_path / "state.db", rows)
+
+    scan = scan_blind_windows(db_path)
+
+    assert scan.windows == (window(3, 2, at(SECOND), at(4 * SECOND)),)
+    assert scan.windows[0].end_id == 3
+
+
+def test_rows_of_one_snapshot_message_in_the_burst_collapse_to_that_message(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        book(1, 0, 1),
+        book(2, SECOND, 2),
+        book(3, 4 * SECOND, 1, True),
+        book(4, 5 * SECOND, 2, True),
+        book(5, 5 * SECOND, 2, True),
+        book(6, 5 * SECOND, 2, True),
+        book(7, 6 * SECOND, 3),
+    ]
+    db_path = build_db(tmp_path / "state.db", rows)
+
+    scan = scan_blind_windows(db_path)
+
+    assert scan.windows == (window(3, 2, at(SECOND), at(5 * SECOND), end_id=6),)
+
+
+def test_a_boundary_inside_an_open_burst_closes_it_and_opens_its_own(tmp_path: Path) -> None:
+    rows = [
+        book(1, 0, 1),
+        book(2, SECOND, 2),
+        book(3, 4 * SECOND, 1, True),
+        book(4, 5 * SECOND, 2, True),
+        book(5, 6 * SECOND, 1, True),
+        book(6, 7 * SECOND, 2),
+    ]
+    db_path = build_db(tmp_path / "state.db", rows)
+
+    windows = scan_blind_windows(db_path).windows
+
+    assert windows == (
+        window(3, 2, at(SECOND), at(5 * SECOND), end_id=4),
+        window(5, 4, at(5 * SECOND), at(6 * SECOND), end_id=5),
+    )
+    assert windows[0].end <= windows[1].start
+
+
+def test_a_burst_still_open_when_the_scan_ends_is_still_a_window(tmp_path: Path) -> None:
+    rows = [
+        book(1, 0, 1),
+        book(2, SECOND, 2),
+        book(3, 4 * SECOND, 1, True),
+        book(4, 5 * SECOND, 2, True),
+    ]
+    db_path = build_db(tmp_path / "state.db", rows)
+
+    scan = scan_blind_windows(db_path)
+
+    assert scan.rows == 4
+    assert scan.windows == (window(3, 2, at(SECOND), at(5 * SECOND), end_id=4),)
+
+
+def test_batching_does_not_split_a_burst(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", BURST_ROWS)
+
+    one = scan_blind_windows(db_path, batch_rows=1)
+    many = scan_blind_windows(db_path, batch_rows=10_000)
+
+    assert one == many
+    assert one.windows == (
+        window(3, 2, at(SECOND), at(5 * SECOND), end_id=5),
+        window(7, 6, at(6 * SECOND), at(21 * SECOND), prev_seq=3, seq=1, end_id=8),
+    )
+
+
+def test_a_ceiling_inside_a_burst_still_yields_the_window(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", BURST_ROWS)
+
+    scan = scan_blind_windows(db_path, max_id=4)
+
+    assert scan.rows == 4
+    assert scan.windows == (window(3, 2, at(SECOND), at(4 * SECOND), end_id=4),)
+
+
+def test_blind_us_spans_the_whole_burst(tmp_path: Path) -> None:
+    rows = [
+        book(1, 0, 5),
+        book(2, 845_123, 1, True),
+        book(3, 2 * SECOND + 398_909, 2, True),
+        book(4, 3 * SECOND, 3),
+    ]
+    db_path = build_db(tmp_path / "state.db", rows)
+
+    blind = scan_blind_windows(db_path).windows[0].blind_us
+
+    assert blind == 2_398_909
+    assert isinstance(blind, int)
+
+
 def test_a_forward_seq_skip_is_not_a_boundary(tmp_path: Path) -> None:
     rows = [book(1, 0, 1), book(2, SECOND, 2), book(3, 2 * SECOND, 9), book(4, 3 * SECOND, 10)]
     db_path = build_db(tmp_path / "state.db", rows)
@@ -171,7 +307,7 @@ def test_a_forward_seq_skip_is_not_a_boundary(tmp_path: Path) -> None:
 def test_the_detector_needs_no_database() -> None:
     detector = BlindWindowDetector()
     for row_id, offset_us, seq in ((1, 0, 4), (2, SECOND, 5), (3, 3 * SECOND, 1)):
-        detector.observe(row_id, at(offset_us).strftime(DB_TS), seq)
+        detector.observe(row_id, at(offset_us).strftime(DB_TS), seq, False)
 
     assert detector.windows() == [window(3, 2, at(SECOND), at(3 * SECOND), prev_seq=5, seq=1)]
 
@@ -181,7 +317,7 @@ def test_a_seq_that_repeats_is_a_boundary_the_shipped_detector_also_counts() -> 
     detector = BlindWindowDetector()
     shipped = SeqBoundaryDetector()
     for row_id, offset_us, seq in stream:
-        detector.observe(row_id, at(offset_us).strftime(DB_TS), seq)
+        detector.observe(row_id, at(offset_us).strftime(DB_TS), seq, False)
         shipped.observe(source_row(row_id, offset_us, seq))
 
     assert detector.windows() == [window(3, 2, at(SECOND), at(3 * SECOND), prev_seq=5, seq=5)]
@@ -254,6 +390,7 @@ def test_each_read_is_its_own_statement_and_the_source_is_read_only(
     selects = [line for line in statements if "ws_book_events" in line]
     assert len(selects) == -(-len(MIXED_ROWS) // 2) + 1
     assert all("id > " in line for line in selects)
+    assert all("SELECT id, received_at, seq, is_snapshot FROM" in line for line in selects)
     assert "PRAGMA query_only=ON" in statements
     assert hashlib.sha256(db_path.read_bytes()).hexdigest() == before
     assert not (tmp_path / "state.db-wal").exists()
@@ -440,7 +577,7 @@ def test_the_frozen_window_is_the_fifteen_days_from_the_eighteenth() -> None:
 def test_the_parquet_round_trips_every_column(tmp_path: Path) -> None:
     path = tmp_path / "blind.parquet"
     windows = [
-        window(3, 2, at(SECOND), at(2 * SECOND + 398_909)),
+        window(3, 2, at(SECOND), at(2 * SECOND + 398_909), end_id=5),
         window(9, 8, FROZEN_START - TICK, FROZEN_START),
     ]
     attached, _ = attach_gap_rows(
@@ -451,10 +588,27 @@ def test_the_parquet_round_trips_every_column(tmp_path: Path) -> None:
     table = pq.read_table(path)
 
     assert table.schema.equals(BLIND_WINDOWS_SCHEMA)
+    assert table.schema.names == [
+        "boundary_id",
+        "prev_id",
+        "end_id",
+        "ticker",
+        "start",
+        "end",
+        "blind_us",
+        "prev_seq",
+        "seq",
+        "has_gap_row",
+        "gap_id",
+        "gap_reason",
+        "gap_detected_at",
+        "in_frozen_window",
+    ]
     assert table.to_pylist() == [
         {
             "boundary_id": 9,
             "prev_id": 8,
+            "end_id": 9,
             "ticker": "",
             "start": FROZEN_START - TICK,
             "end": FROZEN_START,
@@ -470,6 +624,7 @@ def test_the_parquet_round_trips_every_column(tmp_path: Path) -> None:
         {
             "boundary_id": 3,
             "prev_id": 2,
+            "end_id": 5,
             "ticker": "",
             "start": at(SECOND),
             "end": at(2 * SECOND + 398_909),
