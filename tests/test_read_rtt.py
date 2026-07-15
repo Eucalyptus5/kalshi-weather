@@ -6,9 +6,13 @@ from pathlib import Path
 import pytest
 
 from bot.lag.read_rtt import (
+    FloorSource,
+    InadequateSamples,
     ReadSample,
     append_sample,
+    check_adequacy,
     decode_sample,
+    derive_latency_floor,
     due_at,
     encode_sample,
     hourly_counts,
@@ -190,3 +194,136 @@ def test_summarize_empty() -> None:
     assert summary.first_at is None
     assert summary.last_at is None
     assert summary.hourly == {}
+
+
+def _round_robin(elapsed: list[float], outcome: str = "ok") -> list[ReadSample]:
+    return [
+        _sample(
+            sequence=i,
+            requested_at=START.replace(hour=i % 24) + timedelta(days=i // 24),
+            elapsed_s=e,
+            outcome=outcome,
+            status_code=200 if outcome == "ok" else None,
+        )
+        for i, e in enumerate(elapsed)
+    ]
+
+
+def _by_hour(
+    counts: dict[int, int], elapsed_s: float = 0.2, outcome: str = "ok"
+) -> list[ReadSample]:
+    samples: list[ReadSample] = []
+    for hour, n in counts.items():
+        for k in range(n):
+            samples.append(
+                _sample(
+                    sequence=len(samples),
+                    requested_at=START.replace(hour=hour) + timedelta(seconds=k),
+                    elapsed_s=elapsed_s,
+                    outcome=outcome,
+                    status_code=200 if outcome == "ok" else None,
+                )
+            )
+    return samples
+
+
+def test_check_adequacy_accepts_a_full_day_of_uniform_samples() -> None:
+    adequacy = check_adequacy(_round_robin([0.2] * 216))
+    assert adequacy.adequate
+    assert adequacy.n_usable == 216
+    assert adequacy.failures == ()
+    assert adequacy.missing_hours == ()
+    assert adequacy.overweight_hours == ()
+    assert adequacy.hourly == {hour: 9 for hour in range(24)}
+
+
+def test_derive_floor_is_the_p90_of_usable_elapsed() -> None:
+    floor = derive_latency_floor(
+        _round_robin([round(0.01 * (i + 1), 2) for i in range(240)]), FloorSource.SIGNED_READ
+    )
+    assert floor.floor_s == pytest.approx(2.16)
+    assert floor.n_usable == 240
+    assert floor.source is FloorSource.SIGNED_READ
+
+
+def test_persist_threshold_holds_at_ten_seconds_for_a_fast_floor() -> None:
+    floor = derive_latency_floor(_round_robin([0.1] * 240), FloorSource.SIGNED_READ)
+    assert floor.floor_s == pytest.approx(0.1)
+    assert floor.t_persist_s == pytest.approx(10.0)
+
+
+def test_persist_threshold_triples_a_slow_floor() -> None:
+    floor = derive_latency_floor(_round_robin([5.0] * 240), FloorSource.SIGNED_READ)
+    assert floor.floor_s == pytest.approx(5.0)
+    assert floor.t_persist_s == pytest.approx(15.0)
+
+
+def test_both_floor_sources_derive_the_same_threshold() -> None:
+    samples = _round_robin([4.0] * 240)
+    demo = derive_latency_floor(samples, FloorSource.DEMO_ORDER)
+    read = derive_latency_floor(samples, FloorSource.SIGNED_READ)
+    assert demo.source is FloorSource.DEMO_ORDER
+    assert read.source is FloorSource.SIGNED_READ
+    assert demo.floor_s == pytest.approx(read.floor_s)
+    assert demo.t_persist_s == pytest.approx(12.0)
+    assert read.t_persist_s == pytest.approx(12.0)
+
+
+def test_one_sample_short_of_the_minimum_refuses() -> None:
+    samples = _round_robin([0.2] * 199)
+    adequacy = check_adequacy(samples)
+    assert not adequacy.adequate
+    assert adequacy.n_usable == 199
+    assert adequacy.missing_hours == ()
+    assert adequacy.overweight_hours == ()
+    assert len(adequacy.failures) == 1
+    with pytest.raises(InadequateSamples) as excinfo:
+        derive_latency_floor(samples, FloorSource.SIGNED_READ)
+    assert excinfo.value.adequacy.n_usable == 199
+
+
+def test_bunched_samples_refuse_despite_clearing_the_count() -> None:
+    samples = _by_hour({9: 80, 10: 80, 11: 80})
+    adequacy = check_adequacy(samples)
+    assert not adequacy.adequate
+    assert adequacy.n_usable == 240
+    assert adequacy.overweight_hours == (9, 10, 11)
+    assert len(adequacy.missing_hours) == 21
+    with pytest.raises(InadequateSamples):
+        derive_latency_floor(samples, FloorSource.SIGNED_READ)
+
+
+def test_a_missing_hour_refuses_on_its_own() -> None:
+    samples = _by_hour({hour: 10 for hour in range(24) if hour != 7})
+    adequacy = check_adequacy(samples)
+    assert not adequacy.adequate
+    assert adequacy.n_usable == 230
+    assert adequacy.missing_hours == (7,)
+    assert adequacy.overweight_hours == ()
+    assert len(adequacy.failures) == 1
+
+
+@pytest.mark.parametrize(("heavy_hour_n", "adequate"), [(16, True), (17, False)])
+def test_hour_concentration_binds_at_twice_the_uniform_share(
+    heavy_hour_n: int, adequate: bool
+) -> None:
+    counts = {0: heavy_hour_n} | {hour: 8 for hour in range(1, 24)}
+    counts[23] += 200 - sum(counts.values())
+    adequacy = check_adequacy(_by_hour(counts))
+    assert adequacy.n_usable == 200
+    assert adequacy.adequate is adequate
+    assert adequacy.overweight_hours == (() if adequate else (0,))
+
+
+def test_failed_reads_count_toward_neither_the_minimum_nor_the_spread() -> None:
+    samples = _round_robin([0.2] * 199) + _by_hour({7: 40}, elapsed_s=99.0, outcome="transport")
+    adequacy = check_adequacy(samples)
+    assert adequacy.n_usable == 199
+    assert adequacy.hourly[7] == 8
+    assert not adequacy.adequate
+
+
+def test_failed_reads_do_not_move_the_floor() -> None:
+    usable = _round_robin([round(0.01 * (i + 1), 2) for i in range(240)])
+    with_errors = usable + _by_hour({3: 5}, elapsed_s=120.0, outcome="http_status")
+    assert derive_latency_floor(with_errors, FloorSource.SIGNED_READ).floor_s == pytest.approx(2.16)

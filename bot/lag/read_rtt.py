@@ -4,7 +4,20 @@ import json
 import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from enum import Enum
 from pathlib import Path
+
+
+MIN_USABLE_SAMPLES = 200
+MAX_HOUR_SHARE = 2 / 24
+FLOOR_QUANTILE = 0.9
+PERSIST_MULTIPLE = 3.0
+PERSIST_FLOOR_S = 10.0
+
+
+class FloorSource(Enum):
+    DEMO_ORDER = "L"
+    SIGNED_READ = "RTT_read"
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +31,35 @@ class ReadSample:
     api_host: str
     endpoint: str
     source_host: str
+
+
+@dataclass(frozen=True, slots=True)
+class SampleAdequacy:
+    n_usable: int
+    hourly: dict[int, int]
+    missing_hours: tuple[int, ...]
+    overweight_hours: tuple[int, ...]
+    failures: tuple[str, ...]
+
+    @property
+    def adequate(self) -> bool:
+        return not self.failures
+
+
+class InadequateSamples(ValueError):
+    """The sample set cannot carry a latency floor."""
+
+    def __init__(self, adequacy: SampleAdequacy) -> None:
+        super().__init__("; ".join(adequacy.failures))
+        self.adequacy = adequacy
+
+
+@dataclass(frozen=True, slots=True)
+class LatencyFloor:
+    source: FloorSource
+    floor_s: float
+    t_persist_s: float
+    n_usable: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +156,46 @@ def hourly_counts(samples: list[ReadSample]) -> dict[int, int]:
         hour = sample.requested_at.hour
         counts[hour] = counts.get(hour, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def check_adequacy(samples: list[ReadSample]) -> SampleAdequacy:
+    usable = [s for s in samples if s.outcome == "ok"]
+    hourly = hourly_counts(usable)
+    cap = MAX_HOUR_SHARE * len(usable)
+    missing = tuple(hour for hour in range(24) if hour not in hourly)
+    overweight = tuple(hour for hour, n in hourly.items() if n > cap)
+
+    failures: list[str] = []
+    if len(usable) < MIN_USABLE_SAMPLES:
+        failures.append(f"usable samples {len(usable)} short of {MIN_USABLE_SAMPLES}")
+    if missing:
+        failures.append("hours with no usable sample: " + ",".join(str(h) for h in missing))
+    if overweight:
+        failures.append(
+            f"hours holding more than {cap:.2f} usable samples: "
+            + ",".join(str(h) for h in overweight)
+        )
+
+    return SampleAdequacy(
+        n_usable=len(usable),
+        hourly=hourly,
+        missing_hours=missing,
+        overweight_hours=overweight,
+        failures=tuple(failures),
+    )
+
+
+def derive_latency_floor(samples: list[ReadSample], source: FloorSource) -> LatencyFloor:
+    adequacy = check_adequacy(samples)
+    if not adequacy.adequate:
+        raise InadequateSamples(adequacy)
+    floor_s = quantile_seconds(samples, FLOOR_QUANTILE)
+    return LatencyFloor(
+        source=source,
+        floor_s=floor_s,
+        t_persist_s=max(PERSIST_MULTIPLE * floor_s, PERSIST_FLOOR_S),
+        n_usable=adequacy.n_usable,
+    )
 
 
 def summarize(samples: list[ReadSample]) -> RttSummary:
