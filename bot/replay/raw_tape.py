@@ -92,17 +92,17 @@ def check_tape_counts(windows: Sequence[BlindWindow], counts: Mapping[int, int])
     extra_frames = 0
     falsifying: list[BlindWindow] = []
     for window in windows:
-        # The frame behind the row at end is stamped just before it and falls inside, so a window
-        # that agrees with the tape holds exactly one frame and a wider one holds the frames the
-        # database never persisted.
+        # Every frame is stamped just before the row it becomes, so the one behind the message at
+        # start falls outside and the one behind the closing message falls in: a window that agrees
+        # holds exactly the burst it covers, and a wider one holds what the database never kept.
         count = counts[window.boundary_id]
-        if count == 0:
+        if count < window.burst_messages:
             falsifying.append(window)
-        elif count == 1:
+        elif count == window.burst_messages:
             agreed += 1
         else:
             wider += 1
-            extra_frames += count - 1
+            extra_frames += count - window.burst_messages
     return TapeCheck(
         sampled=len(windows),
         agreed=agreed,

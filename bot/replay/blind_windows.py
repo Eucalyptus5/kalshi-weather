@@ -35,6 +35,7 @@ BLIND_WINDOWS_SCHEMA = pa.schema(
         ("boundary_id", pa.int64()),
         ("prev_id", pa.int64()),
         ("end_id", pa.int64()),
+        ("burst_messages", pa.int64()),
         ("ticker", pa.string()),
         ("start", pa.timestamp("us", tz="UTC")),
         ("end", pa.timestamp("us", tz="UTC")),
@@ -55,6 +56,7 @@ class BlindWindow:
     boundary_id: int
     prev_id: int
     end_id: int
+    burst_messages: int
     # A boundary tears down the whole connection, so the window belongs to every subscribed
     # ticker at once and names none of them.
     ticker: str
@@ -89,15 +91,21 @@ class BlindWindowDetector:
         boundary = previous is not None and seq <= previous[1]
         # The re-delivered burst runs to the last snapshot before the new series resumes its
         # deltas, so an open window closes on the message before whatever ends the burst.
-        if self._open is not None and (boundary or not is_snapshot):
-            self._windows.append(replace(self._open, end=_decode_ts(previous[0]), end_id=prev_id))
-            self._open = None
+        if self._open is not None:
+            if boundary or not is_snapshot:
+                self._windows.append(
+                    replace(self._open, end=_decode_ts(previous[0]), end_id=prev_id)
+                )
+                self._open = None
+            else:
+                self._open = replace(self._open, burst_messages=self._open.burst_messages + 1)
         if not boundary:
             return
         window = BlindWindow(
             boundary_id=row_id,
             prev_id=prev_id,
             end_id=row_id,
+            burst_messages=1,
             ticker="",
             start=_decode_ts(previous[0]),
             end=_decode_ts(received_at),
@@ -274,6 +282,7 @@ def write_blind_windows(path: Path, windows: Sequence[BlindWindow]) -> None:
             "boundary_id": window.boundary_id,
             "prev_id": window.prev_id,
             "end_id": window.end_id,
+            "burst_messages": window.burst_messages,
             "ticker": window.ticker,
             "start": window.start,
             "end": window.end,

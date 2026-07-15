@@ -69,6 +69,7 @@ def write_windows(path: Path, specs: Sequence[tuple[datetime, int, int | None]])
                 boundary_id=index + 1,
                 prev_id=index,
                 end_id=index + 1,
+                burst_messages=1,
                 ticker="",
                 start=start,
                 end=start + timedelta(microseconds=blind_us),

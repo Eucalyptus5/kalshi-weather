@@ -53,11 +53,14 @@ def write_tape(directory: Path, frames: Sequence[tuple[datetime, str]]) -> list[
     return sorted(directory.glob("*.jsonl.gz"))
 
 
-def window(boundary_id: int, start: datetime, end: datetime) -> BlindWindow:
+def window(
+    boundary_id: int, start: datetime, end: datetime, burst_messages: int = 1
+) -> BlindWindow:
     return BlindWindow(
         boundary_id=boundary_id,
         prev_id=boundary_id - 1,
         end_id=boundary_id,
+        burst_messages=burst_messages,
         ticker="",
         start=start,
         end=end,
@@ -126,6 +129,47 @@ def test_a_tape_with_nothing_inside_the_window_falsifies_it(tmp_path: Path) -> N
     assert (check.sampled, check.agreed, check.wider, check.extra_frames) == (1, 0, 0, 0)
     assert check.falsified == 1
     assert check.falsifying == (boundary,)
+
+
+def test_a_burst_window_agrees_when_the_tape_holds_one_frame_per_burst_message(
+    tmp_path: Path,
+) -> None:
+    burst = window(10, at(3, 1, 1), at(3, 1, 4), burst_messages=3)
+    paths = write_tape(
+        tmp_path,
+        [
+            (at(3, 1, 0, 999_990), frame("orderbook_delta", 2)),
+            (at(3, 1, 1, 999_990), frame("orderbook_snapshot", 1)),
+            (at(3, 1, 2, 999_990), frame("orderbook_snapshot", 2)),
+            (at(3, 1, 3, 999_990), frame("orderbook_snapshot", 3)),
+            (at(3, 1, 4, 999_990), frame("orderbook_delta", 4)),
+        ],
+    )
+
+    counts = count_frames_in_windows(paths, [burst])
+    check = check_tape_counts([burst], counts)
+
+    assert counts == {10: 3}
+    assert (check.sampled, check.agreed, check.wider, check.extra_frames) == (1, 1, 0, 0)
+    assert (check.falsified, check.falsifying) == (0, ())
+
+
+def test_a_burst_window_the_tape_overruns_is_wider_by_the_difference() -> None:
+    burst = window(10, at(3, 1, 1), at(3, 1, 4), burst_messages=3)
+
+    check = check_tape_counts([burst], {10: 5})
+
+    assert (check.sampled, check.agreed, check.wider, check.extra_frames) == (1, 0, 1, 2)
+    assert (check.falsified, check.falsifying) == (0, ())
+
+
+def test_a_burst_window_the_tape_falls_short_of_is_falsified() -> None:
+    burst = window(10, at(3, 1, 1), at(3, 1, 4), burst_messages=3)
+
+    check = check_tape_counts([burst], {10: 2})
+
+    assert (check.sampled, check.agreed, check.wider, check.extra_frames) == (1, 0, 0, 0)
+    assert (check.falsified, check.falsifying) == (1, (burst,))
 
 
 def test_only_orderbook_frames_are_counted(tmp_path: Path) -> None:

@@ -113,6 +113,7 @@ def test_a_run_writes_the_table_and_reports_the_counts(
             "boundary_id": 3,
             "prev_id": 2,
             "end_id": 3,
+            "burst_messages": 1,
             "ticker": "",
             "start": at(SECOND),
             "end": at(2 * SECOND + 398_909),

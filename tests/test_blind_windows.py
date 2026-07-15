@@ -75,11 +75,13 @@ def window(
     prev_seq: int = 2,
     seq: int = 1,
     end_id: int | None = None,
+    burst_messages: int = 1,
 ) -> BlindWindow:
     return BlindWindow(
         boundary_id=boundary_id,
         prev_id=prev_id,
         end_id=boundary_id if end_id is None else end_id,
+        burst_messages=burst_messages,
         ticker="",
         start=start,
         end=end,
@@ -187,7 +189,23 @@ def test_the_window_runs_to_the_last_snapshot_of_the_redelivered_burst(tmp_path:
 
     scan = scan_blind_windows(db_path)
 
-    assert scan.windows == (window(3, 2, at(SECOND), at(5 * SECOND), end_id=4),)
+    assert scan.windows == (window(3, 2, at(SECOND), at(5 * SECOND), end_id=4, burst_messages=2),)
+
+
+def test_a_longer_burst_counts_every_snapshot_message_it_covers(tmp_path: Path) -> None:
+    rows = [
+        book(1, 0, 1),
+        book(2, SECOND, 2),
+        book(3, 4 * SECOND, 1, True),
+        book(4, 5 * SECOND, 2, True),
+        book(5, 6 * SECOND, 3, True),
+        book(6, 7 * SECOND, 4),
+    ]
+    db_path = build_db(tmp_path / "state.db", rows)
+
+    scan = scan_blind_windows(db_path)
+
+    assert scan.windows == (window(3, 2, at(SECOND), at(6 * SECOND), end_id=5, burst_messages=3),)
 
 
 def test_a_boundary_that_is_a_delta_closes_where_it_lands(tmp_path: Path) -> None:
@@ -203,7 +221,7 @@ def test_a_boundary_that_is_a_delta_closes_where_it_lands(tmp_path: Path) -> Non
     scan = scan_blind_windows(db_path)
 
     assert scan.windows == (window(3, 2, at(SECOND), at(4 * SECOND)),)
-    assert scan.windows[0].end_id == 3
+    assert (scan.windows[0].end_id, scan.windows[0].burst_messages) == (3, 1)
 
 
 def test_rows_of_one_snapshot_message_in_the_burst_collapse_to_that_message(
@@ -222,7 +240,7 @@ def test_rows_of_one_snapshot_message_in_the_burst_collapse_to_that_message(
 
     scan = scan_blind_windows(db_path)
 
-    assert scan.windows == (window(3, 2, at(SECOND), at(5 * SECOND), end_id=6),)
+    assert scan.windows == (window(3, 2, at(SECOND), at(5 * SECOND), end_id=6, burst_messages=2),)
 
 
 def test_a_boundary_inside_an_open_burst_closes_it_and_opens_its_own(tmp_path: Path) -> None:
@@ -239,7 +257,7 @@ def test_a_boundary_inside_an_open_burst_closes_it_and_opens_its_own(tmp_path: P
     windows = scan_blind_windows(db_path).windows
 
     assert windows == (
-        window(3, 2, at(SECOND), at(5 * SECOND), end_id=4),
+        window(3, 2, at(SECOND), at(5 * SECOND), end_id=4, burst_messages=2),
         window(5, 4, at(5 * SECOND), at(6 * SECOND), end_id=5),
     )
     assert windows[0].end <= windows[1].start
@@ -257,7 +275,7 @@ def test_a_burst_still_open_when_the_scan_ends_is_still_a_window(tmp_path: Path)
     scan = scan_blind_windows(db_path)
 
     assert scan.rows == 4
-    assert scan.windows == (window(3, 2, at(SECOND), at(5 * SECOND), end_id=4),)
+    assert scan.windows == (window(3, 2, at(SECOND), at(5 * SECOND), end_id=4, burst_messages=2),)
 
 
 def test_batching_does_not_split_a_burst(tmp_path: Path) -> None:
@@ -268,8 +286,17 @@ def test_batching_does_not_split_a_burst(tmp_path: Path) -> None:
 
     assert one == many
     assert one.windows == (
-        window(3, 2, at(SECOND), at(5 * SECOND), end_id=5),
-        window(7, 6, at(6 * SECOND), at(21 * SECOND), prev_seq=3, seq=1, end_id=8),
+        window(3, 2, at(SECOND), at(5 * SECOND), end_id=5, burst_messages=2),
+        window(
+            7,
+            6,
+            at(6 * SECOND),
+            at(21 * SECOND),
+            prev_seq=3,
+            seq=1,
+            end_id=8,
+            burst_messages=2,
+        ),
     )
 
 
@@ -280,21 +307,6 @@ def test_a_ceiling_inside_a_burst_still_yields_the_window(tmp_path: Path) -> Non
 
     assert scan.rows == 4
     assert scan.windows == (window(3, 2, at(SECOND), at(4 * SECOND), end_id=4),)
-
-
-def test_blind_us_spans_the_whole_burst(tmp_path: Path) -> None:
-    rows = [
-        book(1, 0, 5),
-        book(2, 845_123, 1, True),
-        book(3, 2 * SECOND + 398_909, 2, True),
-        book(4, 3 * SECOND, 3),
-    ]
-    db_path = build_db(tmp_path / "state.db", rows)
-
-    blind = scan_blind_windows(db_path).windows[0].blind_us
-
-    assert blind == 2_398_909
-    assert isinstance(blind, int)
 
 
 def test_a_forward_seq_skip_is_not_a_boundary(tmp_path: Path) -> None:
@@ -577,7 +589,7 @@ def test_the_frozen_window_is_the_fifteen_days_from_the_eighteenth() -> None:
 def test_the_parquet_round_trips_every_column(tmp_path: Path) -> None:
     path = tmp_path / "blind.parquet"
     windows = [
-        window(3, 2, at(SECOND), at(2 * SECOND + 398_909), end_id=5),
+        window(3, 2, at(SECOND), at(2 * SECOND + 398_909), end_id=5, burst_messages=3),
         window(9, 8, FROZEN_START - TICK, FROZEN_START),
     ]
     attached, _ = attach_gap_rows(
@@ -592,6 +604,7 @@ def test_the_parquet_round_trips_every_column(tmp_path: Path) -> None:
         "boundary_id",
         "prev_id",
         "end_id",
+        "burst_messages",
         "ticker",
         "start",
         "end",
@@ -609,6 +622,7 @@ def test_the_parquet_round_trips_every_column(tmp_path: Path) -> None:
             "boundary_id": 9,
             "prev_id": 8,
             "end_id": 9,
+            "burst_messages": 1,
             "ticker": "",
             "start": FROZEN_START - TICK,
             "end": FROZEN_START,
@@ -625,6 +639,7 @@ def test_the_parquet_round_trips_every_column(tmp_path: Path) -> None:
             "boundary_id": 3,
             "prev_id": 2,
             "end_id": 5,
+            "burst_messages": 3,
             "ticker": "",
             "start": at(SECOND),
             "end": at(2 * SECOND + 398_909),
