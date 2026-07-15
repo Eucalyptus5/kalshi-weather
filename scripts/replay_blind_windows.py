@@ -93,7 +93,7 @@ def format_report(payload: Mapping[str, object], falsifying: Sequence[BlindWindo
     lines.extend(f"{name}={value}" for name, value in payload.items())
     lines.extend(
         f"falsifying={window.boundary_id} {window.start.isoformat()} {window.end.isoformat()} "
-        f"blind_us={window.blind_us}"
+        f"blind_us={window.blind_us} burst_messages={window.burst_messages}"
         for window in falsifying
     )
     return "\n".join(lines)

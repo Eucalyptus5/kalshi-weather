@@ -251,6 +251,7 @@ def test_a_falsified_window_is_named_and_fails_the_run(
     assert rc == 1
     assert "tape_falsified=1" in printed
     assert f"falsifying=3 {at(SECOND).isoformat()}" in printed
+    assert "burst_messages=1" in printed
 
 
 def test_validation_without_a_raw_directory_is_refused(db_path: Path, tmp_path: Path) -> None:
