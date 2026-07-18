@@ -11,17 +11,17 @@ from bot.execution.friction import required_edge
 def test_required_edge_tails_small_size() -> None:
     floor = required_edge(Decimal("0.07"), 10, 5)
     fee = taker_fee(1, Decimal("0.07"))
-    assert fee == Decimal("0.004557")
+    assert fee == Decimal("0.01")
     assert floor == fee + Decimal("0.005")
-    assert floor == Decimal("0.009557")
+    assert floor == Decimal("0.015")
 
 
 def test_required_edge_edge_no_walk() -> None:
     floor = required_edge(Decimal("0.39"), 15, 10)
     fee = taker_fee(1, Decimal("0.39"))
-    assert fee == Decimal("0.016653")
+    assert fee == Decimal("0.02")
     assert floor == fee + Decimal("0.005")
-    assert floor == Decimal("0.021653")
+    assert floor == Decimal("0.025")
 
 
 def test_required_edge_edge_walks_book() -> None:

@@ -3,8 +3,8 @@ from decimal import ROUND_CEILING, Decimal
 
 TAKER_RATE: Decimal = Decimal("0.07")
 MAKER_RATE: Decimal = Decimal("0.0175")
-# kalshi 6-decimal fixed-point precision (march 2026 _dollars migration)
-FEE_QUANTUM: Decimal = Decimal("0.000001")
+# an account settles fees to the cent, and the ceiling applies once to the aggregate fill
+FEE_QUANTUM: Decimal = Decimal("0.01")
 
 
 def _validate(contracts: int, price: Decimal) -> None:

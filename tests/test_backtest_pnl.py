@@ -54,8 +54,8 @@ def test_buy_yes_winning_bracket():
 
     assert fill.gross_pnl == Decimal("0.13")
     assert fill.fee_dollars == taker_fee(1, Decimal("0.87"))
-    assert fill.fee_dollars == Decimal("0.007917")
-    assert fill.net_pnl == Decimal("0.122083")
+    assert fill.fee_dollars == Decimal("0.01")
+    assert fill.net_pnl == Decimal("0.12")
 
 
 def test_sell_yes_tail_winning():

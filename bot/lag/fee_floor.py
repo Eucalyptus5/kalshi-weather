@@ -20,8 +20,8 @@ class FeeSource:
     fee_module_corrected: bool
 
 
-# Deliberately duplicates fees.taker_fee: that module quantizes to FEE_QUANTUM (1e-6), four
-# orders finer than the cent an account settles to, and correcting it is a separate decision.
+# Deliberately duplicates fees.taker_fee rather than delegating to it: this is the oracle that
+# module is checked against, and delegating would make fee_module_corrected a tautology.
 def published_taker_fee(contracts: int, price: Decimal) -> Decimal:
     raw = PUBLISHED_TAKER_RATE * Decimal(contracts) * price * (Decimal("1") - price)
     return raw.quantize(CENT, rounding=ROUND_CEILING)

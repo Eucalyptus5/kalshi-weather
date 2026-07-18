@@ -87,16 +87,34 @@ def test_floor_never_falls_below_a_cent_on_a_real_fill(price: Decimal) -> None:
     assert published_taker_fee(1, price) >= CENT
 
 
-@pytest.mark.parametrize("contracts, price", [(1, Decimal("0.07")), (10, Decimal("0.07"))])
-def test_published_floor_disagrees_with_the_uncorrected_module(
-    contracts: int, price: Decimal
-) -> None:
-    assert published_taker_fee(contracts, price) != taker_fee(contracts, price)
-    assert published_taker_fee(contracts, price) > taker_fee(contracts, price)
+@pytest.mark.parametrize(
+    "contracts",
+    [0, 1, 3, 4, 10, 27, 100, 250, 1000],
+)
+@pytest.mark.parametrize(
+    "price",
+    [
+        Decimal("0"),
+        Decimal("0.01"),
+        Decimal("0.05"),
+        Decimal("0.07"),
+        Decimal("0.10"),
+        Decimal("0.20"),
+        Decimal("0.39"),
+        Decimal("0.50"),
+        Decimal("0.63"),
+        Decimal("0.87"),
+        Decimal("0.905"),
+        Decimal("0.99"),
+        Decimal("1"),
+    ],
+)
+def test_the_module_agrees_with_the_published_floor(contracts: int, price: Decimal) -> None:
+    assert taker_fee(contracts, price) == published_taker_fee(contracts, price)
 
 
-def test_uncorrected_module_reads_a_sub_cent_fee_where_the_floor_reads_a_cent() -> None:
-    assert taker_fee(1, Decimal("0.07")) == Decimal("0.004557")
+def test_the_module_reads_a_cent_where_the_floor_reads_a_cent() -> None:
+    assert taker_fee(1, Decimal("0.07")) == Decimal("0.01")
     assert published_taker_fee(1, Decimal("0.07")) == Decimal("0.01")
 
 
@@ -112,22 +130,22 @@ def test_fee_source_names_the_published_formula_not_the_execution_module() -> No
     assert source.fee_module == "bot.execution.fees.taker_fee"
 
 
-def test_fee_source_reads_the_live_module_quantum_as_uncorrected() -> None:
+def test_fee_source_reads_the_live_module_quantum_as_corrected() -> None:
     source = fee_source()
 
     assert source.fee_module_quantum == FEE_QUANTUM
-    assert source.fee_module_quantum < CENT
-    assert source.fee_module_corrected is False
+    assert source.fee_module_quantum == CENT
+    assert source.fee_module_corrected is True
 
 
-def test_fee_source_follows_the_module_quantum_when_the_module_is_corrected(
+def test_fee_source_follows_the_module_quantum_back_to_uncorrected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(fees, "FEE_QUANTUM", Decimal("0.01"))
+    monkeypatch.setattr(fees, "FEE_QUANTUM", Decimal("0.000001"))
     source = fee_source()
 
-    assert source.fee_module_quantum == Decimal("0.01")
-    assert source.fee_module_corrected is True
+    assert source.fee_module_quantum == Decimal("0.000001")
+    assert source.fee_module_corrected is False
 
 
 @pytest.mark.parametrize(

@@ -176,7 +176,7 @@ def test_a_complete_run_records_every_field_the_section_names(
     assert payload["fee_threshold_source"] == "published_formula"
     assert payload["fee_module"] == "bot.execution.fees.taker_fee"
     assert payload["fee_module_quantum"] == str(fees.FEE_QUANTUM)
-    assert payload["fee_module_corrected"] is False
+    assert payload["fee_module_corrected"] is True
     assert payload["latency_floor_source"] == "RTT_read"
     assert payload["latency_floor_s"] == pytest.approx(0.24)
     assert payload["t_persist_s"] == pytest.approx(10.0)
@@ -429,15 +429,22 @@ def test_a_loosened_r0_threshold_moves_the_recorded_digest(complete: RunInputs) 
     assert loosened["r0_fraction_invalid_max"] == "0.6"
 
 
-def test_a_corrected_fee_module_is_recorded_as_corrected(
-    monkeypatch: pytest.MonkeyPatch, complete: RunInputs
-) -> None:
-    monkeypatch.setattr(fees, "FEE_QUANTUM", Decimal("0.01"))
-
+def test_a_corrected_fee_module_is_recorded_as_corrected(complete: RunInputs) -> None:
     payload = manifest_payload(build_manifest(replace(complete, fee=fee_source())))
 
     assert payload["fee_module_quantum"] == "0.01"
     assert payload["fee_module_corrected"] is True
+
+
+def test_an_uncorrected_fee_module_is_recorded_as_uncorrected(
+    monkeypatch: pytest.MonkeyPatch, complete: RunInputs
+) -> None:
+    monkeypatch.setattr(fees, "FEE_QUANTUM", Decimal("0.000001"))
+
+    payload = manifest_payload(build_manifest(replace(complete, fee=fee_source())))
+
+    assert payload["fee_module_quantum"] == "0.000001"
+    assert payload["fee_module_corrected"] is False
 
 
 def test_the_caller_cannot_supply_the_head_or_the_dirty_flag() -> None:
