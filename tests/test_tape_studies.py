@@ -1,5 +1,7 @@
 import json
 import re
+import subprocess
+from dataclasses import fields
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -8,6 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from bot.lag.fee_floor import fee_source
 from bot.lag.r0_universe import (
     DISAGREE,
     LOCK_CARVE_OUT,
@@ -17,9 +20,21 @@ from bot.lag.r0_universe import (
     universe_payload,
     write_universe,
 )
+from bot.lag.read_rtt import FloorSource, ReadSample, encode_sample
+from bot.lag.run_manifest import (
+    ManifestIncomplete,
+    RunInputs,
+    build_manifest,
+    manifest_payload,
+)
 from bot.lag.tape_studies import (
+    KIND_SCHEMAS,
+    LADDER,
+    TOUCH,
+    TRADES,
     EvidenceWindow,
     RunScope,
+    assemble_run_inputs,
     intersects_exclusion,
     load_run_scope,
     partition_files,
@@ -75,6 +90,27 @@ ABUT_END = datetime(2026, 7, 19, 18, 40, tzinfo=UTC)
 WIDE_BOUNDARY_ID = 41
 WIDE_GAP_ID = 7
 
+RUN_ID = "2026-08-12-q1"
+SEED = 20260812
+ADEQUATE_SAMPLES = 240
+SHORT_SAMPLES = 58
+STANDARD_OFFSET = timedelta(hours=7)
+LATE_ARRIVAL = date(2026, 7, 20)
+NOON = datetime(2026, 7, 18, 12, tzinfo=UTC)
+ARTIFACT_PARTITIONS = (
+    (TOUCH, UNCOVERED_DAY, 7),
+    (TOUCH, DISCOVERY_DAY, 2),
+    (TOUCH, HOLDOUT_DAY, 3),
+    (TOUCH, LATE_ARRIVAL, 5),
+    (LADDER, DISCOVERY_DAY, 1),
+    (LADDER, LATE_ARRIVAL, 4),
+    (TRADES, HOLDOUT_DAY, 6),
+)
+CONSUMED = {TOUCH: 10, LADDER: 5, TRADES: 6}
+FRACTION_INVALID_MAX = Decimal("0.4")
+EXCLUSION_ROWS = 5
+EVENT_DAY_ROWS = 3
+
 
 def touch_row(row_id: int, received_at: datetime) -> dict:
     return {
@@ -93,6 +129,31 @@ def touch_row(row_id: int, received_at: datetime) -> dict:
     }
 
 
+def ladder_row(row_id: int, received_at: datetime) -> dict:
+    return touch_row(row_id, received_at) | {
+        "yes_prices": ["0.40"],
+        "yes_sizes": ["10"],
+        "yes_levels": 1,
+        "no_prices": ["0.58"],
+        "no_sizes": ["12"],
+        "no_levels": 1,
+    }
+
+
+def trade_row(row_id: int, received_at: datetime) -> dict:
+    return {
+        "id": row_id,
+        "ticker": TICKER,
+        "received_at": received_at,
+        "ts_ms": row_id * 1000,
+        "yes_price": "0.41",
+        "no_price": "0.59",
+        "count": "3",
+        "taker_side": "yes",
+        "trade_id": f"t{row_id}",
+    }
+
+
 def write_partition(
     root: Path,
     day: date,
@@ -101,12 +162,28 @@ def write_partition(
     *,
     kind: str = "touch",
     schema: pa.Schema = TOUCH_SCHEMA,
+    series: str = SERIES,
 ) -> Path:
     directory = root / kind
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{SERIES}-{day.isoformat()}-b{barrier:06d}.parquet"
+    path = directory / f"{series}-{day.isoformat()}-b{barrier:06d}.parquet"
     pq.write_table(pa.Table.from_pylist(rows, schema=schema), path)
     return path
+
+
+def artifact_root(tmp_path: Path) -> Path:
+    root = tmp_path / "artifacts"
+    builders = {TOUCH: touch_row, LADDER: ladder_row, TRADES: trade_row}
+    for kind, day, rows in ARTIFACT_PARTITIONS:
+        write_partition(
+            root,
+            day,
+            1,
+            [builders[kind](index, NOON) for index in range(rows)],
+            kind=kind,
+            schema=KIND_SCHEMAS[kind],
+        )
+    return root
 
 
 def exclusion_row(
@@ -153,15 +230,22 @@ def exclusion_table() -> pa.Table:
     return pa.Table.from_pylist(rows, schema=EXCLUSIONS_SCHEMA)
 
 
-def event_day_row(event_date: date, *, in_scope: bool, split: str, day_index: int = 0) -> dict:
+def event_day_row(
+    event_date: date,
+    *,
+    in_scope: bool,
+    split: str,
+    day_index: int = 0,
+    opens: timedelta = timedelta(),
+) -> dict:
     midnight = datetime(event_date.year, event_date.month, event_date.day, tzinfo=UTC)
     return {
         "series": SERIES,
         "station": "KDEN",
         "timezone": "America/Denver",
         "event_date": event_date,
-        "window_start": midnight,
-        "window_end": midnight + timedelta(days=1),
+        "window_start": midnight + opens,
+        "window_end": midnight + opens + timedelta(days=1),
         "tickers": 6,
         "ladder_rows": 900,
         "first_event_at": midnight,
@@ -181,6 +265,19 @@ def event_day_table() -> pa.Table:
         event_day_row(UNCOVERED_DAY, in_scope=False, split=""),
         event_day_row(DISCOVERY_DAY, in_scope=True, split=DISCOVERY, day_index=1),
         event_day_row(HOLDOUT_DAY, in_scope=True, split=HOLDOUT, day_index=2),
+    ]
+    return pa.Table.from_pylist(rows, schema=EVENT_DAYS_SCHEMA)
+
+
+def local_event_day_table() -> pa.Table:
+    rows = [
+        event_day_row(UNCOVERED_DAY, in_scope=False, split="", opens=STANDARD_OFFSET),
+        event_day_row(
+            DISCOVERY_DAY, in_scope=True, split=DISCOVERY, day_index=1, opens=STANDARD_OFFSET
+        ),
+        event_day_row(
+            HOLDOUT_DAY, in_scope=True, split=HOLDOUT, day_index=2, opens=STANDARD_OFFSET
+        ),
     ]
     return pa.Table.from_pylist(rows, schema=EVENT_DAYS_SCHEMA)
 
@@ -208,7 +305,7 @@ def scope_dir(
     write_universe(
         directory / "r0_universe.json",
         freeze_universe(
-            fraction_invalid_max=Decimal("0.4"),
+            fraction_invalid_max=FRACTION_INVALID_MAX,
             passing=(SERIES, "KXHIGHLAX", LOCK_CARVE_OUT),
             coverage=Coverage(
                 cities=("KXHIGHCHI", SERIES, "KXHIGHLAX"),
@@ -266,9 +363,74 @@ def evidence(
     return EvidenceWindow(series=series, event_date=event_date, start=start, end=end)
 
 
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
+
+
+def seeded_repo(root: Path) -> Path:
+    root.mkdir()
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "config", "core.hooksPath", str(root / ".git" / "hooks"))
+    _git(root, "config", "commit.gpgsign", "false")
+    _git(root, "config", "user.name", "tape")
+    _git(root, "config", "user.email", "tape@example.invalid")
+    (root / "seed.txt").write_text("seed\n")
+    _git(root, "add", "seed.txt")
+    _git(root, "commit", "-q", "-m", "seed")
+    return root
+
+
+def write_rtt_samples(path: Path, count: int) -> Path:
+    samples = [
+        ReadSample(
+            sequence=index,
+            requested_at=datetime(2026, 8, 12, index % 24, index % 60, tzinfo=UTC),
+            elapsed_s=0.24,
+            ticker=TICKER,
+            outcome="ok",
+            status_code=200,
+            api_host="api.elections.kalshi.com",
+            endpoint=f"GET /trade-api/v2/markets/{TICKER}/orderbook",
+            source_host="kalshi-ws",
+        )
+        for index in range(count)
+    ]
+    path.write_text("".join(encode_sample(sample) + "\n" for sample in samples))
+    return path
+
+
+def write_preregistration(path: Path) -> Path:
+    path.write_text("preregistration\n")
+    return path
+
+
+def run_input_paths(tmp_path: Path) -> dict[str, Path]:
+    return {
+        "preregistration": write_preregistration(tmp_path / "preregistration.md"),
+        "repo": seeded_repo(tmp_path / "tree"),
+        "run_scope": scope_dir(tmp_path, days=local_event_day_table()),
+        "artifacts": artifact_root(tmp_path),
+        "rtt_samples": write_rtt_samples(tmp_path / "samples.jsonl", ADEQUATE_SAMPLES),
+    }
+
+
+def assemble(paths: dict[str, Path]) -> RunInputs:
+    return assemble_run_inputs(
+        run_id=RUN_ID,
+        floor_source=FloorSource.SIGNED_READ,
+        bootstrap_seed=SEED,
+        **paths,
+    )
+
+
 @pytest.fixture
 def scope(tmp_path: Path) -> RunScope:
     return load_run_scope(scope_dir(tmp_path))
+
+
+@pytest.fixture
+def paths(tmp_path: Path) -> dict[str, Path]:
+    return run_input_paths(tmp_path)
 
 
 def test_a_window_across_utc_midnight_reads_both_partitions(tmp_path: Path) -> None:
@@ -670,3 +832,100 @@ def test_the_split_of_a_day_outside_the_scope_raises(scope: RunScope) -> None:
 
     with pytest.raises(ValueError, match=STRANGER_DAY.isoformat()):
         split_of(scope, SERIES, STRANGER_DAY)
+
+
+def test_the_assembled_inputs_carry_every_field_the_manifest_names(paths: dict[str, Path]) -> None:
+    inputs = assemble(paths)
+
+    assert [field.name for field in fields(RunInputs) if getattr(inputs, field.name) is None] == []
+    manifest = build_manifest(inputs)
+    assert manifest.run_id == RUN_ID
+    assert manifest.preregistration == paths["preregistration"]
+    assert manifest.fee == fee_source()
+    assert manifest.floor.source is FloorSource.SIGNED_READ
+    assert manifest.floor.n_usable == ADEQUATE_SAMPLES
+    assert manifest.bootstrap_seed == SEED
+
+
+def test_the_accrual_window_is_the_one_the_scope_froze(paths: dict[str, Path]) -> None:
+    days = load_run_scope(paths["run_scope"]).event_days.values()
+
+    inputs = assemble(paths)
+
+    assert inputs.accrual_start == SCOPE_START
+    assert inputs.accrual_end == SCOPE_END
+    assert inputs.accrual_start != min(day.window_start for day in days)
+    assert inputs.accrual_end != max(day.window_end for day in days)
+
+
+def test_the_row_counts_name_each_artifact_kind_and_both_scope_tables(
+    paths: dict[str, Path],
+) -> None:
+    inputs = assemble(paths)
+
+    assert inputs.row_counts == {
+        TOUCH: CONSUMED[TOUCH],
+        LADDER: CONSUMED[LADDER],
+        TRADES: CONSUMED[TRADES],
+        "exclusions": EXCLUSION_ROWS,
+        "event_days": EVENT_DAY_ROWS,
+    }
+    assert inputs.row_counts["exclusions"] == len(load_run_scope(paths["run_scope"]).exclusions)
+
+
+def test_an_event_day_window_across_utc_midnight_reaches_the_later_partition(
+    paths: dict[str, Path],
+) -> None:
+    root = paths["artifacts"]
+    frozen = load_run_scope(paths["run_scope"])
+    day = frozen.event_days[(SERIES, HOLDOUT_DAY)]
+
+    inputs = assemble(paths)
+
+    assert window_dates(day.window_start, day.window_end) == [HOLDOUT_DAY, LATE_ARRIVAL]
+    assert LATE_ARRIVAL not in {event_date for _, event_date in frozen.event_days}
+    assert inputs.row_counts[TOUCH] > partition_rows(
+        root, TOUCH, SERIES, [DISCOVERY_DAY, HOLDOUT_DAY]
+    )
+    assert partition_rows(root, TOUCH, SERIES, [LATE_ARRIVAL]) == 5
+
+
+def test_a_partition_before_the_first_in_scope_event_day_is_not_counted(
+    paths: dict[str, Path],
+) -> None:
+    inputs = assemble(paths)
+
+    assert partition_rows(paths["artifacts"], TOUCH, SERIES, [UNCOVERED_DAY]) == 7
+    assert inputs.row_counts[TOUCH] == CONSUMED[TOUCH]
+
+
+def test_a_partition_outside_the_scopes_city_set_is_not_counted(paths: dict[str, Path]) -> None:
+    before = assemble(paths).row_counts
+    write_partition(paths["artifacts"], DISCOVERY_DAY, 2, [touch_row(9, NOON)], series="KXHIGHLAX")
+
+    after = assemble(paths).row_counts
+
+    assert "KXHIGHLAX" in load_run_scope(paths["run_scope"]).universe.passing
+    assert after == before
+
+
+def test_a_short_read_rtt_sample_set_aborts_naming_the_latency_floor(
+    paths: dict[str, Path],
+) -> None:
+    write_rtt_samples(paths["rtt_samples"], SHORT_SAMPLES)
+
+    with pytest.raises(ManifestIncomplete) as excinfo:
+        assemble(paths)
+
+    assert excinfo.value.fields == ("latency_floor",)
+    assert f"usable samples {SHORT_SAMPLES} short of" in str(excinfo.value)
+
+
+def test_the_universe_the_manifest_records_is_the_frozen_one(paths: dict[str, Path]) -> None:
+    stored = json.loads((paths["run_scope"] / "r0_universe.json").read_text())["sha256"]
+
+    inputs = assemble(paths)
+
+    assert inputs.universe.fraction_invalid_max == FRACTION_INVALID_MAX
+    assert freeze_digest(universe_payload(inputs.universe)) == stored
+    assert manifest_payload(build_manifest(inputs))["r0_universe_sha256"] == stored

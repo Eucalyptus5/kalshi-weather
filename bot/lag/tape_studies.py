@@ -10,8 +10,11 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from bot.lag.fee_floor import fee_source
 from bot.lag.r0_universe import R0Universe
 from bot.lag.r0_universe import freeze_digest as universe_digest
+from bot.lag.read_rtt import FloorSource, load_samples
+from bot.lag.run_manifest import RunInputs, resolve_latency_floor
 from bot.replay.artifacts import (
     BOUNDARIES_SCHEMA,
     COVERAGE_SCHEMA,
@@ -279,6 +282,45 @@ def screen_windows(scope: RunScope, windows: Sequence[EvidenceWindow]) -> Screen
         excluded=excluded,
         out_of_scope=out_of_scope,
         by_class=by_class,
+    )
+
+
+def assemble_run_inputs(
+    *,
+    run_id: str,
+    preregistration: Path,
+    repo: Path,
+    run_scope: Path,
+    artifacts: Path,
+    rtt_samples: Path,
+    floor_source: FloorSource,
+    bootstrap_seed: int,
+) -> RunInputs:
+    scope = load_run_scope(run_scope)
+    arrivals: dict[str, set[date]] = {}
+    for (series, _), day in scope.event_days.items():
+        arrivals.setdefault(series, set()).update(window_dates(day.window_start, day.window_end))
+
+    row_counts = {
+        kind: sum(
+            partition_rows(artifacts, kind, series, dates) for series, dates in arrivals.items()
+        )
+        for kind in KIND_SCHEMAS
+    }
+    row_counts["exclusions"] = pq.ParquetFile(run_scope / "exclusions.parquet").metadata.num_rows
+    row_counts["event_days"] = pq.ParquetFile(run_scope / "event_days.parquet").metadata.num_rows
+
+    return RunInputs(
+        run_id=run_id,
+        preregistration=preregistration,
+        repo=repo,
+        accrual_start=scope.scope_start,
+        accrual_end=scope.scope_end,
+        row_counts=row_counts,
+        universe=scope.universe,
+        fee=fee_source(),
+        floor=resolve_latency_floor(load_samples(rtt_samples), floor_source),
+        bootstrap_seed=bootstrap_seed,
     )
 
 
