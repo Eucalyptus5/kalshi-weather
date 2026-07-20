@@ -13,6 +13,10 @@ Direction = Literal["greater", "less"]
 
 DIRECTIONS: tuple[Direction, ...] = ("greater", "less")
 
+# A mid-latitude synoptic system lives about three days, so days inside that span share weather
+# state and are not independent draws. Fixed from meteorology, never from a statistic on this tape.
+BLOCK_DAYS: int = 3
+
 
 @dataclass(frozen=True, slots=True)
 class ClusterAggregate:

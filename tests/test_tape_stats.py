@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from bot.lag.tape_stats import (
+    BLOCK_DAYS,
     ClusterAggregate,
     CorridorDayAggregate,
     cluster_bootstrap,
@@ -285,6 +286,12 @@ def test_blocks_are_contiguous_days_that_never_span_a_corridor() -> None:
 def test_blocks_follow_day_order_and_ignore_calendar_gaps() -> None:
     observations = _corridor("north", [9, 0, 1], [Decimal("1")] * 3)
     assert day_blocks(observations, block_days=2) == (1, 0, 0)
+
+
+def test_the_frozen_block_length_groups_three_days_at_a_time() -> None:
+    assert BLOCK_DAYS == 3
+    observations = _corridor("north", [0, 1, 2, 3, 4, 5, 6], [Decimal("1")] * 7)
+    assert day_blocks(observations, block_days=BLOCK_DAYS) == (0, 0, 0, 1, 1, 1, 2)
 
 
 def test_block_length_changes_the_block_count() -> None:
