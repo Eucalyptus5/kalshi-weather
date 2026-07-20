@@ -17,8 +17,12 @@ from bot.lag.taker_flow import (
     PRICE_TICKS,
     PRIMARY_HORIZON_S,
     PRINT_MIN_DISCOVERY,
+    Anchors,
     HorizonResult,
+    HorizonWindows,
     PrintOutcome,
+    TickerBook,
+    TickerPrints,
     build_ticker_book,
     build_ticker_prints,
     cluster_aggregates,
@@ -109,7 +113,7 @@ def for_ticker(table: pa.Table, ticker: str) -> pa.Table:
 
 def pieces(
     touch_rows: list[dict], trade_rows: list[dict], horizon_s: int = PRIMARY_HORIZON_S
-) -> tuple:
+) -> tuple[TickerBook, TickerPrints, Anchors, HorizonWindows]:
     book = build_ticker_book(TICKER, touch_table(touch_rows))
     prints = build_ticker_prints(TICKER, screen_prints(trades_table(trade_rows)).kept)
     anchors = resolve_anchors(book, prints)
@@ -157,7 +161,7 @@ END_TO_END_TRADES = [
 ]
 
 
-def test_frozen_constants_hold():
+def test_frozen_constants_hold() -> None:
     assert HORIZONS_S == (1, 10, 60, 300)
     assert PRIMARY_HORIZON_S == 60
     assert PRIMARY_HORIZON_S in HORIZONS_S
@@ -169,31 +173,31 @@ def test_frozen_constants_hold():
     assert HOLDOUT_ALPHA == 0.05
 
 
-def test_yes_pressure_signs_the_outcome_the_aggressor_bought():
+def test_yes_pressure_signs_the_outcome_the_aggressor_bought() -> None:
     assert yes_pressure("yes") == 1
     assert yes_pressure("no") == -1
 
 
 @pytest.mark.parametrize("value", ["", "YES", "No", "both", "buy"])
-def test_unsigned_taker_side_raises(value: str):
+def test_unsigned_taker_side_raises(value: str) -> None:
     with pytest.raises(ValueError):
         yes_pressure(value)
 
 
-def test_mid_is_the_doubled_tick_mid():
+def test_mid_is_the_doubled_tick_mid() -> None:
     book = build_ticker_book(TICKER, touch_table([touch(1, 0, 1000, "0.40", "0.58")]))
     assert int(book.mid2[0]) == 8200
     assert bool(book.two_sided[0])
 
 
-def test_an_empty_book_carries_no_mid():
+def test_an_empty_book_carries_no_mid() -> None:
     book = build_ticker_book(TICKER, touch_table([touch(1, 0, 1000, "0.00", "0.00")]))
     naive = Decimal(int(book.mid2[0])) / Decimal(2 * PRICE_TICKS)
     assert naive == Decimal("0.5")
     assert not bool(book.two_sided[0])
 
 
-def test_anchor_is_the_first_delta_stamped_after_the_print():
+def test_anchor_is_the_first_delta_stamped_after_the_print() -> None:
     rows = [touch(1, 0, 1000), touch(2, 10, 2000), touch(3, 20, 3000), touch(4, 200, 4000)]
     _, _, anchors, _ = pieces(rows, [trade(10, 1, 1500), trade(11, 2, 2000)])
     assert anchors.resolved.tolist() == [True, True]
@@ -201,7 +205,7 @@ def test_anchor_is_the_first_delta_stamped_after_the_print():
     assert not anchors.host_clock.any()
 
 
-def test_anchor_is_the_state_after_the_event():
+def test_anchor_is_the_state_after_the_event() -> None:
     book, _, anchors, _ = pieces(
         [touch(1, 0, 1000, "0.40", "0.58"), touch(2, 2, 2000, "0.50", "0.48"), touch(3, 200, 3000)],
         [trade(10, 1, 1500)],
@@ -210,21 +214,21 @@ def test_anchor_is_the_state_after_the_event():
     assert int(book.mid2[anchors.index[0]]) == 10200
 
 
-def test_a_snapshot_between_the_print_and_the_delta_forces_the_host_clock():
+def test_a_snapshot_between_the_print_and_the_delta_forces_the_host_clock() -> None:
     rows = [touch(1, 0, 1000), touch(2, 5, None), touch(3, 6, 2000), touch(4, 200, 3000)]
     _, _, anchors, _ = pieces(rows, [trade(10, 1, 1500)])
     assert anchors.index.tolist() == [1]
     assert anchors.host_clock.tolist() == [True]
 
 
-def test_a_snapshot_after_the_anchor_leaves_the_exchange_clock_alone():
+def test_a_snapshot_after_the_anchor_leaves_the_exchange_clock_alone() -> None:
     rows = [touch(1, 0, 1000), touch(2, 5, 2000), touch(3, 6, None), touch(4, 200, 3000)]
     _, _, anchors, _ = pieces(rows, [trade(10, 1, 1500)])
     assert anchors.index.tolist() == [1]
     assert anchors.host_clock.tolist() == [False]
 
 
-def test_no_later_delta_leaves_the_print_unresolved():
+def test_no_later_delta_leaves_the_print_unresolved() -> None:
     rows = [touch(1, 0, 1000), touch(2, 10, 2000)]
     _, _, anchors, windows = pieces(rows, [trade(10, 1, 5000)])
     assert anchors.resolved.tolist() == [False]
@@ -232,7 +236,7 @@ def test_no_later_delta_leaves_the_print_unresolved():
     assert windows.counts.unresolved == 1
 
 
-def test_horizon_end_is_the_last_row_at_or_before_the_deadline():
+def test_horizon_end_is_the_last_row_at_or_before_the_deadline() -> None:
     rows = [touch(1, 0, 1000), touch(2, 2, 2000), touch(3, 50, 3000), touch(4, 61, 4000)]
     rows.append(touch(5, 70, 5000))
     book, _, anchors, windows = pieces(rows, [trade(10, 1, 1500)])
@@ -243,7 +247,7 @@ def test_horizon_end_is_the_last_row_at_or_before_the_deadline():
     assert windows.usable.tolist() == [True]
 
 
-def test_a_tape_that_stops_short_of_the_horizon_drops_the_print():
+def test_a_tape_that_stops_short_of_the_horizon_drops_the_print() -> None:
     rows = [touch(1, 0, 1000), touch(2, 2, 2000), touch(3, 50, 3000), touch(4, 61, 4000)]
     _, _, _, windows = pieces(rows, [trade(10, 1, 1500)])
     assert windows.usable.tolist() == [False]
@@ -251,14 +255,14 @@ def test_a_tape_that_stops_short_of_the_horizon_drops_the_print():
     assert windows.counts.one_sided == 0
 
 
-def test_a_one_sided_anchor_drops_the_print():
+def test_a_one_sided_anchor_drops_the_print() -> None:
     rows = [touch(1, 0, 1000), touch(2, 2, 2000, "0.41", "0.00"), touch(3, 200, 3000)]
     _, _, _, windows = pieces(rows, [trade(10, 1, 1500)])
     assert windows.usable.tolist() == [False]
     assert windows.counts.one_sided == 1
 
 
-def test_a_one_sided_horizon_end_drops_the_print():
+def test_a_one_sided_horizon_end_drops_the_print() -> None:
     rows = [touch(1, 0, 1000), touch(2, 2, 2000), touch(3, 50, 3000, "0.00", "0.00")]
     rows.append(touch(4, 200, 4000))
     _, _, _, windows = pieces(rows, [trade(10, 1, 1500)])
@@ -266,7 +270,7 @@ def test_a_one_sided_horizon_end_drops_the_print():
     assert windows.counts.one_sided == 1
 
 
-def test_the_evidence_window_opens_at_the_earlier_of_print_and_anchor():
+def test_the_evidence_window_opens_at_the_earlier_of_print_and_anchor() -> None:
     rows = [touch(1, 0, 1000), touch(2, 1, 2000), touch(3, 100, 3000)]
     _, _, anchors, windows = pieces(rows, [trade(10, 5, 1500)])
     assert int(anchors.index[0]) == 1
@@ -274,7 +278,7 @@ def test_the_evidence_window_opens_at_the_earlier_of_print_and_anchor():
     assert int(windows.end_us[0]) == us(61)
 
 
-def test_a_rising_mid_pays_the_yes_taker_and_costs_the_no_taker():
+def test_a_rising_mid_pays_the_yes_taker_and_costs_the_no_taker() -> None:
     trades = [trade(10, 1, 1500, "yes", "0.50", "10"), trade(11, 1, 1500, "no", "0.50", "10")]
     book, prints, anchors, windows = pieces(RISING, trades)
     outcomes = print_outcomes(book, prints, anchors, windows)
@@ -293,30 +297,32 @@ FEE_CASES = [
 
 
 @pytest.mark.parametrize(("contracts", "price", "signed_move2", "expected"), FEE_CASES)
-def test_net_cents_golden_table(contracts: int, price: str, signed_move2: int, expected: str):
+def test_net_cents_golden_table(
+    contracts: int, price: str, signed_move2: int, expected: str
+) -> None:
     assert print_net_cents(
         contracts=contracts, price=Decimal(price), signed_move2=signed_move2
     ) == Decimal(expected)
 
 
 @pytest.mark.parametrize(("contracts", "price"), [(1, "0.05"), (4, "0.45"), (100, "0.50")])
-def test_the_fee_module_agrees_with_the_published_formula(contracts: int, price: str):
+def test_the_fee_module_agrees_with_the_published_formula(contracts: int, price: str) -> None:
     assert taker_fee(contracts, Decimal(price)) == published_taker_fee(contracts, Decimal(price))
 
 
-def test_a_move_worth_the_round_trip_fee_nets_zero():
+def test_a_move_worth_the_round_trip_fee_nets_zero() -> None:
     fee_cents = Decimal(2) * Decimal(100) * taker_fee(1, Decimal("0.05"))
     assert fee_cents == Decimal("2")
     assert print_net_cents(contracts=1, price=Decimal("0.05"), signed_move2=400) == Decimal("0")
 
 
-def test_a_fractional_count_raises():
+def test_a_fractional_count_raises() -> None:
     table = trades_table([trade(10, 1, 1500, count="3.50")])
     with pytest.raises(ValueError):
         build_ticker_prints(TICKER, table)
 
 
-def test_screen_prints_drops_empty_sides_and_duplicate_trade_ids():
+def test_screen_prints_drops_empty_sides_and_duplicate_trade_ids() -> None:
     rows = [
         trade(9, 1, 1500, trade_id="a"),
         trade(5, 1, 1500, trade_id="a"),
@@ -329,7 +335,7 @@ def test_screen_prints_drops_empty_sides_and_duplicate_trade_ids():
     assert hygiene.counts.duplicates == 1
 
 
-def test_clusters_group_by_ticker_and_feed_the_bootstrap():
+def test_clusters_group_by_ticker_and_feed_the_bootstrap() -> None:
     outcomes = [
         PrintOutcome(ticker=TICKER, net_cents=Decimal("6"), contracts=4),
         PrintOutcome(ticker=OTHER, net_cents=Decimal("26"), contracts=4),
@@ -351,7 +357,7 @@ def test_clusters_group_by_ticker_and_feed_the_bootstrap():
     assert bootstrap.estimate == Decimal("30") / Decimal("9")
 
 
-def test_a_zero_contract_cluster_is_dropped():
+def test_a_zero_contract_cluster_is_dropped() -> None:
     outcomes = [
         PrintOutcome(ticker=TICKER, net_cents=Decimal("0"), contracts=0),
         PrintOutcome(ticker=OTHER, net_cents=Decimal("26"), contracts=4),
@@ -360,18 +366,34 @@ def test_a_zero_contract_cluster_is_dropped():
     assert [item.cluster for item in clusters] == [OTHER]
 
 
-def test_non_monotone_delta_stamps_are_counted():
+def test_non_monotone_delta_stamps_are_counted() -> None:
     rows = [touch(1, 0, 3000), touch(2, 1, 2000), touch(3, 2, 4000)]
     book = build_ticker_book(TICKER, touch_table(rows))
     assert book.ts_violations == 1
 
 
-def test_monotone_delta_stamps_count_no_violation():
+def test_monotone_delta_stamps_count_no_violation() -> None:
     book = build_ticker_book(TICKER, touch_table([touch(1, 0, 1000), touch(2, 1, 1000)]))
     assert book.ts_violations == 0
 
 
-def test_end_to_end_contract_weighted_mean():
+def test_out_of_order_stamps_anchor_on_the_first_row_stamped_after_the_print() -> None:
+    rows = [touch(1, 0, 1000), touch(2, 10, 3000), touch(3, 20, 2000), touch(4, 200, 4000)]
+    book, _, anchors, _ = pieces(rows, [trade(10, 1, 1500), trade(11, 2, 2500)])
+    assert book.ts_violations == 1
+    assert anchors.resolved.tolist() == [True, True]
+    assert anchors.index.tolist() == [1, 1]
+    assert not anchors.host_clock.any()
+
+
+def test_a_horizon_with_no_clusters_has_no_mean() -> None:
+    result = study(END_TO_END_TOUCH, END_TO_END_TRADES, horizon_s=HORIZONS_S[-1])
+    assert result.clusters == ()
+    with pytest.raises(ValueError):
+        result.mean_net_cents
+
+
+def test_end_to_end_contract_weighted_mean() -> None:
     result = study(END_TO_END_TOUCH, END_TO_END_TRADES)
     assert result.horizon_s == PRIMARY_HORIZON_S
     assert result.split == SPLIT
@@ -386,30 +408,29 @@ def test_end_to_end_contract_weighted_mean():
     assert result.counts.host_clock == 0
 
 
-def test_a_one_second_horizon_pays_only_the_fee():
+def test_a_one_second_horizon_pays_only_the_fee() -> None:
     result = study(END_TO_END_TOUCH, END_TO_END_TRADES, horizon_s=1)
     assert result.mean_net_cents == Decimal("-3.5")
 
 
-def test_the_longest_horizon_runs_off_the_tape():
+def test_the_longest_horizon_runs_off_the_tape() -> None:
     result = study(END_TO_END_TOUCH, END_TO_END_TRADES, horizon_s=HORIZONS_S[-1])
     assert result.n_prints == 0
     assert result.counts.uncovered == 2
 
 
-def test_counts_add_across_tickers():
+def test_counts_add_across_tickers() -> None:
     result = study(END_TO_END_TOUCH, END_TO_END_TRADES + [trade(12, 1, 1500, side="")])
     assert result.counts.empty_side == 1
     assert result.n_prints == 2
 
 
-def test_prints_arrays_carry_the_taker_price():
+def test_prints_arrays_carry_the_taker_price() -> None:
     prints = build_ticker_prints(
         TICKER,
         trades_table([trade(10, 1, 1500, "yes", "0.45"), trade(11, 2, 1600, "no", "0.45")]),
     )
     assert prints.prices == (Decimal("0.45"), Decimal("0.55"))
-    assert prints.price_ticks.tolist() == [4500, 5500]
     assert prints.pressure.tolist() == [1, -1]
     assert prints.contracts.tolist() == [4, 4]
     assert np.array_equal(prints.received_us, np.array([us(1), us(2)]))

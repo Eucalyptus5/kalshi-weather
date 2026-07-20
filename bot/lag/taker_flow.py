@@ -15,9 +15,10 @@ from bot.lag.tape_stats import ClusterAggregate
 HORIZONS_S: tuple[int, ...] = (1, 10, 60, 300)
 PRIMARY_HORIZON_S: int = 60
 PRINT_MIN_DISCOVERY: int = 5_000
-# One price tick, the smallest increment at which a taker can express a view.
+# The exchange quotes in whole cents, so one cent is the smallest move a taker can express.
 CENT_BAR: Decimal = Decimal("1.0")
-# Stored prices carry _PRICE_EXPONENT, so a stored price is this many units per dollar.
+# Stored prices carry _PRICE_EXPONENT, so a stored price is this many units per dollar. A unit is a
+# hundredth of the cent CENT_BAR measures, not the increment the exchange trades on.
 PRICE_TICKS: int = 10_000
 
 YES = "yes"
@@ -34,6 +35,8 @@ _GROSS_DIVISOR = Decimal(200)
 # The taker lifted resting size on the side named here, so "yes" is an aggressive buy of YES.
 # An empty side is a decode artifact, never a direction: _decode writes `or ""` into a NOT NULL
 # column, so the string carries no evidence about which way the aggressor leaned.
+# Deliberately not bot.lag.taker_side.taker_direction, which carries the same signs: that one hands
+# an unsigned side back as None, and screen_prints has already dropped those, so here one is a bug.
 def yes_pressure(taker_side: str) -> int:
     if taker_side == YES:
         return 1
@@ -67,7 +70,6 @@ class TickerBook:
     ticker: str
     received_us: np.ndarray
     ts_ms: np.ndarray
-    is_delta: np.ndarray
     mid2: np.ndarray
     two_sided: np.ndarray
     delta_rows: np.ndarray
@@ -83,7 +85,6 @@ class TickerPrints:
     received_us: np.ndarray
     pressure: np.ndarray
     contracts: np.ndarray
-    price_ticks: np.ndarray
     prices: tuple[Decimal, ...]
 
 
@@ -128,6 +129,8 @@ class HorizonResult:
 
     @property
     def mean_net_cents(self) -> Decimal:
+        if not self.clusters:
+            raise ValueError("a contract-weighted mean needs at least one cluster")
         return sum((item.total for item in self.clusters), Decimal(0)) / sum(
             (item.weight for item in self.clusters), Decimal(0)
         )
@@ -145,7 +148,6 @@ def build_ticker_book(ticker: str, table: pa.Table) -> TickerBook:
         ticker=ticker,
         received_us=table.column("received_at").cast(pa.int64()).to_numpy(),
         ts_ms=ts_ms,
-        is_delta=is_delta,
         # Doubling keeps every intermediate exact in int64; the caller halves at the end.
         mid2=yes_bid + PRICE_TICKS - no_bid,
         # A zero price is _best reporting an empty side, not a one-tick market, and a book empty
@@ -175,7 +177,6 @@ def build_ticker_prints(ticker: str, table: pa.Table) -> TickerPrints:
             [_contracts(ticker, value) for value in table.column("count").to_pylist()],
             dtype=np.int64,
         ),
-        price_ticks=np.array([_ticks(price) for price in prices], dtype=np.int64),
         prices=prices,
     )
 
@@ -205,8 +206,12 @@ def screen_prints(table: pa.Table) -> PrintHygiene:
 # which would make the statistic positive by construction at short horizons.
 def resolve_anchors(book: TickerBook, prints: TickerPrints) -> Anchors:
     rows = book.received_us.size
+    # Exchange stamps arrive out of order often enough that ts_violations counts them, and a binary
+    # search over an unsorted array returns an arbitrary index. The running maximum is sorted and
+    # rises only at a row that sets a record, so the first index past the print is the first row in
+    # id order stamped after it, whatever the ordering.
     stamped = np.append(book.delta_rows, rows)[
-        np.searchsorted(book.delta_ts, prints.ts_ms, side="right")
+        np.searchsorted(np.maximum.accumulate(book.delta_ts), prints.ts_ms, side="right")
     ]
     arrival = np.searchsorted(book.received_us, prints.received_us, side="right")
     # A snapshot carries no exchange stamp, so one landing between the print and the stamped delta
