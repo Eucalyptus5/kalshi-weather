@@ -17,6 +17,12 @@ DIRECTIONS: tuple[Direction, ...] = ("greater", "less")
 # state and are not independent draws. Fixed from meteorology, never from a statistic on this tape.
 BLOCK_DAYS: int = 3
 
+# 0.05 Bonferroni-corrected at four questions.
+ALPHA: float = 0.0125
+# Holdout replication is one test of a direction the discovery already fixed, so it carries no
+# family correction of its own.
+HOLDOUT_ALPHA: float = 0.05
+
 
 @dataclass(frozen=True, slots=True)
 class ClusterAggregate:
