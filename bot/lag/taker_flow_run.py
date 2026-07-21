@@ -74,7 +74,9 @@ PRINTS = "prints"
 PASS = "PASS"
 CLOSED = "CLOSED"
 UNDERPOWERED = "UNDERPOWERED"
+PRINT_MIN_HOLDOUT = (PRINT_MIN_DISCOVERY + 1) // 2
 ZERO_ESTIMATE = "a discovery estimate of exactly zero fixes no direction to replicate"
+NO_ESTIMATE = "a split with no usable prints carries no estimate to replicate"
 
 _DAY = timedelta(days=1)
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -120,27 +122,29 @@ class Sweep:
     duplicates: int
     out_of_scope: int
     in_scope: Mapping[str, int]
-    ts_violations: int
+    read_ts_violations: int
     tickers: Mapping[tuple[str, date], frozenset[str]]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class HorizonReadout:
     result: HorizonResult
-    bootstrap: BootstrapResult
+    bootstrap: BootstrapResult | None
     candidates: int
     excluded: int
     out_of_window: int
     by_class: Mapping[str, int]
 
     @property
-    def excluded_fraction(self) -> Decimal:
+    def excluded_fraction(self) -> Decimal | None:
+        if self.candidates == 0:
+            return None
         return Decimal(self.excluded) / Decimal(self.candidates)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Decision:
-    gate: GateVerdict
+    gate: GateVerdict | None
     replication: HoldoutVerdict | None
     skipped: str
     verdict: str
@@ -224,7 +228,8 @@ def sweep_prints(scope: RunScope, artifacts: Path) -> Sweep:
             len(event_dates),
         )
 
-        following = TOUCH_SCHEMA.empty_table().select(list(TOUCH_COLUMNS))
+        current = TOUCH_SCHEMA.empty_table().select(list(TOUCH_COLUMNS))
+        following = current
         following_day = None
         for day in days:
             opens = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
@@ -275,6 +280,9 @@ def sweep_prints(scope: RunScope, artifacts: Path) -> Sweep:
         logger.info(
             "taker_flow root=%s done elapsed_s=%.1f", series_root, time.monotonic() - started
         )
+        # The next root's trades are read at the top of the loop, and the recorder host cannot
+        # hold two roots' buffers at once.
+        del hygienic, scoped, current, following
 
     return Sweep(
         tallies=tallies,
@@ -282,7 +290,7 @@ def sweep_prints(scope: RunScope, artifacts: Path) -> Sweep:
         duplicates=hygiene.duplicates,
         out_of_scope=out_of_scope,
         in_scope=in_scope,
-        ts_violations=violations,
+        read_ts_violations=violations,
         tickers={key: frozenset(names) for key, names in tickers.items()},
     )
 
@@ -316,7 +324,7 @@ def readout(tally: Tally, *, split: str, horizon_s: int, seed: int) -> HorizonRe
     )
     return HorizonReadout(
         result=result,
-        bootstrap=bootstrap_of(result.clusters, seed),
+        bootstrap=bootstrap_of(result.clusters, seed) if result.clusters else None,
         candidates=tally.candidates,
         excluded=tally.excluded,
         out_of_window=tally.out_of_window,
@@ -325,35 +333,47 @@ def readout(tally: Tally, *, split: str, horizon_s: int, seed: int) -> HorizonRe
 
 
 def decide(discovery: HorizonReadout, holdout: HorizonReadout) -> Decision:
-    gate = evaluate_gate(
-        estimate=discovery.bootstrap.estimate,
-        p_value=discovery.bootstrap.p_value,
-        n=discovery.result.n_prints,
-        threshold=CENT_BAR,
-        direction=DIRECTION,
-        alpha=ALPHA,
-        n_min=PRINT_MIN_DISCOVERY,
-        n_unit=PRINTS,
+    gate = (
+        None
+        if discovery.bootstrap is None
+        else evaluate_gate(
+            estimate=discovery.bootstrap.estimate,
+            p_value=discovery.bootstrap.p_value,
+            n=discovery.result.n_prints,
+            threshold=CENT_BAR,
+            direction=DIRECTION,
+            alpha=ALPHA,
+            n_min=PRINT_MIN_DISCOVERY,
+            n_unit=PRINTS,
+        )
     )
-    if gate.estimate == 0:
-        return Decision(gate=gate, replication=None, skipped=ZERO_ESTIMATE, verdict=CLOSED)
+    replication = None
+    if gate is None or holdout.bootstrap is None:
+        skipped = NO_ESTIMATE
+    elif gate.estimate == 0:
+        skipped = ZERO_ESTIMATE
+    else:
+        skipped = ""
+        replication = evaluate_holdout(
+            discovery_estimate=gate.estimate,
+            holdout_estimate=holdout.bootstrap.estimate,
+            holdout_p_value=holdout.bootstrap.p_value,
+            holdout_n=holdout.result.n_prints,
+            discovery_n_min=PRINT_MIN_DISCOVERY,
+            alpha=HOLDOUT_ALPHA,
+            n_unit=PRINTS,
+        )
 
-    replication = evaluate_holdout(
-        discovery_estimate=gate.estimate,
-        holdout_estimate=holdout.bootstrap.estimate,
-        holdout_p_value=holdout.bootstrap.p_value,
-        holdout_n=holdout.result.n_prints,
-        discovery_n_min=PRINT_MIN_DISCOVERY,
-        alpha=HOLDOUT_ALPHA,
-        n_unit=PRINTS,
-    )
-    if not gate.powered or not replication.powered:
+    if (
+        discovery.result.n_prints < PRINT_MIN_DISCOVERY
+        or holdout.result.n_prints < PRINT_MIN_HOLDOUT
+    ):
         verdict = UNDERPOWERED
-    elif gate.passed and replication.replicated:
+    elif replication is not None and gate.passed and replication.replicated:
         verdict = PASS
     else:
         verdict = CLOSED
-    return Decision(gate=gate, replication=replication, skipped="", verdict=verdict)
+    return Decision(gate=gate, replication=replication, skipped=skipped, verdict=verdict)
 
 
 def execute(
@@ -410,11 +430,12 @@ def execute(
             holdout,
         ),
     )
+    bootstrap = run.primary.bootstrap
     logger.info(
-        "taker_flow verdict=%s discovery_cents=%s discovery_p=%.5f n=%d",
+        "taker_flow verdict=%s discovery_cents=%s discovery_p=%s n=%d",
         run.decision.verdict,
-        run.primary.bootstrap.estimate,
-        run.primary.bootstrap.p_value,
+        None if bootstrap is None else bootstrap.estimate,
+        None if bootstrap is None else bootstrap.p_value,
         run.primary.result.n_prints,
     )
     return run
@@ -450,27 +471,16 @@ def result_payload(run: TakerFlowRun) -> dict:
         },
         "discovery": _readout_payload(primary),
         "holdout": _readout_payload(holdout),
-        "gate": {
-            "estimate": str(run.decision.gate.estimate),
-            "threshold": str(run.decision.gate.threshold),
-            "direction": run.decision.gate.direction,
-            "p_value": run.decision.gate.p_value,
-            "alpha": run.decision.gate.alpha,
-            "n": run.decision.gate.n,
-            "n_min": run.decision.gate.n_min,
-            "n_unit": run.decision.gate.n_unit,
-            "economic": run.decision.gate.economic,
-            "significant": run.decision.gate.significant,
-            "powered": run.decision.gate.powered,
-            "passed": run.decision.gate.passed,
-        },
+        "gate": _gate_payload(run.decision.gate),
         "replication": _replication_payload(run.decision.replication),
         "replication_skipped": run.decision.skipped,
         "horizon_curve": [_readout_payload(item) for item in run.discovery],
         "exclusions": {
             "candidates": candidates,
             "excluded": excluded,
-            "excluded_fraction": str(Decimal(excluded) / Decimal(candidates)),
+            "excluded_fraction": (
+                None if candidates == 0 else str(Decimal(excluded) / Decimal(candidates))
+            ),
             "by_class": _pool_classes(primary.by_class, holdout.by_class),
         },
         "kernel_drops": {
@@ -478,7 +488,7 @@ def result_payload(run: TakerFlowRun) -> dict:
             "uncovered": counts.uncovered,
             "one_sided": counts.one_sided,
             "host_clock": counts.host_clock,
-            "ts_violations": run.sweep.ts_violations,
+            "read_ts_violations": run.sweep.read_ts_violations,
         },
         "cities": sorted({series for series, _ in run.sweep.tickers}),
         "tickers_per_city_day": {
@@ -489,26 +499,47 @@ def result_payload(run: TakerFlowRun) -> dict:
 
 
 def _readout_payload(item: HorizonReadout) -> dict:
+    bootstrap = item.bootstrap
+    fraction = item.excluded_fraction
     return {
         "split": item.result.split,
         "horizon_s": item.result.horizon_s,
-        "mean_net_cents": str(item.bootstrap.estimate),
-        "ci_low": item.bootstrap.ci_low,
-        "ci_high": item.bootstrap.ci_high,
-        "ci_level": item.bootstrap.ci_level,
+        "mean_net_cents": None if bootstrap is None else str(bootstrap.estimate),
+        "ci_low": None if bootstrap is None else bootstrap.ci_low,
+        "ci_high": None if bootstrap is None else bootstrap.ci_high,
+        "ci_level": None if bootstrap is None else bootstrap.ci_level,
         "n_prints": item.result.n_prints,
         "contracts": item.result.contracts,
-        "clusters": item.bootstrap.n_clusters,
-        "p_value": item.bootstrap.p_value,
+        "clusters": len(item.result.clusters),
+        "p_value": None if bootstrap is None else bootstrap.p_value,
         "candidates": item.candidates,
         "excluded": item.excluded,
-        "excluded_fraction": str(item.excluded_fraction),
+        "excluded_fraction": None if fraction is None else str(fraction),
         "out_of_window": item.out_of_window,
         "by_class": dict(sorted(item.by_class.items())),
         "unresolved": item.result.counts.unresolved,
         "uncovered": item.result.counts.uncovered,
         "one_sided": item.result.counts.one_sided,
         "host_clock": item.result.counts.host_clock,
+    }
+
+
+def _gate_payload(gate: GateVerdict | None) -> dict | None:
+    if gate is None:
+        return None
+    return {
+        "estimate": str(gate.estimate),
+        "threshold": str(gate.threshold),
+        "direction": gate.direction,
+        "p_value": gate.p_value,
+        "alpha": gate.alpha,
+        "n": gate.n,
+        "n_min": gate.n_min,
+        "n_unit": gate.n_unit,
+        "economic": gate.economic,
+        "significant": gate.significant,
+        "powered": gate.powered,
+        "passed": gate.passed,
     }
 
 

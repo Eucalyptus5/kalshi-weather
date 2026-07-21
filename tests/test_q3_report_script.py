@@ -25,6 +25,8 @@ from tests.test_taker_flow_run import (
     SEED,
     SERIES,
     artifacts_dir,
+    bookless_artifacts,
+    discovery_only_artifacts,
     scope_dir,
 )
 from tests.test_tape_studies import (
@@ -166,6 +168,43 @@ def test_the_curve_reports_every_frozen_horizon_on_discovery(
     ]
     primary = next(item for item in curve if item["horizon_s"] == PRIMARY_HORIZON_S)
     assert primary == results_of(run_root)["discovery"]
+
+
+def test_a_holdout_with_no_usable_prints_still_writes_a_verdict(
+    paths: dict[str, Path], run_root: Path, tmp_path: Path
+) -> None:
+    paths["artifacts"] = discovery_only_artifacts(tmp_path)
+
+    assert run(args_for(paths, run_root)) == 0
+
+    results = results_of(run_root)
+    assert results["verdict"] == UNDERPOWERED
+    assert Decimal(results["discovery"]["mean_net_cents"]) == Decimal("1.4")
+    assert results["holdout"]["mean_net_cents"] is None
+    assert results["holdout"]["p_value"] is None
+    assert results["holdout"]["ci_low"] is None
+    assert results["holdout"]["n_prints"] == 0
+    assert results["holdout"]["clusters"] == 0
+    assert results["holdout"]["excluded_fraction"] is None
+    assert results["replication"] is None
+    assert results["replication_skipped"]
+
+
+def test_a_run_whose_book_never_arrived_reports_null_figures(
+    paths: dict[str, Path], run_root: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    paths["artifacts"] = bookless_artifacts(tmp_path)
+
+    assert run(args_for(paths, run_root)) == 0
+
+    results = results_of(run_root)
+    assert results["verdict"] == UNDERPOWERED
+    assert results["gate"] is None
+    assert [item["mean_net_cents"] for item in results["horizon_curve"]] == [None] * len(HORIZONS_S)
+    assert [item["clusters"] for item in results["horizon_curve"]] == [0] * len(HORIZONS_S)
+    assert results["exclusions"]["excluded_fraction"] is None
+    assert results["kernel_drops"]["unresolved"] == 2
+    assert capsys.readouterr().out == format_report(results) + "\n"
 
 
 def test_a_run_whose_floor_is_unavailable_writes_nothing(

@@ -17,11 +17,15 @@ from bot.lag.taker_flow import (
 )
 from bot.lag.taker_flow_run import (
     CLOSED,
+    NO_ESTIMATE,
     PASS,
+    PRINT_MIN_HOLDOUT,
     TOUCH_COLUMNS,
     UNDERPOWERED,
+    ZERO_ESTIMATE,
     HorizonReadout,
     Sweep,
+    Tally,
     bootstrap_of,
     decide,
     keep_mask,
@@ -164,6 +168,12 @@ TRADES_DISCOVERY_DAY = [
 TRADES_HOLDOUT_DAY = [trade(110, NEXT_TICKER, when(HOLDOUT_DAY, 18, 0, 1), 30500)]
 TRADES_LATE_DAY = [trade(120, NEXT_TICKER, when(LATE_DAY, 5, 59, 0), 39000)]
 
+BOOKLESS_TOUCH_DAY = [touch(70, NEXT_TICKER, when(DISCOVERY_DAY, 18, 0, 0), 12000, "0.50", "0.48")]
+BOOKLESS_TRADES_DAY = [
+    trade(130, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 1), 12500),
+    trade(131, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 2), 12600),
+]
+
 VIOLATION_DISCOVERY_DAY = [
     touch(1, DAY_TICKER, when(DISCOVERY_DAY, 12, 0, 0), 1000, "0.50", "0.48"),
     touch(2, DAY_TICKER, when(DISCOVERY_DAY, 12, 0, 10), 3000, "0.50", "0.48"),
@@ -232,6 +242,25 @@ def artifacts_dir(tmp_path: Path) -> Path:
         (LATE_DAY, TRADES_LATE_DAY),
     ):
         write_partition(root, day, 1, rows, kind="trades", schema=TRADES_SCHEMA)
+    return root
+
+
+def bookless_artifacts(tmp_path: Path) -> Path:
+    root = tmp_path / "bookless"
+    write_partition(root, DISCOVERY_DAY, 1, BOOKLESS_TOUCH_DAY)
+    write_partition(
+        root, DISCOVERY_DAY, 1, BOOKLESS_TRADES_DAY, kind="trades", schema=TRADES_SCHEMA
+    )
+    return root
+
+
+def discovery_only_artifacts(tmp_path: Path) -> Path:
+    root = tmp_path / "discovery_only"
+    write_partition(root, DISCOVERY_DAY, 1, TOUCH_DISCOVERY_DAY)
+    write_partition(root, HOLDOUT_DAY, 1, TOUCH_HOLDOUT_DAY)
+    write_partition(
+        root, DISCOVERY_DAY, 1, TRADES_DISCOVERY_DAY, kind="trades", schema=TRADES_SCHEMA
+    )
     return root
 
 
@@ -433,15 +462,36 @@ def test_the_holdout_carries_its_own_mean(swept: Sweep) -> None:
 def test_the_kernel_drops_are_summed_per_horizon(swept: Sweep) -> None:
     assert swept.tallies[(HOLDOUT, HORIZONS_S[-1])].counts.uncovered == 1
     assert swept.tallies[(HOLDOUT, PRIMARY_HORIZON_S)].counts.uncovered == 0
-    assert swept.ts_violations == 0
 
 
-def test_stamps_that_went_backwards_are_counted_once_across_the_rolling_buffer(
+def test_stamps_that_went_backwards_are_counted_once_across_the_rows_the_run_read(
     tmp_path: Path, scope: RunScope
 ) -> None:
     sweep = sweep_prints(scope, violation_artifacts(tmp_path))
 
-    assert sweep.ts_violations == 3
+    assert sweep.read_ts_violations == 3
+
+
+def test_a_ticker_whose_book_never_arrived_counts_its_prints_unresolved(
+    tmp_path: Path, scope: RunScope
+) -> None:
+    sweep = sweep_prints(scope, bookless_artifacts(tmp_path))
+
+    assert sweep.in_scope[DISCOVERY] == 2
+    for horizon_s in HORIZONS_S:
+        tally = sweep.tallies[(DISCOVERY, horizon_s)]
+        assert tally.counts.unresolved == 2
+        assert tally.candidates == 0
+        assert tally.n_prints == 0
+        assert tally.clusters() == ()
+
+
+def test_a_cluster_carries_the_batches_a_ticker_printed_across(swept: Sweep) -> None:
+    clusters = swept.tallies[(HOLDOUT, 1)].clusters()
+
+    assert [item.cluster for item in clusters] == [NEXT_TICKER]
+    assert clusters[0].total == Decimal("-62")
+    assert clusters[0].weight == Decimal("20")
 
 
 def test_the_same_seed_gives_the_same_p_value(swept: Sweep) -> None:
@@ -505,6 +555,7 @@ def test_a_holdout_too_thin_to_replicate_is_underpowered() -> None:
 
     assert decision.gate.powered
     assert not decision.replication.powered
+    assert decision.replication.holdout_n_min == PRINT_MIN_HOLDOUT
     assert decision.verdict == UNDERPOWERED
 
 
@@ -558,6 +609,60 @@ def test_a_gate_that_clears_and_replicates_passes() -> None:
     assert decision.verdict == PASS
 
 
+def test_a_zero_estimate_on_a_discovery_too_thin_to_power_the_gate_is_underpowered() -> None:
+    discovery = readout_of(
+        clusters_of(("a", "0", "10"), ("b", "0", "10")), split=DISCOVERY, n_prints=100
+    )
+    holdout = readout_of(
+        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert decision.gate.estimate == Decimal("0")
+    assert not decision.gate.powered
+    assert decision.replication is None
+    assert decision.skipped == ZERO_ESTIMATE
+    assert decision.verdict == UNDERPOWERED
+
+
+def test_a_split_with_no_usable_prints_carries_no_bootstrap() -> None:
+    empty = readout(Tally(), split=HOLDOUT, horizon_s=PRIMARY_HORIZON_S, seed=SEED)
+
+    assert empty.bootstrap is None
+    assert empty.result.n_prints == 0
+    assert empty.result.clusters == ()
+    assert empty.excluded_fraction is None
+
+
+def test_a_holdout_with_no_usable_prints_is_underpowered() -> None:
+    discovery = readout_of(
+        clusters_of(("a", "20", "10"), ("b", "20", "10")), split=DISCOVERY, n_prints=POWERED
+    )
+    holdout = readout(Tally(), split=HOLDOUT, horizon_s=PRIMARY_HORIZON_S, seed=SEED)
+
+    decision = decide(discovery, holdout)
+
+    assert decision.gate.powered
+    assert decision.replication is None
+    assert decision.skipped == NO_ESTIMATE
+    assert decision.verdict == UNDERPOWERED
+
+
+def test_a_discovery_with_no_usable_prints_carries_no_gate() -> None:
+    discovery = readout(Tally(), split=DISCOVERY, horizon_s=PRIMARY_HORIZON_S, seed=SEED)
+    holdout = readout_of(
+        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert decision.gate is None
+    assert decision.replication is None
+    assert decision.skipped == NO_ESTIMATE
+    assert decision.verdict == UNDERPOWERED
+
+
 def test_a_discovery_estimate_of_exactly_zero_closes_without_a_replication() -> None:
     discovery = readout_of(
         clusters_of(("a", "0", "10"), ("b", "0", "10")), split=DISCOVERY, n_prints=POWERED
@@ -569,8 +674,9 @@ def test_a_discovery_estimate_of_exactly_zero_closes_without_a_replication() -> 
     decision = decide(discovery, holdout)
 
     assert decision.gate.estimate == Decimal("0")
+    assert decision.gate.powered
     assert decision.replication is None
-    assert decision.skipped
+    assert decision.skipped == ZERO_ESTIMATE
     assert decision.verdict == CLOSED
     with pytest.raises(ValueError):
         evaluate_holdout(

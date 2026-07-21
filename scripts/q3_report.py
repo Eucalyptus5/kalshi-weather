@@ -97,7 +97,7 @@ def format_report(payload: dict) -> str:
         *_format_readout(payload["holdout"]),
         "",
         "== GATE",
-        *_format_gate(payload["gate"]),
+        *_format_gate(payload["gate"], payload["replication_skipped"]),
         "",
         "== REPLICATION",
         *_format_replication(payload["replication"], payload["replication_skipped"]),
@@ -118,7 +118,7 @@ def format_report(payload: dict) -> str:
             "== KERNEL DROPS",
             f"  unresolved={drops['unresolved']} uncovered={drops['uncovered']} "
             f"one_sided={drops['one_sided']} host_clock={drops['host_clock']} "
-            f"ts_violations={drops['ts_violations']}",
+            f"read_ts_violations={drops['read_ts_violations']}",
             "",
             "== COVERAGE",
             f"  cities={','.join(payload['cities'])}",
@@ -130,12 +130,16 @@ def format_report(payload: dict) -> str:
     return "\n".join(lines)
 
 
+def _fixed(value: float | None, places: int) -> str:
+    return "None" if value is None else f"{value:.{places}f}"
+
+
 def _format_readout(item: dict) -> list[str]:
     return [
         f"  mean_net_cents={item['mean_net_cents']}  "
-        f"ci{item['ci_level']}=[{item['ci_low']:.4f}, {item['ci_high']:.4f}]  "
+        f"ci{item['ci_level']}=[{_fixed(item['ci_low'], 4)}, {_fixed(item['ci_high'], 4)}]  "
         f"n_prints={item['n_prints']}  contracts={item['contracts']}  "
-        f"clusters={item['clusters']}  p_value={item['p_value']:.5f}",
+        f"clusters={item['clusters']}  p_value={_fixed(item['p_value'], 5)}",
         f"  candidates={item['candidates']}  excluded={item['excluded']}  "
         f"excluded_fraction={item['excluded_fraction']}  out_of_window={item['out_of_window']}  "
         f"unresolved={item['unresolved']}  uncovered={item['uncovered']}  "
@@ -143,7 +147,9 @@ def _format_readout(item: dict) -> list[str]:
     ]
 
 
-def _format_gate(gate: dict) -> list[str]:
+def _format_gate(gate: dict | None, skipped: str) -> list[str]:
+    if gate is None:
+        return [f"  not evaluated: {skipped}"]
     return [
         f"  estimate={gate['estimate']}  threshold={gate['threshold']}  "
         f"direction={gate['direction']}  p_value={gate['p_value']:.5f}  alpha={gate['alpha']}",
