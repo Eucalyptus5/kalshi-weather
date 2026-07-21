@@ -124,6 +124,8 @@ class Sweep:
     in_scope: Mapping[str, int]
     read_ts_violations: int
     fractional_size_prints: int
+    outside_lock_window: int
+    no_lock_prints: int
     tickers: Mapping[tuple[str, date], frozenset[str]]
 
 
@@ -194,13 +196,20 @@ def keep_mask(offered: Sequence[EvidenceWindow], kept: Sequence[EvidenceWindow])
     return mask
 
 
-def sweep_prints(scope: RunScope, artifacts: Path) -> Sweep:
+def sweep_prints(
+    scope: RunScope,
+    artifacts: Path,
+    *,
+    lock_windows: Mapping[str, tuple[datetime, datetime]] | None = None,
+) -> Sweep:
     tallies = {(split, horizon_s): Tally() for split in SPLITS for horizon_s in HORIZONS_S}
     hygiene = FlowCounts()
     out_of_scope = 0
     in_scope = dict.fromkeys(SPLITS, 0)
     violations = 0
     fractional = 0
+    outside_lock = 0
+    no_lock = 0
     tickers: dict[tuple[str, date], set[str]] = {}
     days = window_dates(scope.scope_start, scope.scope_end)
 
@@ -250,6 +259,21 @@ def sweep_prints(scope: RunScope, artifacts: Path) -> Sweep:
                 event_date = event_dates[ticker]
                 split = split_of(scope, series_root, event_date)
                 prints_here = today.filter(pc.equal(today.column("ticker"), ticker))
+                if lock_windows is not None:
+                    window = lock_windows.get(ticker)
+                    if window is None:
+                        no_lock += prints_here.num_rows
+                        continue
+                    inside = prints_here.filter(
+                        pc.and_(
+                            pc.greater_equal(prints_here.column("received_at"), window[0]),
+                            pc.less_equal(prints_here.column("received_at"), window[1]),
+                        )
+                    )
+                    outside_lock += prints_here.num_rows - inside.num_rows
+                    if inside.num_rows == 0:
+                        continue
+                    prints_here = inside
                 in_scope[split] += prints_here.num_rows
                 head = current.filter(pc.equal(current.column("ticker"), ticker))
                 rows = pa.concat_tables(
@@ -295,6 +319,8 @@ def sweep_prints(scope: RunScope, artifacts: Path) -> Sweep:
         in_scope=in_scope,
         read_ts_violations=violations,
         fractional_size_prints=fractional,
+        outside_lock_window=outside_lock,
+        no_lock_prints=no_lock,
         tickers={key: frozenset(names) for key, names in tickers.items()},
     )
 
