@@ -1,0 +1,559 @@
+import logging
+import time
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+
+import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
+
+from bot.lag.read_rtt import FloorSource
+from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME, write_manifest
+from bot.lag.taker_flow import (
+    CENT_BAR,
+    HORIZONS_S,
+    PRIMARY_HORIZON_S,
+    PRINT_MIN_DISCOVERY,
+    FlowCounts,
+    HorizonResult,
+    HorizonWindows,
+    PrintOutcome,
+    TickerBook,
+    build_ticker_book,
+    build_ticker_prints,
+    cluster_aggregates,
+    print_outcomes,
+    resolve_anchors,
+    resolve_horizon,
+    screen_prints,
+)
+from bot.lag.tape_stats import (
+    ALPHA,
+    HOLDOUT_ALPHA,
+    BootstrapResult,
+    ClusterAggregate,
+    GateVerdict,
+    HoldoutVerdict,
+    cluster_bootstrap,
+    evaluate_gate,
+    evaluate_holdout,
+)
+from bot.lag.tape_studies import (
+    TOUCH,
+    TRADES,
+    EvidenceWindow,
+    RunScope,
+    Screened,
+    assemble_run_inputs,
+    load_run_scope,
+    partition_files,
+    read_window,
+    screen_windows,
+    split_of,
+    window_dates,
+)
+from bot.markets.parser import parse_ticker
+from bot.replay.artifacts import TOUCH_SCHEMA
+from bot.replay.run_scope import DISCOVERY, HOLDOUT
+
+
+logger = logging.getLogger(__name__)
+
+RESULTS_NAME = "results.json"
+TOUCH_COLUMNS = ("id", "ticker", "received_at", "ts_ms", "yes_bid", "no_bid")
+SPLITS = (DISCOVERY, HOLDOUT)
+CI_LEVEL = 0.95
+NULL_VALUE = Decimal("0")
+DIRECTION = "greater"
+PRINTS = "prints"
+
+PASS = "PASS"
+CLOSED = "CLOSED"
+UNDERPOWERED = "UNDERPOWERED"
+ZERO_ESTIMATE = "a discovery estimate of exactly zero fixes no direction to replicate"
+
+_DAY = timedelta(days=1)
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+@dataclass(slots=True)
+class Tally:
+    totals: dict[str, Decimal] = field(default_factory=dict)
+    weights: dict[str, Decimal] = field(default_factory=dict)
+    n_prints: int = 0
+    contracts: int = 0
+    counts: FlowCounts = FlowCounts()
+    candidates: int = 0
+    excluded: int = 0
+    out_of_window: int = 0
+    by_class: dict[str, int] = field(default_factory=dict)
+
+    def add(self, outcomes: Sequence[PrintOutcome]) -> None:
+        for item in cluster_aggregates(outcomes):
+            self.totals[item.cluster] = self.totals.get(item.cluster, Decimal(0)) + item.total
+            self.weights[item.cluster] = self.weights.get(item.cluster, Decimal(0)) + item.weight
+        self.n_prints += len(outcomes)
+        self.contracts += sum(item.contracts for item in outcomes)
+
+    def screen(self, screened: Screened, out_of_window: int) -> None:
+        self.candidates += screened.candidates
+        self.excluded += screened.excluded
+        self.out_of_window += out_of_window
+        for name, count in screened.by_class.items():
+            self.by_class[name] = self.by_class.get(name, 0) + count
+
+    def clusters(self) -> tuple[ClusterAggregate, ...]:
+        return tuple(
+            ClusterAggregate(cluster=name, total=self.totals[name], weight=self.weights[name])
+            for name in sorted(self.totals)
+        )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Sweep:
+    tallies: Mapping[tuple[str, int], Tally]
+    empty_side: int
+    duplicates: int
+    out_of_scope: int
+    in_scope: Mapping[str, int]
+    ts_violations: int
+    tickers: Mapping[tuple[str, date], frozenset[str]]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HorizonReadout:
+    result: HorizonResult
+    bootstrap: BootstrapResult
+    candidates: int
+    excluded: int
+    out_of_window: int
+    by_class: Mapping[str, int]
+
+    @property
+    def excluded_fraction(self) -> Decimal:
+        return Decimal(self.excluded) / Decimal(self.candidates)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Decision:
+    gate: GateVerdict
+    replication: HoldoutVerdict | None
+    skipped: str
+    verdict: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class TakerFlowRun:
+    run_id: str
+    manifest: Path
+    manifest_sha256: str
+    seed: int
+    sweep: Sweep
+    discovery: tuple[HorizonReadout, ...]
+    holdout: HorizonReadout
+    decision: Decision
+
+    @property
+    def primary(self) -> HorizonReadout:
+        return next(item for item in self.discovery if item.result.horizon_s == PRIMARY_HORIZON_S)
+
+
+def read_touch(artifacts: Path, series_root: str, day: date) -> pa.Table:
+    columns = list(TOUCH_COLUMNS)
+    tables = []
+    for path in partition_files(artifacts, TOUCH, series_root, [day]):
+        stored = pq.ParquetFile(path)
+        if not stored.schema_arrow.equals(TOUCH_SCHEMA):
+            raise ValueError(f"{path} does not carry the frozen {TOUCH} schema")
+        tables.append(stored.read(columns=columns))
+    if not tables:
+        return TOUCH_SCHEMA.empty_table().select(columns)
+    return pa.concat_tables(tables)
+
+
+# screen_windows keeps its input order, so walking the offer against what came back in one pass
+# recovers the mask; two prints sharing a window screen alike, so a greedy match cannot misalign.
+def keep_mask(offered: Sequence[EvidenceWindow], kept: Sequence[EvidenceWindow]) -> np.ndarray:
+    mask = np.zeros(len(offered), dtype=bool)
+    cursor = 0
+    for index, window in enumerate(offered):
+        if cursor < len(kept) and kept[cursor] == window:
+            mask[index] = True
+            cursor += 1
+    if cursor != len(kept):
+        raise ValueError("the screened windows are not a subsequence of the ones offered")
+    return mask
+
+
+def sweep_prints(scope: RunScope, artifacts: Path) -> Sweep:
+    tallies = {(split, horizon_s): Tally() for split in SPLITS for horizon_s in HORIZONS_S}
+    hygiene = FlowCounts()
+    out_of_scope = 0
+    in_scope = dict.fromkeys(SPLITS, 0)
+    violations = 0
+    tickers: dict[tuple[str, date], set[str]] = {}
+    days = window_dates(scope.scope_start, scope.scope_end)
+
+    for series_root in sorted({series for series, _ in scope.event_days}):
+        started = time.monotonic()
+        hygienic = screen_prints(
+            read_window(artifacts, TRADES, series_root, scope.scope_start, scope.scope_end)
+        )
+        hygiene += hygienic.counts
+        event_dates = {}
+        for ticker in pc.unique(hygienic.kept.column("ticker")).to_pylist():
+            event_date = parse_ticker(ticker).event_date
+            if (series_root, event_date) in scope.event_days:
+                event_dates[ticker] = event_date
+                tickers.setdefault((series_root, event_date), set()).add(ticker)
+        scoped = hygienic.kept.filter(
+            pc.is_in(
+                hygienic.kept.column("ticker"),
+                value_set=pa.array(sorted(event_dates), type=pa.string()),
+            )
+        )
+        out_of_scope += hygienic.kept.num_rows - scoped.num_rows
+        logger.info(
+            "taker_flow root=%s prints=%d tickers=%d",
+            series_root,
+            scoped.num_rows,
+            len(event_dates),
+        )
+
+        following = TOUCH_SCHEMA.empty_table().select(list(TOUCH_COLUMNS))
+        following_day = None
+        for day in days:
+            opens = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+            today = scoped.filter(
+                pc.and_(
+                    pc.greater_equal(scoped.column("received_at"), opens),
+                    pc.less(scoped.column("received_at"), opens + _DAY),
+                )
+            )
+            if today.num_rows == 0:
+                continue
+            current = following if following_day == day else read_touch(artifacts, series_root, day)
+            following_day = day + _DAY
+            following = read_touch(artifacts, series_root, following_day)
+            for ticker in sorted(pc.unique(today.column("ticker")).to_pylist()):
+                event_date = event_dates[ticker]
+                split = split_of(scope, series_root, event_date)
+                prints_here = today.filter(pc.equal(today.column("ticker"), ticker))
+                in_scope[split] += prints_here.num_rows
+                head = current.filter(pc.equal(current.column("ticker"), ticker))
+                rows = pa.concat_tables(
+                    [head, following.filter(pc.equal(following.column("ticker"), ticker))]
+                )
+                # The pass emits a touch row per book event, so a ticker whose trades land on a
+                # date its book did not carries no anchor at all.
+                if rows.num_rows == 0:
+                    for horizon_s in HORIZONS_S:
+                        tallies[(split, horizon_s)].counts += FlowCounts(
+                            unresolved=prints_here.num_rows
+                        )
+                    continue
+                book = build_ticker_book(ticker, rows)
+                prints = build_ticker_prints(ticker, prints_here)
+                anchors = resolve_anchors(book, prints)
+                violations += head_violations(book, head.num_rows)
+                for horizon_s in HORIZONS_S:
+                    windows = resolve_horizon(book, prints, anchors, horizon_s=horizon_s)
+                    tally = tallies[(split, horizon_s)]
+                    tally.counts += windows.counts
+                    positions, offered, dropped = _offer(windows, scope, series_root, event_date)
+                    screened = screen_windows(scope, offered)
+                    tally.screen(screened, dropped)
+                    usable = np.zeros(windows.usable.size, dtype=bool)
+                    usable[positions[keep_mask(offered, screened.kept)]] = True
+                    tally.add(
+                        print_outcomes(book, prints, anchors, replace(windows, usable=usable))
+                    )
+        logger.info(
+            "taker_flow root=%s done elapsed_s=%.1f", series_root, time.monotonic() - started
+        )
+
+    return Sweep(
+        tallies=tallies,
+        empty_side=hygiene.empty_side,
+        duplicates=hygiene.duplicates,
+        out_of_scope=out_of_scope,
+        in_scope=in_scope,
+        ts_violations=violations,
+        tickers={key: frozenset(names) for key, names in tickers.items()},
+    )
+
+
+# The rolling buffer carries the next arrival date as well, so the whole book's count would read
+# that date's stamps again once it becomes the current one.
+def head_violations(book: TickerBook, rows: int) -> int:
+    seam = int(np.searchsorted(book.delta_rows, rows)) + 1
+    return int(np.count_nonzero(np.diff(book.delta_ts[:seam]) < 0))
+
+
+def bootstrap_of(clusters: Sequence[ClusterAggregate], seed: int) -> BootstrapResult:
+    return cluster_bootstrap(
+        clusters,
+        null_value=NULL_VALUE,
+        direction=DIRECTION,
+        resamples=BOOTSTRAP_RESAMPLES,
+        seed=seed,
+        ci_level=CI_LEVEL,
+    )
+
+
+def readout(tally: Tally, *, split: str, horizon_s: int, seed: int) -> HorizonReadout:
+    result = HorizonResult(
+        horizon_s=horizon_s,
+        split=split,
+        clusters=tally.clusters(),
+        n_prints=tally.n_prints,
+        contracts=tally.contracts,
+        counts=tally.counts,
+    )
+    return HorizonReadout(
+        result=result,
+        bootstrap=bootstrap_of(result.clusters, seed),
+        candidates=tally.candidates,
+        excluded=tally.excluded,
+        out_of_window=tally.out_of_window,
+        by_class=dict(tally.by_class),
+    )
+
+
+def decide(discovery: HorizonReadout, holdout: HorizonReadout) -> Decision:
+    gate = evaluate_gate(
+        estimate=discovery.bootstrap.estimate,
+        p_value=discovery.bootstrap.p_value,
+        n=discovery.result.n_prints,
+        threshold=CENT_BAR,
+        direction=DIRECTION,
+        alpha=ALPHA,
+        n_min=PRINT_MIN_DISCOVERY,
+        n_unit=PRINTS,
+    )
+    if gate.estimate == 0:
+        return Decision(gate=gate, replication=None, skipped=ZERO_ESTIMATE, verdict=CLOSED)
+
+    replication = evaluate_holdout(
+        discovery_estimate=gate.estimate,
+        holdout_estimate=holdout.bootstrap.estimate,
+        holdout_p_value=holdout.bootstrap.p_value,
+        holdout_n=holdout.result.n_prints,
+        discovery_n_min=PRINT_MIN_DISCOVERY,
+        alpha=HOLDOUT_ALPHA,
+        n_unit=PRINTS,
+    )
+    if not gate.powered or not replication.powered:
+        verdict = UNDERPOWERED
+    elif gate.passed and replication.replicated:
+        verdict = PASS
+    else:
+        verdict = CLOSED
+    return Decision(gate=gate, replication=replication, skipped="", verdict=verdict)
+
+
+def execute(
+    *,
+    run_id: str,
+    preregistration: Path,
+    repo: Path,
+    run_scope: Path,
+    artifacts: Path,
+    rtt_samples: Path,
+    floor_source: FloorSource,
+    seed: int,
+    run_root: Path,
+) -> TakerFlowRun:
+    inputs = assemble_run_inputs(
+        run_id=run_id,
+        preregistration=preregistration,
+        repo=repo,
+        run_scope=run_scope,
+        artifacts=artifacts,
+        rtt_samples=rtt_samples,
+        floor_source=floor_source,
+        bootstrap_seed=seed,
+    )
+    digest = write_manifest(run_root, inputs)
+
+    scope = load_run_scope(run_scope)
+    swept = sweep_prints(scope, artifacts)
+    discovery = tuple(
+        readout(
+            swept.tallies[(DISCOVERY, horizon_s)],
+            split=DISCOVERY,
+            horizon_s=horizon_s,
+            seed=seed,
+        )
+        for horizon_s in HORIZONS_S
+    )
+    holdout = readout(
+        swept.tallies[(HOLDOUT, PRIMARY_HORIZON_S)],
+        split=HOLDOUT,
+        horizon_s=PRIMARY_HORIZON_S,
+        seed=seed,
+    )
+    run = TakerFlowRun(
+        run_id=run_id,
+        manifest=run_root / run_id / MANIFEST_NAME,
+        manifest_sha256=digest,
+        seed=seed,
+        sweep=swept,
+        discovery=discovery,
+        holdout=holdout,
+        decision=decide(
+            next(item for item in discovery if item.result.horizon_s == PRIMARY_HORIZON_S),
+            holdout,
+        ),
+    )
+    logger.info(
+        "taker_flow verdict=%s discovery_cents=%s discovery_p=%.5f n=%d",
+        run.decision.verdict,
+        run.primary.bootstrap.estimate,
+        run.primary.bootstrap.p_value,
+        run.primary.result.n_prints,
+    )
+    return run
+
+
+def result_payload(run: TakerFlowRun) -> dict:
+    primary = run.primary
+    holdout = run.holdout
+    candidates = primary.candidates + holdout.candidates
+    excluded = primary.excluded + holdout.excluded
+    counts = primary.result.counts + holdout.result.counts
+    in_scope = dict(run.sweep.in_scope)
+    return {
+        "run_id": run.run_id,
+        "verdict": run.decision.verdict,
+        "manifest": str(run.manifest),
+        "manifest_sha256": run.manifest_sha256,
+        "bootstrap_seed": run.seed,
+        "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
+        "primary_horizon_s": PRIMARY_HORIZON_S,
+        "cent_bar": str(CENT_BAR),
+        "prints": {
+            "in_scope_pooled": sum(in_scope.values()),
+            "in_scope_discovery": in_scope[DISCOVERY],
+            "in_scope_holdout": in_scope[HOLDOUT],
+            "screened_pooled": primary.result.n_prints + holdout.result.n_prints,
+            "screened_discovery": primary.result.n_prints,
+            "screened_holdout": holdout.result.n_prints,
+            "empty_side": run.sweep.empty_side,
+            "duplicate_trade_id": run.sweep.duplicates,
+            "out_of_scope": run.sweep.out_of_scope,
+            "out_of_window": primary.out_of_window + holdout.out_of_window,
+        },
+        "discovery": _readout_payload(primary),
+        "holdout": _readout_payload(holdout),
+        "gate": {
+            "estimate": str(run.decision.gate.estimate),
+            "threshold": str(run.decision.gate.threshold),
+            "direction": run.decision.gate.direction,
+            "p_value": run.decision.gate.p_value,
+            "alpha": run.decision.gate.alpha,
+            "n": run.decision.gate.n,
+            "n_min": run.decision.gate.n_min,
+            "n_unit": run.decision.gate.n_unit,
+            "economic": run.decision.gate.economic,
+            "significant": run.decision.gate.significant,
+            "powered": run.decision.gate.powered,
+            "passed": run.decision.gate.passed,
+        },
+        "replication": _replication_payload(run.decision.replication),
+        "replication_skipped": run.decision.skipped,
+        "horizon_curve": [_readout_payload(item) for item in run.discovery],
+        "exclusions": {
+            "candidates": candidates,
+            "excluded": excluded,
+            "excluded_fraction": str(Decimal(excluded) / Decimal(candidates)),
+            "by_class": _pool_classes(primary.by_class, holdout.by_class),
+        },
+        "kernel_drops": {
+            "unresolved": counts.unresolved,
+            "uncovered": counts.uncovered,
+            "one_sided": counts.one_sided,
+            "host_clock": counts.host_clock,
+            "ts_violations": run.sweep.ts_violations,
+        },
+        "cities": sorted({series for series, _ in run.sweep.tickers}),
+        "tickers_per_city_day": {
+            f"{series} {event_date.isoformat()}": len(names)
+            for (series, event_date), names in sorted(run.sweep.tickers.items())
+        },
+    }
+
+
+def _readout_payload(item: HorizonReadout) -> dict:
+    return {
+        "split": item.result.split,
+        "horizon_s": item.result.horizon_s,
+        "mean_net_cents": str(item.bootstrap.estimate),
+        "ci_low": item.bootstrap.ci_low,
+        "ci_high": item.bootstrap.ci_high,
+        "ci_level": item.bootstrap.ci_level,
+        "n_prints": item.result.n_prints,
+        "contracts": item.result.contracts,
+        "clusters": item.bootstrap.n_clusters,
+        "p_value": item.bootstrap.p_value,
+        "candidates": item.candidates,
+        "excluded": item.excluded,
+        "excluded_fraction": str(item.excluded_fraction),
+        "out_of_window": item.out_of_window,
+        "by_class": dict(sorted(item.by_class.items())),
+        "unresolved": item.result.counts.unresolved,
+        "uncovered": item.result.counts.uncovered,
+        "one_sided": item.result.counts.one_sided,
+        "host_clock": item.result.counts.host_clock,
+    }
+
+
+def _replication_payload(replication: HoldoutVerdict | None) -> dict | None:
+    if replication is None:
+        return None
+    return {
+        "discovery_estimate": str(replication.discovery_estimate),
+        "holdout_estimate": str(replication.holdout_estimate),
+        "holdout_p_value": replication.holdout_p_value,
+        "alpha": replication.alpha,
+        "holdout_n": replication.holdout_n,
+        "holdout_n_min": replication.holdout_n_min,
+        "n_unit": replication.n_unit,
+        "same_sign": replication.same_sign,
+        "magnitude": replication.magnitude,
+        "significant": replication.significant,
+        "powered": replication.powered,
+        "replicated": replication.replicated,
+    }
+
+
+def _pool_classes(discovery: Mapping[str, int], holdout: Mapping[str, int]) -> dict[str, int]:
+    return {
+        name: discovery.get(name, 0) + holdout.get(name, 0)
+        for name in sorted(set(discovery) | set(holdout))
+    }
+
+
+def _offer(
+    windows: HorizonWindows, scope: RunScope, series: str, event_date: date
+) -> tuple[np.ndarray, list[EvidenceWindow], int]:
+    positions = []
+    offered = []
+    dropped = 0
+    for position in np.flatnonzero(windows.usable):
+        start = _stamp(windows.start_us[position])
+        end = _stamp(windows.end_us[position])
+        if start < scope.scope_start or end > scope.scope_end:
+            dropped += 1
+            continue
+        positions.append(position)
+        offered.append(EvidenceWindow(series=series, event_date=event_date, start=start, end=end))
+    return np.array(positions, dtype=np.int64), offered, dropped
+
+
+def _stamp(value: np.int64) -> datetime:
+    return _EPOCH + timedelta(microseconds=int(value))

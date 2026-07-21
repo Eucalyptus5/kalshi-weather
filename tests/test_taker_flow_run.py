@@ -1,0 +1,584 @@
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+
+from bot.lag.r0_universe import Coverage, freeze_universe, write_universe
+from bot.lag.taker_flow import (
+    CENT_BAR,
+    HORIZONS_S,
+    PRIMARY_HORIZON_S,
+    PRINT_MIN_DISCOVERY,
+    FlowCounts,
+    HorizonResult,
+)
+from bot.lag.taker_flow_run import (
+    CLOSED,
+    PASS,
+    TOUCH_COLUMNS,
+    UNDERPOWERED,
+    HorizonReadout,
+    Sweep,
+    bootstrap_of,
+    decide,
+    keep_mask,
+    read_touch,
+    readout,
+    sweep_prints,
+)
+from bot.lag.tape_stats import ClusterAggregate, evaluate_holdout
+from bot.lag.tape_studies import EvidenceWindow, RunScope, load_run_scope, screen_windows
+from bot.replay.artifacts import TOUCH_SCHEMA, TRADES_SCHEMA
+from bot.replay.run_scope import (
+    DISCOVERY,
+    EVENT_DAYS_SCHEMA,
+    EXCLUSIONS_SCHEMA,
+    HOLDOUT,
+    QUIET_BAND,
+    RESUBSCRIBE_BLIND,
+    Split,
+    write_split,
+)
+from tests.test_tape_studies import event_day_row, exclusion_row, write_partition
+
+
+UTC = timezone.utc
+MICROSECOND = timedelta(microseconds=1)
+OPENS = timedelta(hours=6)
+
+SERIES = "KXHIGHDEN"
+DISCOVERY_DAY = date(2026, 7, 18)
+HOLDOUT_DAY = date(2026, 7, 19)
+LATE_DAY = date(2026, 7, 20)
+STRANGER_DAY = date(2026, 7, 25)
+SCOPE_START = datetime(2026, 7, 18, 6, tzinfo=UTC)
+SCOPE_END = datetime(2026, 7, 20, 6, tzinfo=UTC)
+
+DAY_TICKER = "KXHIGHDEN-26JUL18-T70"
+NEXT_TICKER = "KXHIGHDEN-26JUL19-T70"
+STRANGER_TICKER = "KXHIGHDEN-26JUL25-T70"
+
+QUIET_START = datetime(2026, 7, 18, 7, tzinfo=UTC)
+QUIET_END = datetime(2026, 7, 18, 9, tzinfo=UTC)
+BLINK = datetime(2026, 7, 18, 12, tzinfo=UTC)
+
+SEED = 20260812
+POWERED = PRINT_MIN_DISCOVERY + 1_000
+HOLDOUT_POWERED = 3_000
+
+
+def when(day: date, hour: int, minute: int, second: int) -> datetime:
+    return datetime(day.year, day.month, day.day, hour, minute, second, tzinfo=UTC)
+
+
+def touch(
+    row_id: int, ticker: str, received_at: datetime, ts_ms: int, yes_bid: str, no_bid: str
+) -> dict:
+    return {
+        "id": row_id,
+        "ticker": ticker,
+        "received_at": received_at,
+        "ts_ms": ts_ms,
+        "yes_bid": yes_bid,
+        "yes_bid_depth": "10",
+        "yes_ask": str(Decimal("1") - Decimal(no_bid)),
+        "yes_ask_depth": "10",
+        "no_bid": no_bid,
+        "no_bid_depth": "10",
+        "no_ask": str(Decimal("1") - Decimal(yes_bid)),
+        "no_ask_depth": "10",
+    }
+
+
+def trade(
+    row_id: int,
+    ticker: str,
+    received_at: datetime,
+    ts_ms: int,
+    *,
+    side: str = "yes",
+    trade_id: str | None = None,
+) -> dict:
+    return {
+        "id": row_id,
+        "ticker": ticker,
+        "received_at": received_at,
+        "ts_ms": ts_ms,
+        "yes_price": "0.50",
+        "no_price": "0.50",
+        "count": "10",
+        "taker_side": side,
+        "trade_id": f"t{row_id}" if trade_id is None else trade_id,
+    }
+
+
+TOUCH_DISCOVERY_DAY = [
+    touch(1, DAY_TICKER, when(DISCOVERY_DAY, 5, 59, 59), 8500, "0.50", "0.48"),
+    touch(2, DAY_TICKER, when(DISCOVERY_DAY, 6, 0, 30), 8600, "0.50", "0.48"),
+    touch(3, DAY_TICKER, when(DISCOVERY_DAY, 11, 59, 58), 9000, "0.40", "0.58"),
+    touch(4, DAY_TICKER, when(DISCOVERY_DAY, 12, 0, 0), 10000, "0.50", "0.48"),
+    touch(5, DAY_TICKER, when(DISCOVERY_DAY, 12, 5, 10), 11000, "0.50", "0.48"),
+    touch(6, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 0), 12000, "0.40", "0.58"),
+    touch(7, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 2), 13000, "0.50", "0.48"),
+    touch(8, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 3), 14000, "0.51", "0.47"),
+    touch(9, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 12), 15000, "0.52", "0.46"),
+    touch(10, DAY_TICKER, when(DISCOVERY_DAY, 18, 1, 2), 16000, "0.55", "0.43"),
+    touch(11, DAY_TICKER, when(DISCOVERY_DAY, 18, 5, 2), 17000, "0.60", "0.38"),
+    touch(12, DAY_TICKER, when(DISCOVERY_DAY, 18, 10, 0), 18000, "0.60", "0.38"),
+]
+
+TOUCH_HOLDOUT_DAY = [
+    touch(30, DAY_TICKER, when(HOLDOUT_DAY, 0, 0, 2), 21000, "0.50", "0.48"),
+    touch(31, DAY_TICKER, when(HOLDOUT_DAY, 0, 0, 3), 21500, "0.51", "0.47"),
+    touch(32, DAY_TICKER, when(HOLDOUT_DAY, 0, 0, 12), 22000, "0.52", "0.46"),
+    touch(33, DAY_TICKER, when(HOLDOUT_DAY, 0, 1, 2), 23000, "0.55", "0.43"),
+    touch(34, DAY_TICKER, when(HOLDOUT_DAY, 0, 5, 2), 24000, "0.60", "0.38"),
+    touch(35, DAY_TICKER, when(HOLDOUT_DAY, 0, 10, 0), 25000, "0.60", "0.38"),
+    touch(40, NEXT_TICKER, when(HOLDOUT_DAY, 18, 0, 0), 30000, "0.40", "0.58"),
+    touch(41, NEXT_TICKER, when(HOLDOUT_DAY, 18, 0, 2), 31000, "0.50", "0.48"),
+    touch(42, NEXT_TICKER, when(HOLDOUT_DAY, 18, 0, 3), 32000, "0.51", "0.47"),
+    touch(43, NEXT_TICKER, when(HOLDOUT_DAY, 18, 0, 12), 33000, "0.52", "0.46"),
+    touch(44, NEXT_TICKER, when(HOLDOUT_DAY, 18, 1, 2), 34000, "0.55", "0.43"),
+    touch(45, NEXT_TICKER, when(HOLDOUT_DAY, 18, 5, 2), 35000, "0.60", "0.38"),
+    touch(46, NEXT_TICKER, when(HOLDOUT_DAY, 18, 10, 0), 36000, "0.60", "0.38"),
+]
+
+TOUCH_LATE_DAY = [
+    touch(60, NEXT_TICKER, when(LATE_DAY, 5, 59, 30), 40000, "0.50", "0.48"),
+    touch(61, NEXT_TICKER, when(LATE_DAY, 6, 1, 0), 41000, "0.50", "0.48"),
+]
+
+TRADES_DISCOVERY_DAY = [
+    trade(100, DAY_TICKER, when(DISCOVERY_DAY, 6, 0, 1), 8000),
+    trade(101, DAY_TICKER, when(DISCOVERY_DAY, 11, 59, 59), 9500),
+    trade(102, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 1), 12500),
+    trade(103, STRANGER_TICKER, when(DISCOVERY_DAY, 18, 0, 1), 12500),
+    trade(104, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 1), 12500, side=""),
+    trade(105, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 1), 12500, trade_id="t102"),
+    trade(106, DAY_TICKER, when(DISCOVERY_DAY, 23, 59, 0), 20000),
+]
+
+TRADES_HOLDOUT_DAY = [trade(110, NEXT_TICKER, when(HOLDOUT_DAY, 18, 0, 1), 30500)]
+TRADES_LATE_DAY = [trade(120, NEXT_TICKER, when(LATE_DAY, 5, 59, 0), 39000)]
+
+VIOLATION_DISCOVERY_DAY = [
+    touch(1, DAY_TICKER, when(DISCOVERY_DAY, 12, 0, 0), 1000, "0.50", "0.48"),
+    touch(2, DAY_TICKER, when(DISCOVERY_DAY, 12, 0, 10), 3000, "0.50", "0.48"),
+    touch(3, DAY_TICKER, when(DISCOVERY_DAY, 12, 0, 20), 2000, "0.50", "0.48"),
+    touch(4, DAY_TICKER, when(DISCOVERY_DAY, 12, 0, 30), 4000, "0.50", "0.48"),
+]
+VIOLATION_HOLDOUT_DAY = [
+    touch(5, DAY_TICKER, when(HOLDOUT_DAY, 12, 0, 0), 3500, "0.50", "0.48"),
+    touch(6, DAY_TICKER, when(HOLDOUT_DAY, 12, 0, 10), 6000, "0.50", "0.48"),
+    touch(7, DAY_TICKER, when(HOLDOUT_DAY, 12, 0, 20), 5000, "0.50", "0.48"),
+    touch(8, DAY_TICKER, when(HOLDOUT_DAY, 12, 0, 30), 7000, "0.50", "0.48"),
+]
+
+
+def exclusion_table() -> pa.Table:
+    rows = [
+        exclusion_row(0, QUIET_BAND, QUIET_START, QUIET_END),
+        exclusion_row(1, RESUBSCRIBE_BLIND, BLINK, BLINK + MICROSECOND),
+    ]
+    return pa.Table.from_pylist(rows, schema=EXCLUSIONS_SCHEMA)
+
+
+def event_day_table() -> pa.Table:
+    rows = [
+        event_day_row(DISCOVERY_DAY, in_scope=True, split=DISCOVERY, day_index=1, opens=OPENS),
+        event_day_row(HOLDOUT_DAY, in_scope=True, split=HOLDOUT, day_index=2, opens=OPENS),
+    ]
+    return pa.Table.from_pylist(rows, schema=EVENT_DAYS_SCHEMA)
+
+
+def scope_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "scope"
+    directory.mkdir()
+    pq.write_table(exclusion_table(), directory / "exclusions.parquet")
+    pq.write_table(event_day_table(), directory / "event_days.parquet")
+    write_split(
+        directory / "split.json",
+        Split(
+            cities=(SERIES,),
+            discovery_days=(DISCOVERY_DAY,),
+            holdout_days=(HOLDOUT_DAY,),
+            boundary_event_day=HOLDOUT_DAY,
+            scope_start=SCOPE_START,
+            scope_end=SCOPE_END,
+        ),
+    )
+    write_universe(
+        directory / "r0_universe.json",
+        freeze_universe(
+            fraction_invalid_max=Decimal("0.4"),
+            passing=(SERIES,),
+            coverage=Coverage(cities=(SERIES,), ladder_widths=(6,), in_scope_city_days=2),
+        ),
+    )
+    return directory
+
+
+def artifacts_dir(tmp_path: Path) -> Path:
+    root = tmp_path / "artifacts"
+    write_partition(root, DISCOVERY_DAY, 1, TOUCH_DISCOVERY_DAY)
+    write_partition(root, HOLDOUT_DAY, 1, TOUCH_HOLDOUT_DAY)
+    write_partition(root, LATE_DAY, 1, TOUCH_LATE_DAY)
+    for day, rows in (
+        (DISCOVERY_DAY, TRADES_DISCOVERY_DAY),
+        (HOLDOUT_DAY, TRADES_HOLDOUT_DAY),
+        (LATE_DAY, TRADES_LATE_DAY),
+    ):
+        write_partition(root, day, 1, rows, kind="trades", schema=TRADES_SCHEMA)
+    return root
+
+
+def violation_artifacts(tmp_path: Path) -> Path:
+    root = tmp_path / "violations"
+    write_partition(root, DISCOVERY_DAY, 1, VIOLATION_DISCOVERY_DAY)
+    write_partition(root, HOLDOUT_DAY, 1, VIOLATION_HOLDOUT_DAY)
+    write_partition(
+        root,
+        DISCOVERY_DAY,
+        1,
+        [trade(200, DAY_TICKER, when(DISCOVERY_DAY, 12, 0, 5), 500)],
+        kind="trades",
+        schema=TRADES_SCHEMA,
+    )
+    write_partition(
+        root,
+        HOLDOUT_DAY,
+        1,
+        [trade(210, DAY_TICKER, when(HOLDOUT_DAY, 12, 0, 5), 3200)],
+        kind="trades",
+        schema=TRADES_SCHEMA,
+    )
+    return root
+
+
+def evidence(start: datetime, end: datetime, event_date: date = DISCOVERY_DAY) -> EvidenceWindow:
+    return EvidenceWindow(series=SERIES, event_date=event_date, start=start, end=end)
+
+
+def clusters_of(*totals: tuple[str, str, str]) -> tuple[ClusterAggregate, ...]:
+    return tuple(
+        ClusterAggregate(cluster=name, total=Decimal(total), weight=Decimal(weight))
+        for name, total, weight in totals
+    )
+
+
+def readout_of(
+    clusters: tuple[ClusterAggregate, ...], *, split: str, n_prints: int
+) -> HorizonReadout:
+    result = HorizonResult(
+        horizon_s=PRIMARY_HORIZON_S,
+        split=split,
+        clusters=clusters,
+        n_prints=n_prints,
+        contracts=int(sum(item.weight for item in clusters)),
+        counts=FlowCounts(),
+    )
+    return HorizonReadout(
+        result=result,
+        bootstrap=bootstrap_of(clusters, SEED),
+        candidates=n_prints,
+        excluded=0,
+        out_of_window=0,
+        by_class={},
+    )
+
+
+@pytest.fixture
+def scope(tmp_path: Path) -> RunScope:
+    return load_run_scope(scope_dir(tmp_path))
+
+
+@pytest.fixture
+def swept(tmp_path: Path, scope: RunScope) -> Sweep:
+    return sweep_prints(scope, artifacts_dir(tmp_path))
+
+
+def test_the_keep_mask_recovers_the_windows_the_screen_kept(scope: RunScope) -> None:
+    clear = evidence(when(DISCOVERY_DAY, 18, 0, 0), when(DISCOVERY_DAY, 18, 1, 0))
+    hit = evidence(BLINK - timedelta(minutes=1), BLINK + timedelta(minutes=1))
+    offered = [clear, hit, clear]
+
+    screened = screen_windows(scope, offered)
+
+    assert screened.excluded == 1
+    assert keep_mask(offered, screened.kept).tolist() == [True, False, True]
+
+
+def test_two_prints_sharing_a_window_are_kept_or_dropped_together(scope: RunScope) -> None:
+    clear = evidence(when(DISCOVERY_DAY, 18, 0, 0), when(DISCOVERY_DAY, 18, 1, 0))
+    hit = evidence(BLINK - timedelta(minutes=1), BLINK + timedelta(minutes=1))
+
+    kept_twice = screen_windows(scope, [clear, clear])
+    dropped_twice = screen_windows(scope, [hit, hit])
+
+    assert keep_mask([clear, clear], kept_twice.kept).tolist() == [True, True]
+    assert keep_mask([hit, hit], dropped_twice.kept).tolist() == [False, False]
+
+
+def test_the_keep_mask_survives_a_dropped_first_window(scope: RunScope) -> None:
+    hit = evidence(BLINK - timedelta(minutes=1), BLINK + timedelta(minutes=1))
+    clear = evidence(when(DISCOVERY_DAY, 18, 0, 0), when(DISCOVERY_DAY, 18, 1, 0))
+    offered = [hit, clear]
+
+    screened = screen_windows(scope, offered)
+
+    assert keep_mask(offered, screened.kept).tolist() == [False, True]
+
+
+def test_a_kept_list_the_offer_never_carried_raises() -> None:
+    offered = [evidence(when(DISCOVERY_DAY, 18, 0, 0), when(DISCOVERY_DAY, 18, 1, 0))]
+    stranger = [evidence(when(DISCOVERY_DAY, 19, 0, 0), when(DISCOVERY_DAY, 19, 1, 0))]
+
+    with pytest.raises(ValueError):
+        keep_mask(offered, stranger)
+
+
+def test_the_hygiene_counts_come_off_the_whole_root(swept: Sweep) -> None:
+    assert swept.empty_side == 1
+    assert swept.duplicates == 1
+    assert swept.out_of_scope == 1
+    assert swept.in_scope == {DISCOVERY: 4, HOLDOUT: 2}
+
+
+def test_a_print_outside_the_frozen_scope_never_reaches_a_cluster(swept: Sweep) -> None:
+    clusters = swept.tallies[(DISCOVERY, PRIMARY_HORIZON_S)].clusters()
+
+    assert [item.cluster for item in clusters] == [DAY_TICKER]
+    assert STRANGER_TICKER not in {item.cluster for item in clusters}
+    assert (SERIES, STRANGER_DAY) not in swept.tickers
+
+
+def test_the_two_splits_carry_their_own_event_days(swept: Sweep) -> None:
+    discovery = swept.tallies[(DISCOVERY, PRIMARY_HORIZON_S)].clusters()
+    holdout = swept.tallies[(HOLDOUT, PRIMARY_HORIZON_S)].clusters()
+
+    assert [item.cluster for item in discovery] == [DAY_TICKER]
+    assert [item.cluster for item in holdout] == [NEXT_TICKER]
+    assert swept.tickers == {
+        (SERIES, DISCOVERY_DAY): frozenset({DAY_TICKER}),
+        (SERIES, HOLDOUT_DAY): frozenset({NEXT_TICKER}),
+    }
+
+
+def test_a_window_over_an_exclusion_is_dropped_whole_and_counted_by_class(swept: Sweep) -> None:
+    tally = swept.tallies[(DISCOVERY, PRIMARY_HORIZON_S)]
+
+    assert tally.candidates == 3
+    assert tally.excluded == 1
+    assert tally.by_class[RESUBSCRIBE_BLIND] == 1
+    assert tally.by_class[QUIET_BAND] == 0
+    assert tally.n_prints == 2
+    assert tally.contracts == 20
+
+
+def test_a_window_opening_before_the_scope_start_is_dropped_as_out_of_window(swept: Sweep) -> None:
+    for horizon_s in HORIZONS_S:
+        assert swept.tallies[(DISCOVERY, horizon_s)].out_of_window == 1
+
+
+def test_a_window_running_past_the_scope_end_is_dropped_as_out_of_window(swept: Sweep) -> None:
+    assert swept.tallies[(HOLDOUT, PRIMARY_HORIZON_S)].out_of_window == 1
+    assert swept.tallies[(HOLDOUT, PRIMARY_HORIZON_S)].n_prints == 1
+    assert swept.tallies[(HOLDOUT, 1)].out_of_window == 0
+    assert swept.tallies[(HOLDOUT, 1)].n_prints == 2
+
+
+def test_the_rolling_buffer_reaches_an_anchor_on_the_next_arrival_date(swept: Sweep) -> None:
+    longest = swept.tallies[(DISCOVERY, HORIZONS_S[-1])]
+
+    assert longest.n_prints == 2
+    assert longest.totals[DAY_TICKER] == Decimal("128")
+
+
+def test_the_discovery_curve_is_the_contract_weighted_mean(swept: Sweep) -> None:
+    means = {
+        horizon_s: readout(
+            swept.tallies[(DISCOVERY, horizon_s)],
+            split=DISCOVERY,
+            horizon_s=horizon_s,
+            seed=SEED,
+        ).bootstrap.estimate
+        for horizon_s in HORIZONS_S
+    }
+
+    assert means == {
+        1: Decimal("-2.6"),
+        10: Decimal("-1.6"),
+        60: Decimal("1.4"),
+        300: Decimal("6.4"),
+    }
+    assert means[PRIMARY_HORIZON_S] > CENT_BAR
+
+
+def test_the_holdout_carries_its_own_mean(swept: Sweep) -> None:
+    result = readout(
+        swept.tallies[(HOLDOUT, PRIMARY_HORIZON_S)],
+        split=HOLDOUT,
+        horizon_s=PRIMARY_HORIZON_S,
+        seed=SEED,
+    )
+
+    assert result.bootstrap.estimate == Decimal("1.4")
+    assert result.result.n_prints == 1
+    assert result.result.contracts == 10
+
+
+def test_the_kernel_drops_are_summed_per_horizon(swept: Sweep) -> None:
+    assert swept.tallies[(HOLDOUT, HORIZONS_S[-1])].counts.uncovered == 1
+    assert swept.tallies[(HOLDOUT, PRIMARY_HORIZON_S)].counts.uncovered == 0
+    assert swept.ts_violations == 0
+
+
+def test_stamps_that_went_backwards_are_counted_once_across_the_rolling_buffer(
+    tmp_path: Path, scope: RunScope
+) -> None:
+    sweep = sweep_prints(scope, violation_artifacts(tmp_path))
+
+    assert sweep.ts_violations == 3
+
+
+def test_the_same_seed_gives_the_same_p_value(swept: Sweep) -> None:
+    tally = swept.tallies[(DISCOVERY, PRIMARY_HORIZON_S)]
+
+    first = readout(tally, split=DISCOVERY, horizon_s=PRIMARY_HORIZON_S, seed=SEED)
+    second = readout(tally, split=DISCOVERY, horizon_s=PRIMARY_HORIZON_S, seed=SEED)
+
+    assert first.bootstrap.p_value == second.bootstrap.p_value
+    assert first.bootstrap.seed == SEED
+
+
+def test_the_column_pruned_read_carries_only_what_the_kernel_needs(tmp_path: Path) -> None:
+    root = artifacts_dir(tmp_path)
+
+    table = read_touch(root, SERIES, DISCOVERY_DAY)
+
+    assert table.schema.names == list(TOUCH_COLUMNS)
+    assert table.column("id").to_pylist() == [row["id"] for row in TOUCH_DISCOVERY_DAY]
+
+
+def test_a_touch_partition_carrying_another_schema_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "artifacts"
+    path = write_partition(root, DISCOVERY_DAY, 1, TRADES_HOLDOUT_DAY, schema=TRADES_SCHEMA)
+
+    with pytest.raises(ValueError, match=str(path.name)):
+        read_touch(root, SERIES, DISCOVERY_DAY)
+
+
+def test_a_missing_partition_still_carries_the_pruned_columns(tmp_path: Path) -> None:
+    table = read_touch(tmp_path, SERIES, DISCOVERY_DAY)
+
+    assert table.num_rows == 0
+    assert table.schema.names == list(TOUCH_COLUMNS)
+    assert TOUCH_SCHEMA.names != list(TOUCH_COLUMNS)
+
+
+def test_a_discovery_too_thin_to_power_the_gate_is_underpowered() -> None:
+    discovery = readout_of(
+        clusters_of(("a", "20", "10"), ("b", "20", "10")), split=DISCOVERY, n_prints=100
+    )
+    holdout = readout_of(
+        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert not decision.gate.powered
+    assert decision.verdict == UNDERPOWERED
+
+
+def test_a_holdout_too_thin_to_replicate_is_underpowered() -> None:
+    discovery = readout_of(
+        clusters_of(("a", "20", "10"), ("b", "20", "10")), split=DISCOVERY, n_prints=POWERED
+    )
+    holdout = readout_of(
+        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=100
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert decision.gate.powered
+    assert not decision.replication.powered
+    assert decision.verdict == UNDERPOWERED
+
+
+def test_an_estimate_under_the_cent_bar_closes_the_question() -> None:
+    discovery = readout_of(
+        clusters_of(("a", "5", "10"), ("b", "5", "10")), split=DISCOVERY, n_prints=POWERED
+    )
+    holdout = readout_of(
+        clusters_of(("c", "5", "10"), ("d", "5", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert decision.gate.estimate == Decimal("0.5")
+    assert not decision.gate.economic
+    assert decision.gate.significant
+    assert decision.replication.replicated
+    assert decision.verdict == CLOSED
+
+
+def test_an_estimate_over_the_bar_that_does_not_replicate_closes_the_question() -> None:
+    discovery = readout_of(
+        clusters_of(("a", "20", "10"), ("b", "20", "10")), split=DISCOVERY, n_prints=POWERED
+    )
+    holdout = readout_of(
+        clusters_of(("c", "-20", "10"), ("d", "-20", "10")),
+        split=HOLDOUT,
+        n_prints=HOLDOUT_POWERED,
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert decision.gate.passed
+    assert not decision.replication.same_sign
+    assert not decision.replication.replicated
+    assert decision.verdict == CLOSED
+
+
+def test_a_gate_that_clears_and_replicates_passes() -> None:
+    discovery = readout_of(
+        clusters_of(("a", "20", "10"), ("b", "20", "10")), split=DISCOVERY, n_prints=POWERED
+    )
+    holdout = readout_of(
+        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert decision.gate.passed
+    assert decision.replication.replicated
+    assert decision.verdict == PASS
+
+
+def test_a_discovery_estimate_of_exactly_zero_closes_without_a_replication() -> None:
+    discovery = readout_of(
+        clusters_of(("a", "0", "10"), ("b", "0", "10")), split=DISCOVERY, n_prints=POWERED
+    )
+    holdout = readout_of(
+        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert decision.gate.estimate == Decimal("0")
+    assert decision.replication is None
+    assert decision.skipped
+    assert decision.verdict == CLOSED
+    with pytest.raises(ValueError):
+        evaluate_holdout(
+            discovery_estimate=Decimal("0"),
+            holdout_estimate=Decimal("2"),
+            holdout_p_value=0.0,
+            holdout_n=HOLDOUT_POWERED,
+            discovery_n_min=PRINT_MIN_DISCOVERY,
+            alpha=0.05,
+            n_unit="prints",
+        )
