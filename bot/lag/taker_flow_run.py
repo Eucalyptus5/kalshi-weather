@@ -87,7 +87,7 @@ class Tally:
     totals: dict[str, Decimal] = field(default_factory=dict)
     weights: dict[str, Decimal] = field(default_factory=dict)
     n_prints: int = 0
-    contracts: int = 0
+    contracts: Decimal = Decimal(0)
     counts: FlowCounts = FlowCounts()
     candidates: int = 0
     excluded: int = 0
@@ -99,7 +99,7 @@ class Tally:
             self.totals[item.cluster] = self.totals.get(item.cluster, Decimal(0)) + item.total
             self.weights[item.cluster] = self.weights.get(item.cluster, Decimal(0)) + item.weight
         self.n_prints += len(outcomes)
-        self.contracts += sum(item.contracts for item in outcomes)
+        self.contracts += sum((item.contracts for item in outcomes), Decimal(0))
 
     def screen(self, screened: Screened, out_of_window: int) -> None:
         self.candidates += screened.candidates
@@ -123,6 +123,7 @@ class Sweep:
     out_of_scope: int
     in_scope: Mapping[str, int]
     read_ts_violations: int
+    fractional_size_prints: int
     tickers: Mapping[tuple[str, date], frozenset[str]]
 
 
@@ -199,6 +200,7 @@ def sweep_prints(scope: RunScope, artifacts: Path) -> Sweep:
     out_of_scope = 0
     in_scope = dict.fromkeys(SPLITS, 0)
     violations = 0
+    fractional = 0
     tickers: dict[tuple[str, date], set[str]] = {}
     days = window_dates(scope.scope_start, scope.scope_end)
 
@@ -265,6 +267,7 @@ def sweep_prints(scope: RunScope, artifacts: Path) -> Sweep:
                 prints = build_ticker_prints(ticker, prints_here)
                 anchors = resolve_anchors(book, prints)
                 violations += head_violations(book, head.num_rows)
+                fractional += sum(1 for size in prints.contracts if size != int(size))
                 for horizon_s in HORIZONS_S:
                     windows = resolve_horizon(book, prints, anchors, horizon_s=horizon_s)
                     tally = tallies[(split, horizon_s)]
@@ -291,6 +294,7 @@ def sweep_prints(scope: RunScope, artifacts: Path) -> Sweep:
         out_of_scope=out_of_scope,
         in_scope=in_scope,
         read_ts_violations=violations,
+        fractional_size_prints=fractional,
         tickers={key: frozenset(names) for key, names in tickers.items()},
     )
 
@@ -489,6 +493,7 @@ def result_payload(run: TakerFlowRun) -> dict:
             "one_sided": counts.one_sided,
             "host_clock": counts.host_clock,
             "read_ts_violations": run.sweep.read_ts_violations,
+            "fractional_size_prints": run.sweep.fractional_size_prints,
         },
         "cities": sorted({series for series, _ in run.sweep.tickers}),
         "tickers_per_city_day": {
@@ -509,7 +514,7 @@ def _readout_payload(item: HorizonReadout) -> dict:
         "ci_high": None if bootstrap is None else bootstrap.ci_high,
         "ci_level": None if bootstrap is None else bootstrap.ci_level,
         "n_prints": item.result.n_prints,
-        "contracts": item.result.contracts,
+        "contracts": str(item.result.contracts),
         "clusters": len(item.result.clusters),
         "p_value": None if bootstrap is None else bootstrap.p_value,
         "candidates": item.candidates,

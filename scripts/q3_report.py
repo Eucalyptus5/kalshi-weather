@@ -118,7 +118,8 @@ def format_report(payload: dict) -> str:
             "== KERNEL DROPS",
             f"  unresolved={drops['unresolved']} uncovered={drops['uncovered']} "
             f"one_sided={drops['one_sided']} host_clock={drops['host_clock']} "
-            f"read_ts_violations={drops['read_ts_violations']}",
+            f"read_ts_violations={drops['read_ts_violations']} "
+            f"fractional_size_prints={drops['fractional_size_prints']}",
             "",
             "== COVERAGE",
             f"  cities={','.join(payload['cities'])}",

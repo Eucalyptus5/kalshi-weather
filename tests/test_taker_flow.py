@@ -287,37 +287,56 @@ def test_a_rising_mid_pays_the_yes_taker_and_costs_the_no_taker() -> None:
 
 
 FEE_CASES = [
-    (1, "0.05", 400, "0"),
-    (1, "0.05", 0, "-2"),
-    (4, "0.45", 1000, "6"),
-    (4, "0.45", -1000, "-34"),
-    (10, "0.50", 2000, "64"),
-    (100, "0.50", 200, "-250"),
+    ("1", "0.05", 400, "0"),
+    ("1", "0.05", 0, "-2"),
+    ("4", "0.45", 1000, "6"),
+    ("4", "0.45", -1000, "-34"),
+    ("10", "0.50", 2000, "64"),
+    ("100", "0.50", 200, "-250"),
+    ("0.39", "0.50", 2000, "1.9"),
+    ("1.24", "0.50", 1800, "5.16"),
 ]
 
 
 @pytest.mark.parametrize(("contracts", "price", "signed_move2", "expected"), FEE_CASES)
 def test_net_cents_golden_table(
-    contracts: int, price: str, signed_move2: int, expected: str
+    contracts: str, price: str, signed_move2: int, expected: str
 ) -> None:
     assert print_net_cents(
-        contracts=contracts, price=Decimal(price), signed_move2=signed_move2
+        contracts=Decimal(contracts), price=Decimal(price), signed_move2=signed_move2
     ) == Decimal(expected)
 
 
 @pytest.mark.parametrize(("contracts", "price"), [(1, "0.05"), (4, "0.45"), (100, "0.50")])
 def test_the_fee_module_agrees_with_the_published_formula(contracts: int, price: str) -> None:
-    assert taker_fee(contracts, Decimal(price)) == published_taker_fee(contracts, Decimal(price))
+    assert taker_fee(contracts, Decimal(price)) == published_taker_fee(
+        Decimal(contracts), Decimal(price)
+    )
 
 
 def test_a_move_worth_the_round_trip_fee_nets_zero() -> None:
     fee_cents = Decimal(2) * Decimal(100) * taker_fee(1, Decimal("0.05"))
     assert fee_cents == Decimal("2")
-    assert print_net_cents(contracts=1, price=Decimal("0.05"), signed_move2=400) == Decimal("0")
+    assert print_net_cents(
+        contracts=Decimal(1), price=Decimal("0.05"), signed_move2=400
+    ) == Decimal("0")
 
 
-def test_a_fractional_count_raises() -> None:
-    table = trades_table([trade(10, 1, 1500, count="3.50")])
+def test_a_fractional_count_reaches_the_cluster_at_its_wire_size() -> None:
+    book, prints, anchors, windows = pieces(RISING, [trade(10, 1, 1500, "yes", "0.50", "1.24")])
+    outcomes = print_outcomes(book, prints, anchors, windows)
+    clusters = cluster_aggregates(outcomes)
+
+    assert prints.contracts == (Decimal("1.24"),)
+    assert prints.contracts[0].as_tuple().exponent == -2
+    assert outcomes[0].contracts == Decimal("1.24")
+    assert outcomes[0].net_cents == Decimal("5.16")
+    assert [item.weight for item in clusters] == [Decimal("1.24")]
+    assert [item.total for item in clusters] == [Decimal("5.16")]
+
+
+def test_a_count_off_the_hundredth_grid_raises() -> None:
+    table = trades_table([trade(10, 1, 1500, count="3.501")])
     with pytest.raises(ValueError):
         build_ticker_prints(TICKER, table)
 
@@ -337,9 +356,9 @@ def test_screen_prints_drops_empty_sides_and_duplicate_trade_ids() -> None:
 
 def test_clusters_group_by_ticker_and_feed_the_bootstrap() -> None:
     outcomes = [
-        PrintOutcome(ticker=TICKER, net_cents=Decimal("6"), contracts=4),
-        PrintOutcome(ticker=OTHER, net_cents=Decimal("26"), contracts=4),
-        PrintOutcome(ticker=TICKER, net_cents=Decimal("-2"), contracts=1),
+        PrintOutcome(ticker=TICKER, net_cents=Decimal("6"), contracts=Decimal("4")),
+        PrintOutcome(ticker=OTHER, net_cents=Decimal("26"), contracts=Decimal("4")),
+        PrintOutcome(ticker=TICKER, net_cents=Decimal("-2"), contracts=Decimal("1")),
     ]
     clusters = cluster_aggregates(outcomes)
     assert [item.cluster for item in clusters] == [TICKER, OTHER]
@@ -359,8 +378,8 @@ def test_clusters_group_by_ticker_and_feed_the_bootstrap() -> None:
 
 def test_a_zero_contract_cluster_is_dropped() -> None:
     outcomes = [
-        PrintOutcome(ticker=TICKER, net_cents=Decimal("0"), contracts=0),
-        PrintOutcome(ticker=OTHER, net_cents=Decimal("26"), contracts=4),
+        PrintOutcome(ticker=TICKER, net_cents=Decimal("0"), contracts=Decimal("0")),
+        PrintOutcome(ticker=OTHER, net_cents=Decimal("26"), contracts=Decimal("4")),
     ]
     clusters = cluster_aggregates(outcomes)
     assert [item.cluster for item in clusters] == [OTHER]
@@ -398,7 +417,7 @@ def test_end_to_end_contract_weighted_mean() -> None:
     assert result.horizon_s == PRIMARY_HORIZON_S
     assert result.split == SPLIT
     assert result.n_prints == 2
-    assert result.contracts == 8
+    assert result.contracts == Decimal("8")
     assert [item.cluster for item in result.clusters] == [TICKER, OTHER]
     assert [item.total for item in result.clusters] == [Decimal("6"), Decimal("26")]
     assert result.mean_net_cents == Decimal("4")
@@ -432,5 +451,5 @@ def test_prints_arrays_carry_the_taker_price() -> None:
     )
     assert prints.prices == (Decimal("0.45"), Decimal("0.55"))
     assert prints.pressure.tolist() == [1, -1]
-    assert prints.contracts.tolist() == [4, 4]
+    assert prints.contracts == (Decimal("4"), Decimal("4"))
     assert np.array_equal(prints.received_us, np.array([us(1), us(2)]))

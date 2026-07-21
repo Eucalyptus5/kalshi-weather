@@ -19,28 +19,35 @@ from bot.lag.fee_floor import (
 @pytest.mark.parametrize(
     "contracts, price, expected",
     [
-        (100, Decimal("0.05"), Decimal("0.34")),
-        (1, Decimal("0.07"), Decimal("0.01")),
-        (10, Decimal("0.07"), Decimal("0.05")),
-        (1, Decimal("0.50"), Decimal("0.02")),
-        (4, Decimal("0.50"), Decimal("0.07")),
-        (100, Decimal("0.50"), Decimal("1.75")),
-        (1000, Decimal("0.20"), Decimal("11.20")),
-        (27, Decimal("0.10"), Decimal("0.18")),
-        (0, Decimal("0.50"), Decimal("0")),
-        (1, Decimal("0"), Decimal("0")),
-        (1, Decimal("1"), Decimal("0")),
-        (500, Decimal("0"), Decimal("0")),
-        (500, Decimal("1"), Decimal("0")),
+        (Decimal("100"), Decimal("0.05"), Decimal("0.34")),
+        (Decimal("1"), Decimal("0.07"), Decimal("0.01")),
+        (Decimal("10"), Decimal("0.07"), Decimal("0.05")),
+        (Decimal("1"), Decimal("0.50"), Decimal("0.02")),
+        (Decimal("4"), Decimal("0.50"), Decimal("0.07")),
+        (Decimal("100"), Decimal("0.50"), Decimal("1.75")),
+        (Decimal("1000"), Decimal("0.20"), Decimal("11.20")),
+        (Decimal("27"), Decimal("0.10"), Decimal("0.18")),
+        (Decimal("0"), Decimal("0.50"), Decimal("0")),
+        (Decimal("1"), Decimal("0"), Decimal("0")),
+        (Decimal("1"), Decimal("1"), Decimal("0")),
+        (Decimal("500"), Decimal("0"), Decimal("0")),
+        (Decimal("500"), Decimal("1"), Decimal("0")),
+        (Decimal("0.01"), Decimal("0.50"), Decimal("0.01")),
+        (Decimal("0.39"), Decimal("0.50"), Decimal("0.01")),
+        (Decimal("1.24"), Decimal("0.50"), Decimal("0.03")),
+        (Decimal("46.51"), Decimal("0.50"), Decimal("0.82")),
+        (Decimal("60015.36"), Decimal("0.50"), Decimal("1050.27")),
     ],
 )
-def test_published_floor_golden_table(contracts: int, price: Decimal, expected: Decimal) -> None:
+def test_published_floor_golden_table(
+    contracts: Decimal, price: Decimal, expected: Decimal
+) -> None:
     assert published_taker_fee(contracts, price) == expected
 
 
 def test_hundred_at_five_cents_costs_thirty_four_cents_not_a_dollar() -> None:
-    aggregate = published_taker_fee(100, Decimal("0.05"))
-    per_contract_ceiling = 100 * published_taker_fee(1, Decimal("0.05"))
+    aggregate = published_taker_fee(Decimal("100"), Decimal("0.05"))
+    per_contract_ceiling = 100 * published_taker_fee(Decimal("1"), Decimal("0.05"))
 
     assert aggregate == Decimal("0.34")
     assert per_contract_ceiling == Decimal("1.00")
@@ -48,15 +55,15 @@ def test_hundred_at_five_cents_costs_thirty_four_cents_not_a_dollar() -> None:
 
 
 def test_one_contract_at_seven_cents_pays_fourteen_percent_of_premium() -> None:
-    fee = published_taker_fee(1, Decimal("0.07"))
+    fee = published_taker_fee(Decimal("1"), Decimal("0.07"))
 
     assert fee == Decimal("0.01")
     assert (fee / Decimal("0.07")).quantize(CENT) == Decimal("0.14")
 
 
 def test_ten_contracts_at_seven_cents_pay_half_a_cent_each() -> None:
-    one = published_taker_fee(1, Decimal("0.07"))
-    ten = published_taker_fee(10, Decimal("0.07"))
+    one = published_taker_fee(Decimal("1"), Decimal("0.07"))
+    ten = published_taker_fee(Decimal("10"), Decimal("0.07"))
 
     assert ten == Decimal("0.05")
     assert ten / Decimal("10") == Decimal("0.005")
@@ -64,18 +71,20 @@ def test_ten_contracts_at_seven_cents_pay_half_a_cent_each() -> None:
 
 
 def test_a_hundredth_of_a_cent_over_a_boundary_rounds_up_to_the_next_cent() -> None:
-    assert published_taker_fee(27, Decimal("0.10")) == Decimal("0.18")
-    assert published_taker_fee(27, Decimal("0.10")) != Decimal("0.17")
+    assert published_taker_fee(Decimal("27"), Decimal("0.10")) == Decimal("0.18")
+    assert published_taker_fee(Decimal("27"), Decimal("0.10")) != Decimal("0.17")
 
 
 def test_an_exact_cent_boundary_is_not_pushed_to_the_next_cent() -> None:
-    assert published_taker_fee(4, Decimal("0.50")) == Decimal("0.07")
-    assert published_taker_fee(100, Decimal("0.50")) == Decimal("1.75")
+    assert published_taker_fee(Decimal("4"), Decimal("0.50")) == Decimal("0.07")
+    assert published_taker_fee(Decimal("100"), Decimal("0.50")) == Decimal("1.75")
 
 
-@pytest.mark.parametrize("contracts", [0, 1, 10, 250])
+@pytest.mark.parametrize(
+    "contracts", [Decimal("0"), Decimal("0.01"), Decimal("1"), Decimal("10.09"), Decimal("250")]
+)
 @pytest.mark.parametrize("price", [Decimal("0.03"), Decimal("0.41"), Decimal("0.88")])
-def test_every_floor_lands_on_the_cent(contracts: int, price: Decimal) -> None:
+def test_every_floor_lands_on_the_cent(contracts: Decimal, price: Decimal) -> None:
     fee = published_taker_fee(contracts, price)
 
     assert isinstance(fee, Decimal)
@@ -84,7 +93,32 @@ def test_every_floor_lands_on_the_cent(contracts: int, price: Decimal) -> None:
 
 @pytest.mark.parametrize("price", [Decimal("0.07"), Decimal("0.20"), Decimal("0.63")])
 def test_floor_never_falls_below_a_cent_on_a_real_fill(price: Decimal) -> None:
-    assert published_taker_fee(1, price) >= CENT
+    assert published_taker_fee(Decimal("1"), price) >= CENT
+
+
+@pytest.mark.parametrize("contracts", [Decimal("0.01"), Decimal("0.39"), Decimal("0.99")])
+def test_a_fill_under_one_contract_still_pays_the_cent(contracts: Decimal) -> None:
+    assert published_taker_fee(contracts, Decimal("0.50")) >= CENT
+
+
+def test_a_size_far_under_a_contract_pays_the_whole_cent_anyway() -> None:
+    raw = PUBLISHED_TAKER_RATE * Decimal("0.39") * Decimal("0.5") * Decimal("0.5")
+
+    assert raw == Decimal("0.0068250")
+    assert published_taker_fee(Decimal("0.39"), Decimal("0.50")) == CENT
+
+
+def test_a_fractional_size_prices_between_the_two_contracts_it_sits_between() -> None:
+    rate = PUBLISHED_TAKER_RATE * Decimal("0.5") * Decimal("0.5")
+    one = rate * Decimal("11")
+    between = rate * Decimal("11.09")
+    two = rate * Decimal("12")
+
+    assert one < between < two
+    assert published_taker_fee(Decimal("11"), Decimal("0.50")) == Decimal("0.20")
+    assert published_taker_fee(Decimal("11.09"), Decimal("0.50")) == Decimal("0.20")
+    assert published_taker_fee(Decimal("11.43"), Decimal("0.50")) == Decimal("0.21")
+    assert published_taker_fee(Decimal("12"), Decimal("0.50")) == Decimal("0.21")
 
 
 @pytest.mark.parametrize(
@@ -110,12 +144,12 @@ def test_floor_never_falls_below_a_cent_on_a_real_fill(price: Decimal) -> None:
     ],
 )
 def test_the_module_agrees_with_the_published_floor(contracts: int, price: Decimal) -> None:
-    assert taker_fee(contracts, price) == published_taker_fee(contracts, price)
+    assert taker_fee(contracts, price) == published_taker_fee(Decimal(contracts), price)
 
 
 def test_the_module_reads_a_cent_where_the_floor_reads_a_cent() -> None:
     assert taker_fee(1, Decimal("0.07")) == Decimal("0.01")
-    assert published_taker_fee(1, Decimal("0.07")) == Decimal("0.01")
+    assert published_taker_fee(Decimal("1"), Decimal("0.07")) == Decimal("0.01")
 
 
 def test_published_rate_is_the_schedule_rate() -> None:

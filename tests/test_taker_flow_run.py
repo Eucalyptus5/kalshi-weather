@@ -105,6 +105,7 @@ def trade(
     *,
     side: str = "yes",
     trade_id: str | None = None,
+    count: str = "10",
 ) -> dict:
     return {
         "id": row_id,
@@ -113,7 +114,7 @@ def trade(
         "ts_ms": ts_ms,
         "yes_price": "0.50",
         "no_price": "0.50",
-        "count": "10",
+        "count": count,
         "taker_side": side,
         "trade_id": f"t{row_id}" if trade_id is None else trade_id,
     }
@@ -167,6 +168,11 @@ TRADES_DISCOVERY_DAY = [
 
 TRADES_HOLDOUT_DAY = [trade(110, NEXT_TICKER, when(HOLDOUT_DAY, 18, 0, 1), 30500)]
 TRADES_LATE_DAY = [trade(120, NEXT_TICKER, when(LATE_DAY, 5, 59, 0), 39000)]
+
+FRACTIONAL_TRADES_DAY = [
+    trade(140, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 1), 12500, count="1.24"),
+    trade(141, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 2), 12600, count="4"),
+]
 
 BOOKLESS_TOUCH_DAY = [touch(70, NEXT_TICKER, when(DISCOVERY_DAY, 18, 0, 0), 12000, "0.50", "0.48")]
 BOOKLESS_TRADES_DAY = [
@@ -264,6 +270,16 @@ def discovery_only_artifacts(tmp_path: Path) -> Path:
     return root
 
 
+def fractional_artifacts(tmp_path: Path) -> Path:
+    root = tmp_path / "fractional"
+    write_partition(root, DISCOVERY_DAY, 1, TOUCH_DISCOVERY_DAY)
+    write_partition(root, HOLDOUT_DAY, 1, TOUCH_HOLDOUT_DAY)
+    write_partition(
+        root, DISCOVERY_DAY, 1, FRACTIONAL_TRADES_DAY, kind="trades", schema=TRADES_SCHEMA
+    )
+    return root
+
+
 def violation_artifacts(tmp_path: Path) -> Path:
     root = tmp_path / "violations"
     write_partition(root, DISCOVERY_DAY, 1, VIOLATION_DISCOVERY_DAY)
@@ -306,7 +322,7 @@ def readout_of(
         split=split,
         clusters=clusters,
         n_prints=n_prints,
-        contracts=int(sum(item.weight for item in clusters)),
+        contracts=sum((item.weight for item in clusters), Decimal(0)),
         counts=FlowCounts(),
     )
     return HorizonReadout(
@@ -404,7 +420,7 @@ def test_a_window_over_an_exclusion_is_dropped_whole_and_counted_by_class(swept:
     assert tally.by_class[RESUBSCRIBE_BLIND] == 1
     assert tally.by_class[QUIET_BAND] == 0
     assert tally.n_prints == 2
-    assert tally.contracts == 20
+    assert tally.contracts == Decimal("20")
 
 
 def test_a_window_opening_before_the_scope_start_is_dropped_as_out_of_window(swept: Sweep) -> None:
@@ -462,6 +478,22 @@ def test_the_holdout_carries_its_own_mean(swept: Sweep) -> None:
 def test_the_kernel_drops_are_summed_per_horizon(swept: Sweep) -> None:
     assert swept.tallies[(HOLDOUT, HORIZONS_S[-1])].counts.uncovered == 1
     assert swept.tallies[(HOLDOUT, PRIMARY_HORIZON_S)].counts.uncovered == 0
+
+
+def test_a_fractional_size_is_counted_and_weighted_at_the_size_the_wire_sent(
+    tmp_path: Path, scope: RunScope
+) -> None:
+    sweep = sweep_prints(scope, fractional_artifacts(tmp_path))
+    tally = sweep.tallies[(DISCOVERY, PRIMARY_HORIZON_S)]
+
+    assert sweep.fractional_size_prints == 1
+    assert tally.n_prints == 2
+    assert tally.contracts == Decimal("5.24")
+    assert tally.weights[DAY_TICKER] == Decimal("5.24")
+
+
+def test_a_run_of_whole_sizes_counts_no_fractional_prints(swept: Sweep) -> None:
+    assert swept.fractional_size_prints == 0
 
 
 def test_stamps_that_went_backwards_are_counted_once_across_the_rows_the_run_read(

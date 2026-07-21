@@ -27,6 +27,7 @@ from tests.test_taker_flow_run import (
     artifacts_dir,
     bookless_artifacts,
     discovery_only_artifacts,
+    fractional_artifacts,
     scope_dir,
 )
 from tests.test_tape_studies import (
@@ -142,6 +143,8 @@ def test_the_results_carry_the_readout_the_question_asked_for(
         "out_of_scope": 1,
         "out_of_window": 2,
     }
+    assert results["discovery"]["contracts"] == "20.00"
+    assert results["kernel_drops"]["fractional_size_prints"] == 0
     assert results["exclusions"]["by_class"][RESUBSCRIBE_BLIND] == 1
     assert results["exclusions"]["excluded_fraction"] == "0.25"
     assert results["cities"] == [SERIES]
@@ -205,6 +208,19 @@ def test_a_run_whose_book_never_arrived_reports_null_figures(
     assert results["exclusions"]["excluded_fraction"] is None
     assert results["kernel_drops"]["unresolved"] == 2
     assert capsys.readouterr().out == format_report(results) + "\n"
+
+
+def test_a_run_over_fractional_prints_reports_the_share_it_weighted(
+    paths: dict[str, Path], run_root: Path, tmp_path: Path
+) -> None:
+    paths["artifacts"] = fractional_artifacts(tmp_path)
+
+    assert run(args_for(paths, run_root)) == 0
+
+    results = results_of(run_root)
+    assert results["kernel_drops"]["fractional_size_prints"] == 1
+    assert results["discovery"]["contracts"] == "5.24"
+    assert "fractional_size_prints=1" in format_report(results)
 
 
 def test_a_run_whose_floor_is_unavailable_writes_nothing(

@@ -8,8 +8,9 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from bot.execution.fees import taker_fee
+from bot.lag.fee_floor import published_taker_fee
 from bot.lag.tape_stats import ClusterAggregate
+from bot.replay.ladder import _SIZE_EXPONENT, _quantized
 
 
 HORIZONS_S: tuple[int, ...] = (1, 10, 60, 300)
@@ -84,7 +85,7 @@ class TickerPrints:
     ts_ms: np.ndarray
     received_us: np.ndarray
     pressure: np.ndarray
-    contracts: np.ndarray
+    contracts: tuple[Decimal, ...]
     prices: tuple[Decimal, ...]
 
 
@@ -108,7 +109,7 @@ class HorizonWindows:
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PrintOutcome:
     ticker: str
-    contracts: int
+    contracts: Decimal
     net_cents: Decimal
 
 
@@ -124,7 +125,7 @@ class HorizonResult:
     split: str
     clusters: tuple[ClusterAggregate, ...]
     n_prints: int
-    contracts: int
+    contracts: Decimal
     counts: FlowCounts
 
     @property
@@ -173,9 +174,9 @@ def build_ticker_prints(ticker: str, table: pa.Table) -> TickerPrints:
         ts_ms=table.column("ts_ms").to_numpy(),
         received_us=table.column("received_at").cast(pa.int64()).to_numpy(),
         pressure=np.array([yes_pressure(side) for side in sides], dtype=np.int64),
-        contracts=np.array(
-            [_contracts(ticker, value) for value in table.column("count").to_pylist()],
-            dtype=np.int64,
+        contracts=tuple(
+            _quantized(ticker, "count", value, _SIZE_EXPONENT)
+            for value in table.column("count").to_pylist()
         ),
         prices=prices,
     )
@@ -249,11 +250,11 @@ def resolve_horizon(
     )
 
 
-def print_net_cents(*, contracts: int, price: Decimal, signed_move2: int) -> Decimal:
-    gross = Decimal(contracts) * Decimal(signed_move2) / _GROSS_DIVISOR
+def print_net_cents(*, contracts: Decimal, price: Decimal, signed_move2: int) -> Decimal:
+    gross = contracts * Decimal(signed_move2) / _GROSS_DIVISOR
     # Two taker legs at the print's own price on the print's own size, charged once on the
-    # aggregate. taker_fee is symmetric in P(1-P), so the price the taker paid reads true.
-    return gross - _ROUND_TRIP_LEGS * _CENTS_PER_DOLLAR * taker_fee(contracts, price)
+    # aggregate. The fee is symmetric in P(1-P), so the price the taker paid reads true.
+    return gross - _ROUND_TRIP_LEGS * _CENTS_PER_DOLLAR * published_taker_fee(contracts, price)
 
 
 def print_outcomes(
@@ -261,7 +262,7 @@ def print_outcomes(
 ) -> list[PrintOutcome]:
     outcomes = []
     for position in np.flatnonzero(windows.usable):
-        contracts = int(prints.contracts[position])
+        contracts = prints.contracts[position]
         move2 = int(book.mid2[windows.end_index[position]] - book.mid2[anchors.index[position]])
         outcomes.append(
             PrintOutcome(
@@ -280,12 +281,12 @@ def print_outcomes(
 # The cluster unit is the market-day: one Kalshi market on one event-day is exactly one ticker.
 def cluster_aggregates(outcomes: Sequence[PrintOutcome]) -> list[ClusterAggregate]:
     totals: dict[str, Decimal] = {}
-    weights: dict[str, int] = {}
+    weights: dict[str, Decimal] = {}
     for outcome in outcomes:
         totals[outcome.ticker] = totals.get(outcome.ticker, Decimal(0)) + outcome.net_cents
-        weights[outcome.ticker] = weights.get(outcome.ticker, 0) + outcome.contracts
+        weights[outcome.ticker] = weights.get(outcome.ticker, Decimal(0)) + outcome.contracts
     return [
-        ClusterAggregate(cluster=ticker, total=totals[ticker], weight=Decimal(weights[ticker]))
+        ClusterAggregate(cluster=ticker, total=totals[ticker], weight=weights[ticker])
         for ticker in sorted(totals)
         if weights[ticker] > 0
     ]
@@ -299,7 +300,7 @@ def horizon_result(
         split=split,
         clusters=tuple(cluster_aggregates(outcomes)),
         n_prints=len(outcomes),
-        contracts=sum(outcome.contracts for outcome in outcomes),
+        contracts=sum((outcome.contracts for outcome in outcomes), Decimal(0)),
         counts=counts,
     )
 
@@ -315,11 +316,3 @@ def _ticks(price: Decimal) -> int:
     if scaled != ticks:
         raise ValueError(f"price {price} is off the {PRICE_TICKS}-per-dollar grid")
     return ticks
-
-
-def _contracts(ticker: str, count: str) -> int:
-    size = Decimal(count)
-    contracts = int(size)
-    if size != contracts:
-        raise ValueError(f"{ticker} trade count {count} is not a whole number of contracts")
-    return contracts
