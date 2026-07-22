@@ -22,13 +22,18 @@ from scripts.q3_near_lock import (
 from tests.test_near_lock import (
     CROSSING_PUBLISHED,
     CROSSING_VALID,
+    LAX,
+    MIA,
     NEXT_PUBLISHED,
     NEXT_VALID,
     STATION,
     cool_observations,
     crossing_observations,
+    wide_artifacts,
+    wide_observations,
+    wide_scope_dir,
 )
-from tests.test_taker_flow_run import SEED, SERIES, artifacts_dir, scope_dir
+from tests.test_taker_flow_run import DISCOVERY_DAY, SEED, SERIES, artifacts_dir, scope_dir
 from tests.test_tape_studies import (
     ADEQUATE_SAMPLES,
     SHORT_SAMPLES,
@@ -182,6 +187,7 @@ def test_the_stratum_reads_only_the_prints_inside_a_lock_window(
         "ambiguous": 0,
         "ambiguous_fraction": "0",
         "no_lock": 0,
+        "no_observations": 0,
     }
     assert results["prints"]["in_window_discovery"] == 1
     assert results["prints"]["in_window_holdout"] == 1
@@ -193,7 +199,24 @@ def test_the_stratum_reads_only_the_prints_inside_a_lock_window(
     assert results["discovery"]["split"] == DISCOVERY
     assert results["holdout"]["split"] == HOLDOUT
     assert results["discovery"]["horizon_s"] == PRIMARY_HORIZON_S
+
+
+def test_the_coverage_names_only_the_cities_the_stratum_reads(
+    paths: dict[str, Path], run_root: Path, tmp_path: Path
+) -> None:
+    paths["run_scope"] = wide_scope_dir(tmp_path)
+    paths["artifacts"] = wide_artifacts(tmp_path)
+    paths["observations"] = wide_observations(tmp_path)
+
+    assert run(args_for(paths, run_root)) == 0
+
+    results = results_of(run_root)
     assert results["cities"] == [SERIES]
+    assert list(results["tickers_per_city_day"]) == [f"{SERIES} {DISCOVERY_DAY.isoformat()}"]
+    assert results["prints"]["on_a_market_that_never_locked"] == 0
+    assert results["prints"]["on_a_series_outside_the_lock_universe"] == 2
+    assert MIA not in json.dumps(results)
+    assert LAX not in json.dumps(results)
 
 
 def test_a_stratum_under_two_hundred_prints_reports_underpowered_and_no_estimate(

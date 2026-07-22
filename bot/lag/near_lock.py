@@ -38,11 +38,13 @@ _HALF_WIDTH = timedelta(seconds=LOCK_HALF_WIDTH_S)
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class LockScan:
+    cities: tuple[str, ...]
     windows: Mapping[str, tuple[datetime, datetime]]
     markets: int
     locked: int
     ambiguous: int
     no_lock: int
+    no_observations: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -88,9 +90,11 @@ def scan_locks(
     markets = 0
     ambiguous = 0
     no_lock = 0
+    no_observations = 0
     lock_dependent = set(scope.universe.lock_dependent)
+    cities = sorted({series for series, _ in scope.event_days} & lock_dependent)
 
-    for series_root in sorted({series for series, _ in scope.event_days} & lock_dependent):
+    for series_root in cities:
         table = read_window(artifacts, TRADES, series_root, scope.scope_start, scope.scope_end)
         for ticker in sorted(pc.unique(table.column("ticker")).to_pylist()):
             market = parse_ticker(ticker)
@@ -98,7 +102,11 @@ def scan_locks(
             if day is None:
                 continue
             markets += 1
-            events = detect_lock_events(market, observations[day.station], tz_name=day.timezone)
+            recorded = observations.get(day.station)
+            if recorded is None:
+                no_observations += 1
+                continue
+            events = detect_lock_events(market, recorded, tz_name=day.timezone)
             if not events:
                 no_lock += 1
                 continue
@@ -109,18 +117,21 @@ def scan_locks(
         del table
 
     logger.info(
-        "near_lock markets=%d locked=%d ambiguous=%d no_lock=%d",
+        "near_lock markets=%d locked=%d ambiguous=%d no_lock=%d no_observations=%d",
         markets,
         len(windows),
         ambiguous,
         no_lock,
+        no_observations,
     )
     return LockScan(
+        cities=tuple(cities),
         windows=windows,
         markets=markets,
         locked=len(windows),
         ambiguous=ambiguous,
         no_lock=no_lock,
+        no_observations=no_observations,
     )
 
 
@@ -226,6 +237,7 @@ def result_payload(run: NearLockRun) -> dict:
     excluded = discovery.excluded + holdout.excluded
     counts = discovery.result.counts + holdout.result.counts
     in_scope = dict(run.sweep.in_scope)
+    scanned = set(locks.cities)
     return {
         "run_id": run.run_id,
         "stratum": STRATUM,
@@ -247,6 +259,7 @@ def result_payload(run: NearLockRun) -> dict:
                 None if locks.locked == 0 else str(Decimal(locks.ambiguous) / Decimal(locks.locked))
             ),
             "no_lock": locks.no_lock,
+            "no_observations": locks.no_observations,
         },
         "prints": {
             "in_window_pooled": sum(in_scope.values()),
@@ -261,6 +274,7 @@ def result_payload(run: NearLockRun) -> dict:
             "out_of_window": discovery.out_of_window + holdout.out_of_window,
             "outside_lock_window": run.sweep.outside_lock_window,
             "on_a_market_that_never_locked": run.sweep.no_lock_prints,
+            "on_a_series_outside_the_lock_universe": run.sweep.off_universe_prints,
         },
         "discovery": reading_payload(discovery),
         "holdout": reading_payload(holdout),
@@ -283,9 +297,10 @@ def result_payload(run: NearLockRun) -> dict:
             "read_ts_violations": run.sweep.read_ts_violations,
             "fractional_size_prints": run.sweep.fractional_size_prints,
         },
-        "cities": sorted({series for series, _ in run.sweep.tickers}),
+        "cities": sorted({series for series, _ in run.sweep.tickers} & scanned),
         "tickers_per_city_day": {
             f"{series} {event_date.isoformat()}": len(names)
             for (series, event_date), names in sorted(run.sweep.tickers.items())
+            if series in scanned
         },
     }

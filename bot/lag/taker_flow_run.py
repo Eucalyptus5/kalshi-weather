@@ -126,6 +126,7 @@ class Sweep:
     fractional_size_prints: int
     outside_lock_window: int
     no_lock_prints: int
+    off_universe_prints: int
     tickers: Mapping[tuple[str, date], frozenset[str]]
 
 
@@ -210,11 +211,14 @@ def sweep_prints(
     fractional = 0
     outside_lock = 0
     no_lock = 0
+    off_universe = 0
     tickers: dict[tuple[str, date], set[str]] = {}
     days = window_dates(scope.scope_start, scope.scope_end)
+    lock_dependent = set(scope.universe.lock_dependent)
 
     for series_root in sorted({series for series, _ in scope.event_days}):
         started = time.monotonic()
+        outside_universe = lock_windows is not None and series_root not in lock_dependent
         hygienic = screen_prints(
             read_window(artifacts, TRADES, series_root, scope.scope_start, scope.scope_end)
         )
@@ -259,6 +263,9 @@ def sweep_prints(
                 event_date = event_dates[ticker]
                 split = split_of(scope, series_root, event_date)
                 prints_here = today.filter(pc.equal(today.column("ticker"), ticker))
+                if outside_universe:
+                    off_universe += prints_here.num_rows
+                    continue
                 if lock_windows is not None:
                     window = lock_windows.get(ticker)
                     if window is None:
@@ -321,6 +328,7 @@ def sweep_prints(
         fractional_size_prints=fractional,
         outside_lock_window=outside_lock,
         no_lock_prints=no_lock,
+        off_universe_prints=off_universe,
         tickers={key: frozenset(names) for key, names in tickers.items()},
     )
 

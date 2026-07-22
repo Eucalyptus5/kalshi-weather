@@ -141,7 +141,7 @@ def format_report(payload: dict) -> str:
         "== LOCKS",
         f"  markets={locks['markets']} locked={locks['locked']} "
         f"ambiguous={locks['ambiguous']} ambiguous_fraction={locks['ambiguous_fraction']} "
-        f"no_lock={locks['no_lock']}",
+        f"no_lock={locks['no_lock']} no_observations={locks['no_observations']}",
         "",
         "== PRINTS",
         f"  in_window pooled={prints['in_window_pooled']} "
@@ -151,7 +151,9 @@ def format_report(payload: dict) -> str:
         f"  empty_side={prints['empty_side']} duplicate_trade_id={prints['duplicate_trade_id']} "
         f"out_of_scope={prints['out_of_scope']} out_of_window={prints['out_of_window']}",
         f"  outside_lock_window={prints['outside_lock_window']} "
-        f"on_a_market_that_never_locked={prints['on_a_market_that_never_locked']}",
+        f"on_a_market_that_never_locked={prints['on_a_market_that_never_locked']} "
+        f"on_a_series_outside_the_lock_universe="
+        f"{prints['on_a_series_outside_the_lock_universe']}",
         "",
         "== DISCOVERY (reported, not gating)",
         *_format_reading(payload["discovery"]),

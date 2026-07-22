@@ -11,8 +11,10 @@ from bot.lag.near_lock import (
     LOCK_HALF_WIDTH_S,
     PRINT_MIN_STRATUM,
     REPORTED,
+    NearLockRun,
     read_observations,
     reading_payload,
+    result_payload,
     scan_locks,
 )
 from bot.lag.r0_universe import Coverage, freeze_universe, write_universe
@@ -249,6 +251,7 @@ def test_a_market_that_never_locks_carries_no_window_and_no_prints(
     assert found.no_lock == 2
     assert found.markets == 2
     assert sweep.no_lock_prints == 6
+    assert sweep.off_universe_prints == 0
     assert sweep.outside_lock_window == 0
     assert sweep.in_scope == {DISCOVERY: 0, HOLDOUT: 0}
     assert sweep.tallies[(DISCOVERY, PRIMARY_HORIZON_S)].n_prints == 0
@@ -303,15 +306,69 @@ def test_the_carved_out_city_and_a_series_off_the_passing_set_never_appear(
 
     found = scan_locks(scope, root, read_observations(wide_observations(tmp_path)))
     sweep = sweep_prints(scope, root, lock_windows=found.windows)
+    payload = result_payload(
+        NearLockRun(
+            run_id="wide",
+            manifest=tmp_path / "manifest.json",
+            manifest_sha256="",
+            seed=SEED,
+            locks=found,
+            sweep=sweep,
+            discovery=readout(
+                sweep.tallies[(DISCOVERY, PRIMARY_HORIZON_S)],
+                split=DISCOVERY,
+                horizon_s=PRIMARY_HORIZON_S,
+                seed=SEED,
+            ),
+            holdout=readout(
+                sweep.tallies[(HOLDOUT, PRIMARY_HORIZON_S)],
+                split=HOLDOUT,
+                horizon_s=PRIMARY_HORIZON_S,
+                seed=SEED,
+            ),
+        )
+    )
 
     assert MIA not in scope.universe.lock_dependent
     assert LAX not in scope.universe.lock_dependent
     assert sorted(found.windows) == [DAY_TICKER]
     assert found.markets == 1
-    assert sweep.no_lock_prints == 2
+    assert sweep.no_lock_prints == 0
+    assert sweep.off_universe_prints == 2
+    assert payload["cities"] == [SERIES]
+    assert list(payload["tickers_per_city_day"]) == [f"{SERIES} {DISCOVERY_DAY.isoformat()}"]
     assert [item.cluster for item in sweep.tallies[(DISCOVERY, PRIMARY_HORIZON_S)].clusters()] == [
         DAY_TICKER
     ]
+
+
+def test_a_sweep_with_no_lock_windows_reads_every_series_the_scope_carries(
+    tmp_path: Path,
+) -> None:
+    scope = load_run_scope(wide_scope_dir(tmp_path))
+
+    sweep = sweep_prints(scope, wide_artifacts(tmp_path))
+
+    assert sweep.off_universe_prints == 0
+    assert sweep.no_lock_prints == 0
+    assert sorted({series for series, _ in sweep.tickers}) == [SERIES, LAX, MIA]
+
+
+def test_a_station_with_no_recorded_arrivals_locks_nothing_and_is_counted(
+    tmp_path: Path, scope: RunScope
+) -> None:
+    elsewhere = write_observations(
+        tmp_path / "elsewhere.jsonl",
+        [observation("KBOI", CROSSING_VALID, CROSSING_PUBLISHED, "72")],
+    )
+
+    found = scan_locks(scope, artifacts_dir(tmp_path), read_observations(elsewhere))
+
+    assert found.windows == {}
+    assert found.markets == 2
+    assert found.no_observations == 2
+    assert found.no_lock == 0
+    assert found.locked == 0
 
 
 def test_the_gating_sweep_does_not_move_when_no_lock_windows_are_supplied(
