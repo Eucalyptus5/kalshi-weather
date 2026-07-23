@@ -32,6 +32,12 @@ class ClusterAggregate:
 
 
 @dataclass(frozen=True, slots=True)
+class ValueCluster:
+    cluster: str
+    values: tuple[Decimal, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CorridorDayAggregate:
     corridor: str
     day: date
@@ -106,6 +112,57 @@ def cluster_bootstrap(
 
     # The basic interval reflects the replicates through the estimate, so it inverts the same
     # pivot the p-value tests and its upper quantile carries the lower bound.
+    low_q, high_q = np.percentile(replicates, [50 * (1 - ci_level), 50 * (1 + ci_level)])
+
+    return BootstrapResult(
+        estimate=estimate,
+        null_value=null_value,
+        direction=direction,
+        p_value=(1 + int(np.count_nonzero(extreme))) / (resamples + 1),
+        ci_level=ci_level,
+        ci_low=2 * theta - float(high_q),
+        ci_high=2 * theta - float(low_q),
+        n_clusters=len(clusters),
+        resamples=resamples,
+        seed=seed,
+    )
+
+
+def cluster_median_bootstrap(
+    clusters: Sequence[ValueCluster],
+    *,
+    null_value: Decimal,
+    direction: Direction,
+    resamples: int,
+    seed: int,
+    ci_level: float,
+) -> BootstrapResult:
+    if not clusters:
+        raise ValueError("a cluster median bootstrap needs at least one cluster")
+    if direction not in DIRECTIONS:
+        raise ValueError(f"direction must be one of {DIRECTIONS}, got {direction!r}")
+    silent = [item.cluster for item in clusters if not item.values]
+    if silent:
+        raise ValueError("clusters carry no values: " + ", ".join(silent))
+
+    ordered = sorted(value for item in clusters for value in item.values)
+    middle = len(ordered) // 2
+    estimate = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+
+    pooled = np.array([float(value) for item in clusters for value in item.values])
+    bounds = np.cumsum([0, *(len(item.values) for item in clusters)])
+    picks = [np.arange(bounds[index], bounds[index + 1]) for index in range(len(clusters))]
+    rng = np.random.default_rng(seed)
+    drawn = rng.integers(len(clusters), size=(resamples, len(clusters)))
+    replicates = np.array(
+        [np.median(pooled[np.concatenate([picks[index] for index in row])]) for row in drawn]
+    )
+
+    theta = float(estimate)
+    pivot = replicates - theta
+    observed = theta - float(null_value)
+    extreme = pivot >= observed if direction == "greater" else pivot <= observed
+
     low_q, high_q = np.percentile(replicates, [50 * (1 - ci_level), 50 * (1 + ci_level)])
 
     return BootstrapResult(

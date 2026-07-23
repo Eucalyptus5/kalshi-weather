@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from statistics import median
 
 import numpy as np
 import pytest
@@ -17,7 +18,9 @@ from bot.lag.tape_stats import (
     BLOCK_DAYS,
     ClusterAggregate,
     CorridorDayAggregate,
+    ValueCluster,
     cluster_bootstrap,
+    cluster_median_bootstrap,
     day_blocks,
     evaluate_gate,
     evaluate_holdout,
@@ -35,6 +38,7 @@ CHILD_SOURCE = (
 FIXTURE_ALPHA = 0.05
 FIXTURE_CI_LEVEL = 0.90
 FIXTURE_RESAMPLES = 999
+MEDIAN_RESAMPLES = 299
 
 
 FIRST_DAY = date(2026, 7, 1)
@@ -52,6 +56,20 @@ def _unit_clusters(values: np.ndarray, prefix: str = "city") -> list[ClusterAggr
         ClusterAggregate(cluster=f"{prefix}-{i}", total=Decimal(str(value)), weight=Decimal("1"))
         for i, value in enumerate(values)
     ]
+
+
+def _pool(cluster: str, *values: str) -> ValueCluster:
+    return ValueCluster(cluster=cluster, values=tuple(Decimal(value) for value in values))
+
+
+def _pooled_medians(clusters: list[ValueCluster], seed: int, resamples: int) -> np.ndarray:
+    drawn = np.random.default_rng(seed).integers(len(clusters), size=(resamples, len(clusters)))
+    return np.array(
+        [
+            float(median([value for index in row for value in clusters[index].values]))
+            for row in drawn
+        ]
+    )
 
 
 def _corridor(
@@ -273,6 +291,202 @@ def test_cluster_labels_are_opaque() -> None:
         ci_level=FIXTURE_CI_LEVEL,
     )
     assert first == second
+
+
+def test_median_of_an_odd_pool_is_the_middle_observation() -> None:
+    result = cluster_median_bootstrap(
+        [_pool("den", "1", "5", "9"), _pool("aus", "2", "4")],
+        null_value=Decimal("0"),
+        direction="greater",
+        resamples=MEDIAN_RESAMPLES,
+        seed=31,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    assert isinstance(result.estimate, Decimal)
+    assert result.estimate == Decimal("4")
+
+
+def test_median_of_an_even_pool_stays_exact_where_float_averaging_would_not() -> None:
+    result = cluster_median_bootstrap(
+        [_pool("den", "0.1"), _pool("aus", "0.2")],
+        null_value=Decimal("0"),
+        direction="greater",
+        resamples=MEDIAN_RESAMPLES,
+        seed=31,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    assert result.estimate == Decimal("0.15")
+    assert (float(Decimal("0.1")) + float(Decimal("0.2"))) / 2 > 0.15
+
+
+def test_a_resampled_cluster_carries_all_of_its_observations() -> None:
+    clusters = [_pool("den", "0", "10", "20"), _pool("aus", "100", "200")]
+    result = cluster_median_bootstrap(
+        clusters,
+        null_value=Decimal("0"),
+        direction="greater",
+        resamples=MEDIAN_RESAMPLES,
+        seed=7,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    whole = {(0, 0): 10.0, (0, 1): 20.0, (1, 0): 20.0, (1, 1): 150.0}
+    drawn = np.random.default_rng(7).integers(2, size=(MEDIAN_RESAMPLES, 2))
+    replicates = np.array([whole[tuple(int(index) for index in row)] for row in drawn])
+    low_q, high_q = np.percentile(replicates, [5.0, 95.0])
+    assert result.estimate == Decimal("20")
+    assert sorted(set(replicates.tolist())) == [10.0, 20.0, 150.0]
+    assert result.ci_low == pytest.approx(40.0 - high_q)
+    assert result.ci_high == pytest.approx(40.0 - low_q)
+
+
+def test_a_single_cluster_leaves_the_median_nothing_to_resample() -> None:
+    result = cluster_median_bootstrap(
+        [_pool("den", "1", "4", "9")],
+        null_value=Decimal("0"),
+        direction="greater",
+        resamples=MEDIAN_RESAMPLES,
+        seed=12,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    assert result.estimate == Decimal("4")
+    assert result.n_clusters == 1
+    assert result.ci_low == result.ci_high == float(result.estimate)
+
+
+def test_median_interval_reflects_the_replicates_through_the_estimate() -> None:
+    clusters = [
+        _pool("den", "1", "2", "3"),
+        _pool("aus", "4", "40"),
+        _pool("nyc", "5"),
+        _pool("chi", "6", "60", "600"),
+    ]
+    result = cluster_median_bootstrap(
+        clusters,
+        null_value=Decimal("0"),
+        direction="greater",
+        resamples=MEDIAN_RESAMPLES,
+        seed=404,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    low_q, high_q = np.percentile(
+        _pooled_medians(clusters, seed=404, resamples=MEDIAN_RESAMPLES), [5.0, 95.0]
+    )
+    theta = float(result.estimate)
+    assert result.estimate == Decimal("5")
+    assert low_q < high_q
+    assert result.ci_low == pytest.approx(2 * theta - high_q)
+    assert result.ci_high == pytest.approx(2 * theta - low_q)
+
+
+def test_a_seed_repeats_the_median_bootstrap() -> None:
+    clusters = [_pool("den", "1", "8"), _pool("aus", "2", "3", "13"), _pool("nyc", "5")]
+    first = cluster_median_bootstrap(
+        clusters,
+        null_value=Decimal("1"),
+        direction="greater",
+        resamples=MEDIAN_RESAMPLES,
+        seed=808,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    second = cluster_median_bootstrap(
+        clusters,
+        null_value=Decimal("1"),
+        direction="greater",
+        resamples=MEDIAN_RESAMPLES,
+        seed=808,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    assert (first.p_value, first.ci_low, first.ci_high) == (
+        second.p_value,
+        second.ci_low,
+        second.ci_high,
+    )
+
+
+def test_median_directions_split_at_a_null_below_the_pool() -> None:
+    clusters = [_pool("den", "3", "4", "5"), _pool("aus", "6", "7"), _pool("nyc", "8", "9", "10")]
+    upward = cluster_median_bootstrap(
+        clusters,
+        null_value=Decimal("-100"),
+        direction="greater",
+        resamples=MEDIAN_RESAMPLES,
+        seed=55,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    downward = cluster_median_bootstrap(
+        clusters,
+        null_value=Decimal("-100"),
+        direction="less",
+        resamples=MEDIAN_RESAMPLES,
+        seed=55,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    assert upward.estimate == Decimal("6.5")
+    assert upward.p_value == pytest.approx(1 / (MEDIAN_RESAMPLES + 1))
+    assert downward.p_value == 1.0
+
+
+@pytest.mark.parametrize("direction", ["greater", "less"])
+@pytest.mark.parametrize("null", ["-1", "0", "5", "20"])
+def test_median_p_value_stays_inside_its_range(null: str, direction: str) -> None:
+    clusters = [_pool("den", "1", "2", "3"), _pool("aus", "4", "40"), _pool("nyc", "5", "6")]
+    result = cluster_median_bootstrap(
+        clusters,
+        null_value=Decimal(null),
+        direction=direction,
+        resamples=MEDIAN_RESAMPLES,
+        seed=9,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    assert 1 / (MEDIAN_RESAMPLES + 1) <= result.p_value <= 1.0
+
+
+def test_median_bootstrap_echoes_its_inputs() -> None:
+    clusters = [_pool("den", "1", "2"), _pool("aus", "3"), _pool("nyc", "4", "5", "6")]
+    result = cluster_median_bootstrap(
+        clusters,
+        null_value=Decimal("0.25"),
+        direction="less",
+        resamples=MEDIAN_RESAMPLES,
+        seed=99,
+        ci_level=0.80,
+    )
+    assert result.n_clusters == 3
+    assert result.resamples == MEDIAN_RESAMPLES
+    assert result.seed == 99
+    assert result.null_value == Decimal("0.25")
+    assert result.direction == "less"
+    assert result.ci_level == 0.80
+
+
+def test_cluster_median_bootstrap_rejects_unusable_input() -> None:
+    with pytest.raises(ValueError):
+        cluster_median_bootstrap(
+            [],
+            null_value=Decimal("0"),
+            direction="greater",
+            resamples=MEDIAN_RESAMPLES,
+            seed=1,
+            ci_level=FIXTURE_CI_LEVEL,
+        )
+    with pytest.raises(ValueError, match="quiet"):
+        cluster_median_bootstrap(
+            [_pool("den", "1"), ValueCluster(cluster="quiet", values=())],
+            null_value=Decimal("0"),
+            direction="greater",
+            resamples=MEDIAN_RESAMPLES,
+            seed=1,
+            ci_level=FIXTURE_CI_LEVEL,
+        )
+    with pytest.raises(ValueError):
+        cluster_median_bootstrap(
+            [_pool("den", "1")],
+            null_value=Decimal("0"),
+            direction="sideways",
+            resamples=MEDIAN_RESAMPLES,
+            seed=1,
+            ci_level=FIXTURE_CI_LEVEL,
+        )
 
 
 def test_blocks_are_contiguous_days_that_never_span_a_corridor() -> None:
