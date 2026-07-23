@@ -242,6 +242,7 @@ class Screened:
     candidates: int
     excluded: int
     out_of_scope: int
+    out_of_window: int
     by_class: Mapping[str, int]
 
     @property
@@ -251,6 +252,17 @@ class Screened:
 
 def intersects_exclusion(scope: RunScope, start: datetime, end: datetime) -> bool:
     return intersects(scope.merged, start, end)
+
+
+# A market lists and prints about 41 hours before it closes, so its own rows reach the tape well
+# before its observation window opens, and those rows are not evidence about the day it settles on.
+def within_event_day(scope: RunScope, window: EvidenceWindow) -> bool:
+    day = scope.event_days.get((window.series, window.event_date))
+    if day is None:
+        raise ValueError(
+            f"{window.series} {window.event_date.isoformat()} is not in the frozen scope"
+        )
+    return day.window_start <= window.start and window.end <= day.window_end
 
 
 def split_of(scope: RunScope, series: str, event_date: date) -> str:
@@ -264,10 +276,14 @@ def screen_windows(scope: RunScope, windows: Sequence[EvidenceWindow]) -> Screen
     kept = []
     excluded = 0
     out_of_scope = 0
+    out_of_window = 0
     by_class = dict.fromkeys(scope.by_class, 0)
     for window in windows:
         if (window.series, window.event_date) not in scope.event_days:
             out_of_scope += 1
+            continue
+        if not within_event_day(scope, window):
+            out_of_window += 1
             continue
         if not intersects(scope.merged, window.start, window.end):
             kept.append(window)
@@ -281,6 +297,7 @@ def screen_windows(scope: RunScope, windows: Sequence[EvidenceWindow]) -> Screen
         candidates=len(windows),
         excluded=excluded,
         out_of_scope=out_of_scope,
+        out_of_window=out_of_window,
         by_class=by_class,
     )
 

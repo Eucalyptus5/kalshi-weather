@@ -101,10 +101,10 @@ class Tally:
         self.n_prints += len(outcomes)
         self.contracts += sum((item.contracts for item in outcomes), Decimal(0))
 
-    def screen(self, screened: Screened, out_of_window: int) -> None:
+    def screen(self, screened: Screened) -> None:
         self.candidates += screened.candidates
         self.excluded += screened.excluded
-        self.out_of_window += out_of_window
+        self.out_of_window += screened.out_of_window
         for name, count in screened.by_class.items():
             self.by_class[name] = self.by_class.get(name, 0) + count
 
@@ -303,9 +303,9 @@ def sweep_prints(
                     windows = resolve_horizon(book, prints, anchors, horizon_s=horizon_s)
                     tally = tallies[(split, horizon_s)]
                     tally.counts += windows.counts
-                    positions, offered, dropped = _offer(windows, scope, series_root, event_date)
+                    positions, offered = _offer(windows, series_root, event_date)
                     screened = screen_windows(scope, offered)
-                    tally.screen(screened, dropped)
+                    tally.screen(screened)
                     usable = np.zeros(windows.usable.size, dtype=bool)
                     usable[positions[keep_mask(offered, screened.kept)]] = True
                     tally.add(
@@ -609,20 +609,18 @@ def _pool_classes(discovery: Mapping[str, int], holdout: Mapping[str, int]) -> d
 
 
 def _offer(
-    windows: HorizonWindows, scope: RunScope, series: str, event_date: date
-) -> tuple[np.ndarray, list[EvidenceWindow], int]:
-    positions = []
-    offered = []
-    dropped = 0
-    for position in np.flatnonzero(windows.usable):
-        start = _stamp(windows.start_us[position])
-        end = _stamp(windows.end_us[position])
-        if start < scope.scope_start or end > scope.scope_end:
-            dropped += 1
-            continue
-        positions.append(position)
-        offered.append(EvidenceWindow(series=series, event_date=event_date, start=start, end=end))
-    return np.array(positions, dtype=np.int64), offered, dropped
+    windows: HorizonWindows, series: str, event_date: date
+) -> tuple[np.ndarray, list[EvidenceWindow]]:
+    positions = np.flatnonzero(windows.usable)
+    return positions, [
+        EvidenceWindow(
+            series=series,
+            event_date=event_date,
+            start=_stamp(windows.start_us[position]),
+            end=_stamp(windows.end_us[position]),
+        )
+        for position in positions
+    ]
 
 
 def _stamp(value: np.int64) -> datetime:

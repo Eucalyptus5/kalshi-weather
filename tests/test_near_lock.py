@@ -391,7 +391,7 @@ def test_the_gating_sweep_does_not_move_when_no_lock_windows_are_supplied(
         (SERIES, DISCOVERY_DAY): frozenset({DAY_TICKER}),
         (SERIES, HOLDOUT_DAY): frozenset({NEXT_TICKER}),
     }
-    assert sweep.tallies[(DISCOVERY, PRIMARY_HORIZON_S)].candidates == 3
+    assert sweep.tallies[(DISCOVERY, PRIMARY_HORIZON_S)].candidates == 4
     assert sweep.tallies[(DISCOVERY, PRIMARY_HORIZON_S)].excluded == 1
     assert {
         horizon_s: readout(

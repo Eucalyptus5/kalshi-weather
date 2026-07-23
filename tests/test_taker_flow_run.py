@@ -174,6 +174,14 @@ FRACTIONAL_TRADES_DAY = [
     trade(141, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 2), 12600, count="4"),
 ]
 
+EARLY_TOUCH_DAY = [
+    touch(90, NEXT_TICKER, when(DISCOVERY_DAY, 18, 0, 0), 12000, "0.50", "0.48"),
+    touch(91, NEXT_TICKER, when(DISCOVERY_DAY, 18, 0, 2), 13000, "0.50", "0.48"),
+    touch(92, NEXT_TICKER, when(DISCOVERY_DAY, 18, 1, 2), 16000, "0.55", "0.43"),
+    touch(93, NEXT_TICKER, when(DISCOVERY_DAY, 18, 10, 0), 18000, "0.60", "0.38"),
+]
+EARLY_TRADES_DAY = [trade(160, NEXT_TICKER, when(DISCOVERY_DAY, 18, 0, 1), 12500)]
+
 BOOKLESS_TOUCH_DAY = [touch(70, NEXT_TICKER, when(DISCOVERY_DAY, 18, 0, 0), 12000, "0.50", "0.48")]
 BOOKLESS_TRADES_DAY = [
     trade(130, DAY_TICKER, when(DISCOVERY_DAY, 18, 0, 1), 12500),
@@ -257,6 +265,13 @@ def bookless_artifacts(tmp_path: Path) -> Path:
     write_partition(
         root, DISCOVERY_DAY, 1, BOOKLESS_TRADES_DAY, kind="trades", schema=TRADES_SCHEMA
     )
+    return root
+
+
+def early_listing_artifacts(tmp_path: Path) -> Path:
+    root = tmp_path / "early_listing"
+    write_partition(root, DISCOVERY_DAY, 1, EARLY_TOUCH_DAY)
+    write_partition(root, DISCOVERY_DAY, 1, EARLY_TRADES_DAY, kind="trades", schema=TRADES_SCHEMA)
     return root
 
 
@@ -415,7 +430,7 @@ def test_the_two_splits_carry_their_own_event_days(swept: Sweep) -> None:
 def test_a_window_over_an_exclusion_is_dropped_whole_and_counted_by_class(swept: Sweep) -> None:
     tally = swept.tallies[(DISCOVERY, PRIMARY_HORIZON_S)]
 
-    assert tally.candidates == 3
+    assert tally.candidates == 4
     assert tally.excluded == 1
     assert tally.by_class[RESUBSCRIBE_BLIND] == 1
     assert tally.by_class[QUIET_BAND] == 0
@@ -423,16 +438,38 @@ def test_a_window_over_an_exclusion_is_dropped_whole_and_counted_by_class(swept:
     assert tally.contracts == Decimal("20")
 
 
-def test_a_window_opening_before_the_scope_start_is_dropped_as_out_of_window(swept: Sweep) -> None:
+def test_a_window_opening_before_its_event_day_is_dropped_as_out_of_window(
+    swept: Sweep, scope: RunScope
+) -> None:
+    assert scope.event_days[(SERIES, DISCOVERY_DAY)].window_start == when(DISCOVERY_DAY, 6, 0, 0)
     for horizon_s in HORIZONS_S:
         assert swept.tallies[(DISCOVERY, horizon_s)].out_of_window == 1
 
 
-def test_a_window_running_past_the_scope_end_is_dropped_as_out_of_window(swept: Sweep) -> None:
+def test_a_window_running_past_its_event_day_is_dropped_as_out_of_window(
+    swept: Sweep, scope: RunScope
+) -> None:
+    assert scope.event_days[(SERIES, HOLDOUT_DAY)].window_end == when(LATE_DAY, 6, 0, 0)
     assert swept.tallies[(HOLDOUT, PRIMARY_HORIZON_S)].out_of_window == 1
     assert swept.tallies[(HOLDOUT, PRIMARY_HORIZON_S)].n_prints == 1
     assert swept.tallies[(HOLDOUT, 1)].out_of_window == 0
     assert swept.tallies[(HOLDOUT, 1)].n_prints == 2
+
+
+def test_a_market_printing_before_its_own_event_day_opens_never_reaches_a_cluster(
+    tmp_path: Path, scope: RunScope
+) -> None:
+    sweep = sweep_prints(scope, early_listing_artifacts(tmp_path))
+
+    assert when(DISCOVERY_DAY, 18, 10, 0) < scope.event_days[(SERIES, HOLDOUT_DAY)].window_start
+    assert sweep.in_scope == {DISCOVERY: 0, HOLDOUT: 1}
+    for horizon_s in HORIZONS_S:
+        tally = sweep.tallies[(HOLDOUT, horizon_s)]
+        assert tally.candidates == 1
+        assert tally.out_of_window == 1
+        assert tally.excluded == 0
+        assert tally.n_prints == 0
+        assert tally.clusters() == ()
 
 
 def test_the_rolling_buffer_reaches_an_anchor_on_the_next_arrival_date(swept: Sweep) -> None:

@@ -146,7 +146,9 @@ def test_the_results_carry_the_readout_the_question_asked_for(
     assert results["discovery"]["contracts"] == "20.00"
     assert results["kernel_drops"]["fractional_size_prints"] == 0
     assert results["exclusions"]["by_class"][RESUBSCRIBE_BLIND] == 1
-    assert results["exclusions"]["excluded_fraction"] == "0.25"
+    assert results["exclusions"]["candidates"] == 6
+    assert results["exclusions"]["excluded"] == 1
+    assert Decimal(results["exclusions"]["excluded_fraction"]) == Decimal(1) / Decimal(6)
     assert results["cities"] == [SERIES]
     assert results["tickers_per_city_day"] == {
         f"{SERIES} {DISCOVERY_DAY.isoformat()}": 1,

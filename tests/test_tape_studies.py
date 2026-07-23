@@ -44,6 +44,7 @@ from bot.lag.tape_studies import (
     screen_windows,
     split_of,
     window_dates,
+    within_event_day,
 )
 from bot.replay.artifacts import (
     BOUNDARIES_SCHEMA,
@@ -768,6 +769,111 @@ def test_an_out_of_scope_event_day_is_counted_apart_from_an_exclusion(scope: Run
     assert screened.out_of_scope == 2
     assert screened.excluded == 1
     assert screened.kept == ()
+
+
+def test_a_window_inside_its_event_day_is_kept(scope: RunScope) -> None:
+    day = scope.event_days[(SERIES, DISCOVERY_DAY)]
+    inside = evidence(day.window_start + timedelta(hours=1), day.window_start + timedelta(hours=2))
+
+    screened = screen_windows(scope, [inside])
+
+    assert within_event_day(scope, inside)
+    assert screened.kept == (inside,)
+    assert screened.candidates == 1
+    assert screened.out_of_window == 0
+
+
+def test_a_window_sitting_on_its_event_day_endpoints_is_kept(scope: RunScope) -> None:
+    day = scope.event_days[(SERIES, DISCOVERY_DAY)]
+    opening = evidence(day.window_start, day.window_start + timedelta(hours=6))
+    closing = evidence(day.window_end - timedelta(hours=4), day.window_end)
+
+    screened = screen_windows(scope, [opening, closing])
+
+    assert within_event_day(scope, opening)
+    assert within_event_day(scope, closing)
+    assert screened.kept == (opening, closing)
+    assert screened.out_of_window == 0
+
+
+def test_a_window_opening_one_microsecond_before_its_event_day_is_out_of_window(
+    scope: RunScope,
+) -> None:
+    day = scope.event_days[(SERIES, DISCOVERY_DAY)]
+    early = evidence(day.window_start - MICROSECOND, day.window_start + timedelta(hours=6))
+
+    screened = screen_windows(scope, [early])
+
+    assert not within_event_day(scope, early)
+    assert screened.candidates == 1
+    assert screened.out_of_window == 1
+    assert screened.excluded == 0
+    assert screened.out_of_scope == 0
+    assert screened.kept == ()
+
+
+def test_a_window_closing_one_microsecond_after_its_event_day_is_out_of_window(
+    scope: RunScope,
+) -> None:
+    day = scope.event_days[(SERIES, DISCOVERY_DAY)]
+    late = evidence(day.window_end - timedelta(hours=4), day.window_end + MICROSECOND)
+
+    screened = screen_windows(scope, [late])
+
+    assert not within_event_day(scope, late)
+    assert screened.out_of_window == 1
+    assert screened.excluded == 0
+    assert screened.kept == ()
+
+
+def test_a_window_outside_its_event_day_is_never_charged_to_an_exclusion(scope: RunScope) -> None:
+    early = evidence(
+        QUIET_START + timedelta(minutes=30),
+        QUIET_END - timedelta(minutes=30),
+        event_date=HOLDOUT_DAY,
+    )
+
+    screened = screen_windows(scope, [early])
+
+    assert intersects_exclusion(scope, early.start, early.end)
+    assert early.end < scope.event_days[(SERIES, HOLDOUT_DAY)].window_start
+    assert screened.out_of_window == 1
+    assert screened.excluded == 0
+    assert set(screened.by_class.values()) == {0}
+    assert screened.kept == ()
+
+
+def test_an_event_day_the_scope_never_froze_is_out_of_scope_not_out_of_window(
+    scope: RunScope,
+) -> None:
+    stranger = evidence(
+        datetime(2026, 7, 25, 12, tzinfo=UTC),
+        datetime(2026, 7, 25, 13, tzinfo=UTC),
+        event_date=STRANGER_DAY,
+    )
+
+    screened = screen_windows(scope, [stranger])
+
+    assert screened.out_of_scope == 1
+    assert screened.out_of_window == 0
+    with pytest.raises(ValueError, match=STRANGER_DAY.isoformat()):
+        within_event_day(scope, stranger)
+
+
+def test_the_kept_windows_hold_the_order_the_question_offered(scope: RunScope) -> None:
+    day = scope.event_days[(SERIES, DISCOVERY_DAY)]
+    first = evidence(day.window_start + timedelta(hours=1), day.window_start + timedelta(hours=2))
+    second = evidence(day.window_start + timedelta(hours=3), day.window_start + timedelta(hours=4))
+    early = evidence(day.window_start - MICROSECOND, day.window_start + timedelta(minutes=1))
+    stranger = evidence(GAP_START, GAP_END, event_date=STRANGER_DAY)
+
+    screened = screen_windows(scope, [early, first, stranger, evidence(GAP_START, GAP_END), second])
+
+    assert screened.kept == (first, second)
+    assert screened.candidates == 5
+    assert screened.out_of_window == 1
+    assert screened.out_of_scope == 1
+    assert screened.excluded == 1
 
 
 def test_a_window_meeting_two_classes_at_once_counts_in_both(scope: RunScope) -> None:
