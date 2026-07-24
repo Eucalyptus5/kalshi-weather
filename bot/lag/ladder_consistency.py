@@ -237,8 +237,7 @@ def _episode(
     magnitude = states.magnitude[rows]
     depth = states.depth[rows]
     duration_us = int(tape.received_us[close] - tape.received_us[rows[0]])
-    scored = duration_us >= persist_us and int(magnitude.min()) > legs * _TICKS_PER_CENT
-    at, floor, excess = _worst_state(magnitude, depth, states.prices[rows], exact=scored)
+    at, floor, excess = _worst_state(magnitude, depth, states.prices[rows])
     cents = Decimal(int(magnitude[at])) / _TICKS_PER_CENT
     contracts = Decimal(int(depth[at])) / SIZE_UNITS
     return Episode(
@@ -263,16 +262,11 @@ def _episode(
 # The episode is summarised at its worst state rather than its first or its widest: excess is the
 # minimum over the run of magnitude less the floor, and the magnitude, depth and floor reported are
 # the ones at that state. An episode tradeable under this reading was tradeable at every instant it
-# held, and the reading takes no threshold off the tape. A run that cannot clear the floor anywhere
-# - shorter than t_persist, or never wider than the one tick per leg the floor already charges -
-# skips the per-state fee arithmetic and reports its thinnest magnitude instead.
+# held, and the reading takes no threshold off the tape. Runs that fail a gate are scanned too, so
+# no episode reports a magnitude and a floor read at different states.
 def _worst_state(
-    magnitude: np.ndarray, depth: np.ndarray, prices: np.ndarray, *, exact: bool
+    magnitude: np.ndarray, depth: np.ndarray, prices: np.ndarray
 ) -> tuple[int, Decimal, Decimal]:
-    if not exact:
-        at = int(np.argmin(magnitude))
-        floor = _floor_at(depth[at], prices[at])
-        return at, floor, Decimal(int(magnitude[at])) / _TICKS_PER_CENT - floor
     at = 0
     worst_floor = _floor_at(depth[0], prices[0])
     worst = Decimal(int(magnitude[0])) / _TICKS_PER_CENT - worst_floor

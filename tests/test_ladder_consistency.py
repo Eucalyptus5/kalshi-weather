@@ -242,11 +242,14 @@ def test_crossed_tail_bids_are_one_monotonicity_episode():
     assert episode.family == "monotonicity"
 
 
-def test_empty_no_side_cannot_make_a_sum_buy():
-    book = list(BUY)
+def test_a_leg_with_no_resting_no_bid_holds_the_ask_sum_at_a_dollar():
+    cheapest = ("0.0000", "0.00", "0.0001", "50")
+    book = [cheapest] * LADDER_LEGS
     book[2] = ("0.28", "50", "1.0000", "0.00")
-    result = run(opening(book) + [quote_row(6, 5, BUY[5])])
+    assert sum(Decimal(quote[2]) for quote in book) >= Decimal("1")
+    result = run(opening(book) + [quote_row(6, 5, cheapest)])
     assert [episode for episode in result.episodes if episode.stream == SUM_BUY] == []
+    assert result.censored[SUM_BUY] == 0
 
 
 def test_unquoted_leg_cannot_form_a_sell_package():
@@ -296,6 +299,23 @@ def test_run_open_at_the_last_row_is_censored():
     assert [episode for episode in result.episodes if episode.stream == SUM_BUY] == []
     assert result.censored[SUM_BUY] == 1
     assert result.censored[SUM_SELL] == 0
+
+
+@pytest.mark.parametrize(
+    ("stream", "book"),
+    [
+        pytest.param(SUM_SELL, SELL, id="sum_sell"),
+        pytest.param(
+            MONOTONICITY,
+            tails(("0.52", "50", "0.54", "50"), ("0.52", "50", "0.54", "50")),
+            id="monotonicity",
+        ),
+    ],
+)
+def test_open_sell_and_monotonicity_runs_are_censored(stream, book):
+    result = run(opening(book))
+    assert result.episodes == ()
+    assert result.censored[stream] == 1
 
 
 def sell_book(depth: str) -> tuple[Quote, ...]:
@@ -353,6 +373,42 @@ def test_worst_state_governs_the_score():
     first = fee_floor_cents(contracts=Decimal("100"), prices=[Decimal("0.02"), Decimal("0.12")])
     assert Decimal("10") - first > 0
     assert Decimal("100") >= DEPTH_MIN
+
+
+def test_a_run_under_persistence_still_scores_at_its_worst_state():
+    rows = opening(tails(DEEP_BELOW, WIDE_ABOVE)) + [
+        quote_row(6, 5, ("0.13", "0.01", "0.15", "0.01")),
+        quote_row(7, 5, ("0.01", "100", "0.03", "100")),
+    ]
+    episode = only(run(rows, t_persist_s=Decimal("3")), MONOTONICITY)
+    assert episode.states == 2
+    assert episode.duration_s == Decimal("2")
+    assert episode.magnitude_cents == Decimal("11")
+    assert episode.depth == Decimal("0.01")
+    assert episode.fee_floor_cents == Decimal("202")
+    assert episode.excess_cents == Decimal("-191")
+    assert episode.tradeable is False
+
+    thinnest = fee_floor_cents(contracts=Decimal("100"), prices=[Decimal("0.02"), Decimal("0.12")])
+    assert Decimal("10") - thinnest > 0
+
+
+def test_every_episode_reports_excess_as_its_magnitude_less_its_floor():
+    rows = opening(BUY) + [
+        quote_row(6, 5, ("0.06", "50", "0.20", "50")),
+        quote_row(7, 5, ("0.06", "50", "0.08", "17")),
+        quote_row(8, 5, ("0.06", "50", "0.20", "50")),
+        quote_row(9, 5, ("0.06", "50", "0.08", "3.5")),
+        quote_row(10, 5, ("0.06", "50", "0.20", "50")),
+    ]
+    episodes = run(rows).episodes
+    assert [episode.depth for episode in episodes] == [
+        Decimal("50"),
+        Decimal("17"),
+        Decimal("3.5"),
+    ]
+    for episode in episodes:
+        assert episode.excess_cents == episode.magnitude_cents - episode.fee_floor_cents
 
 
 @pytest.mark.parametrize(
