@@ -722,10 +722,26 @@ def reference_digest() -> str:
     observations = _corridor(
         "north", [0, 1, 2, 3], [Decimal("3"), Decimal("2"), Decimal("0"), Decimal("-1")]
     ) + _corridor("south", [1, 2], [Decimal("4"), Decimal("1")])
+    pools = [
+        _pool("den", "2", "3", "5"),
+        _pool("aus", "-1", "4"),
+        _pool("nyc", "1"),
+        _pool("chi", "0", "6", "-3", "7"),
+    ]
     payload = [
         asdict(
             cluster_bootstrap(
                 clusters,
+                null_value=Decimal("0"),
+                direction="greater",
+                resamples=FIXTURE_RESAMPLES,
+                seed=424242,
+                ci_level=FIXTURE_CI_LEVEL,
+            )
+        ),
+        asdict(
+            cluster_median_bootstrap(
+                pools,
                 null_value=Decimal("0"),
                 direction="greater",
                 resamples=FIXTURE_RESAMPLES,

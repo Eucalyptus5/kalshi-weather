@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from statistics import median
 from typing import Literal
 
 import numpy as np
@@ -145,9 +146,7 @@ def cluster_median_bootstrap(
     if silent:
         raise ValueError("clusters carry no values: " + ", ".join(silent))
 
-    ordered = sorted(value for item in clusters for value in item.values)
-    middle = len(ordered) // 2
-    estimate = ordered[middle] if len(ordered) % 2 else (ordered[middle - 1] + ordered[middle]) / 2
+    estimate = median(value for item in clusters for value in item.values)
 
     pooled = np.array([float(value) for item in clusters for value in item.values])
     bounds = np.cumsum([0, *(len(item.values) for item in clusters)])
