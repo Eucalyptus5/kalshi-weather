@@ -1,6 +1,6 @@
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Sequence
 
 import pyarrow as pa
 import pytest
@@ -323,8 +323,8 @@ def sell_book(depth: str) -> tuple[Quote, ...]:
     return (quoted, quoted, quoted, quoted, quoted, ("0.45", depth, "0.47", depth))
 
 
-def lock_rows(above: Quote, closing: Quote, *, seconds: int = 6) -> list[dict]:
-    return opening(tails(DEEP_BELOW, above)) + [quote_row(seconds, 5, closing)]
+def lock_rows(above: Quote, closing: Quote) -> list[dict]:
+    return opening(tails(DEEP_BELOW, above)) + [quote_row(6, 5, closing)]
 
 
 def test_episode_clearing_every_gate_is_tradeable():

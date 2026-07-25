@@ -220,8 +220,10 @@ def _stream_states(tape: LadderTape, stream: str) -> _StreamStates:
         depth=np.minimum(
             tape.yes_bid_depth[:, tape.ladder.below], tape.yes_bid_depth[:, tape.ladder.above]
         ),
-        # The lower nested claim is the NO side of the below tail, lifted at one minus its YES bid.
-        prices=np.column_stack((PRICE_TICKS - below, above)),
+        # Both legs are sold at their resting YES bid, and published_taker_fee is symmetric in P
+        # and 1 - P, so reading the below leg as its NO side lifted at one minus that bid prices
+        # the package identically.
+        prices=np.column_stack((below, above)),
     )
 
 
