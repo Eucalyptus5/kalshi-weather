@@ -36,6 +36,7 @@ from bot.lag.tape_studies import (
     RunScope,
     assemble_run_inputs,
     intersects_exclusion,
+    keep_mask,
     load_run_scope,
     partition_files,
     partition_rows,
@@ -874,6 +875,46 @@ def test_the_kept_windows_hold_the_order_the_question_offered(scope: RunScope) -
     assert screened.out_of_window == 1
     assert screened.out_of_scope == 1
     assert screened.excluded == 1
+
+
+def test_the_keep_mask_recovers_the_windows_the_screen_kept(scope: RunScope) -> None:
+    clear = evidence(NOON, NOON + timedelta(minutes=1))
+    hit = evidence(GAP_START + timedelta(minutes=2), GAP_START + timedelta(minutes=5))
+    offered = [clear, hit, clear]
+
+    screened = screen_windows(scope, offered)
+
+    assert screened.excluded == 1
+    assert keep_mask(offered, screened.kept).tolist() == [True, False, True]
+
+
+def test_two_windows_sharing_a_span_are_kept_or_dropped_together(scope: RunScope) -> None:
+    clear = evidence(NOON, NOON + timedelta(minutes=1))
+    hit = evidence(GAP_START + timedelta(minutes=2), GAP_START + timedelta(minutes=5))
+
+    kept_twice = screen_windows(scope, [clear, clear])
+    dropped_twice = screen_windows(scope, [hit, hit])
+
+    assert keep_mask([clear, clear], kept_twice.kept).tolist() == [True, True]
+    assert keep_mask([hit, hit], dropped_twice.kept).tolist() == [False, False]
+
+
+def test_the_keep_mask_survives_a_dropped_first_window(scope: RunScope) -> None:
+    hit = evidence(GAP_START + timedelta(minutes=2), GAP_START + timedelta(minutes=5))
+    clear = evidence(NOON, NOON + timedelta(minutes=1))
+    offered = [hit, clear]
+
+    screened = screen_windows(scope, offered)
+
+    assert keep_mask(offered, screened.kept).tolist() == [False, True]
+
+
+def test_a_kept_list_the_offer_never_carried_raises() -> None:
+    offered = [evidence(NOON, NOON + timedelta(minutes=1))]
+    stranger = [evidence(NOON + timedelta(hours=1), NOON + timedelta(hours=1, minutes=1))]
+
+    with pytest.raises(ValueError):
+        keep_mask(offered, stranger)
 
 
 def test_a_window_meeting_two_classes_at_once_counts_in_both(scope: RunScope) -> None:

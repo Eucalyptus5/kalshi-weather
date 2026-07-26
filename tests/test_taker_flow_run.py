@@ -28,13 +28,12 @@ from bot.lag.taker_flow_run import (
     Tally,
     bootstrap_of,
     decide,
-    keep_mask,
     read_touch,
     readout,
     sweep_prints,
 )
 from bot.lag.tape_stats import ClusterAggregate, evaluate_holdout
-from bot.lag.tape_studies import EvidenceWindow, RunScope, load_run_scope, screen_windows
+from bot.lag.tape_studies import RunScope, load_run_scope
 from bot.replay.artifacts import TOUCH_SCHEMA, TRADES_SCHEMA
 from bot.replay.run_scope import (
     DISCOVERY,
@@ -318,10 +317,6 @@ def violation_artifacts(tmp_path: Path) -> Path:
     return root
 
 
-def evidence(start: datetime, end: datetime, event_date: date = DISCOVERY_DAY) -> EvidenceWindow:
-    return EvidenceWindow(series=SERIES, event_date=event_date, start=start, end=end)
-
-
 def clusters_of(*totals: tuple[str, str, str]) -> tuple[ClusterAggregate, ...]:
     return tuple(
         ClusterAggregate(cluster=name, total=Decimal(total), weight=Decimal(weight))
@@ -358,46 +353,6 @@ def scope(tmp_path: Path) -> RunScope:
 @pytest.fixture
 def swept(tmp_path: Path, scope: RunScope) -> Sweep:
     return sweep_prints(scope, artifacts_dir(tmp_path))
-
-
-def test_the_keep_mask_recovers_the_windows_the_screen_kept(scope: RunScope) -> None:
-    clear = evidence(when(DISCOVERY_DAY, 18, 0, 0), when(DISCOVERY_DAY, 18, 1, 0))
-    hit = evidence(BLINK - timedelta(minutes=1), BLINK + timedelta(minutes=1))
-    offered = [clear, hit, clear]
-
-    screened = screen_windows(scope, offered)
-
-    assert screened.excluded == 1
-    assert keep_mask(offered, screened.kept).tolist() == [True, False, True]
-
-
-def test_two_prints_sharing_a_window_are_kept_or_dropped_together(scope: RunScope) -> None:
-    clear = evidence(when(DISCOVERY_DAY, 18, 0, 0), when(DISCOVERY_DAY, 18, 1, 0))
-    hit = evidence(BLINK - timedelta(minutes=1), BLINK + timedelta(minutes=1))
-
-    kept_twice = screen_windows(scope, [clear, clear])
-    dropped_twice = screen_windows(scope, [hit, hit])
-
-    assert keep_mask([clear, clear], kept_twice.kept).tolist() == [True, True]
-    assert keep_mask([hit, hit], dropped_twice.kept).tolist() == [False, False]
-
-
-def test_the_keep_mask_survives_a_dropped_first_window(scope: RunScope) -> None:
-    hit = evidence(BLINK - timedelta(minutes=1), BLINK + timedelta(minutes=1))
-    clear = evidence(when(DISCOVERY_DAY, 18, 0, 0), when(DISCOVERY_DAY, 18, 1, 0))
-    offered = [hit, clear]
-
-    screened = screen_windows(scope, offered)
-
-    assert keep_mask(offered, screened.kept).tolist() == [False, True]
-
-
-def test_a_kept_list_the_offer_never_carried_raises() -> None:
-    offered = [evidence(when(DISCOVERY_DAY, 18, 0, 0), when(DISCOVERY_DAY, 18, 1, 0))]
-    stranger = [evidence(when(DISCOVERY_DAY, 19, 0, 0), when(DISCOVERY_DAY, 19, 1, 0))]
-
-    with pytest.raises(ValueError):
-        keep_mask(offered, stranger)
 
 
 def test_the_hygiene_counts_come_off_the_whole_root(swept: Sweep) -> None:

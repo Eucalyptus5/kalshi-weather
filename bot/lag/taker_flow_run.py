@@ -49,6 +49,7 @@ from bot.lag.tape_studies import (
     RunScope,
     Screened,
     assemble_run_inputs,
+    keep_mask,
     load_run_scope,
     partition_files,
     read_window,
@@ -181,20 +182,6 @@ def read_touch(artifacts: Path, series_root: str, day: date) -> pa.Table:
     if not tables:
         return TOUCH_SCHEMA.empty_table().select(columns)
     return pa.concat_tables(tables)
-
-
-# screen_windows keeps its input order, so walking the offer against what came back in one pass
-# recovers the mask; two prints sharing a window screen alike, so a greedy match cannot misalign.
-def keep_mask(offered: Sequence[EvidenceWindow], kept: Sequence[EvidenceWindow]) -> np.ndarray:
-    mask = np.zeros(len(offered), dtype=bool)
-    cursor = 0
-    for index, window in enumerate(offered):
-        if cursor < len(kept) and kept[cursor] == window:
-            mask[index] = True
-            cursor += 1
-    if cursor != len(kept):
-        raise ValueError("the screened windows are not a subsequence of the ones offered")
-    return mask
 
 
 def sweep_prints(

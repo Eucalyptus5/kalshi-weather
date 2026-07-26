@@ -27,7 +27,6 @@ from bot.lag.ladder_consistency import (
 )
 from bot.lag.read_rtt import FloorSource, LatencyFloor
 from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME, write_manifest
-from bot.lag.taker_flow_run import keep_mask
 from bot.lag.tape_stats import (
     ALPHA,
     HOLDOUT_ALPHA,
@@ -45,6 +44,7 @@ from bot.lag.tape_studies import (
     RunScope,
     Screened,
     assemble_run_inputs,
+    keep_mask,
     load_run_scope,
     partition_files,
     screen_windows,

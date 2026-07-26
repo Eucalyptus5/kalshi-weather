@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -300,6 +301,20 @@ def screen_windows(scope: RunScope, windows: Sequence[EvidenceWindow]) -> Screen
         out_of_window=out_of_window,
         by_class=by_class,
     )
+
+
+# screen_windows keeps its input order, so walking the offer against what came back in one pass
+# recovers the mask; two prints sharing a window screen alike, so a greedy match cannot misalign.
+def keep_mask(offered: Sequence[EvidenceWindow], kept: Sequence[EvidenceWindow]) -> np.ndarray:
+    mask = np.zeros(len(offered), dtype=bool)
+    cursor = 0
+    for index, window in enumerate(offered):
+        if cursor < len(kept) and kept[cursor] == window:
+            mask[index] = True
+            cursor += 1
+    if cursor != len(kept):
+        raise ValueError("the screened windows are not a subsequence of the ones offered")
+    return mask
 
 
 def assemble_run_inputs(
