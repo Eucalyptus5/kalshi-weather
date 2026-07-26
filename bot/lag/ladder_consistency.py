@@ -14,7 +14,7 @@ LADDER_LEGS: int = 6
 DEPTH_MIN: Decimal = Decimal("10")
 EXCESS_BAR: Decimal = Decimal("2")
 CITY_DAY_MIN_DISCOVERY: int = 30
-CITY_DAY_MIN_HOLDOUT: int = 15
+CITY_DAY_MIN_HOLDOUT: int = (CITY_DAY_MIN_DISCOVERY + 1) // 2
 SPREAD_TICKS_PER_LEG: Decimal = Decimal("1")
 
 SUM_BUY = "sum_buy"

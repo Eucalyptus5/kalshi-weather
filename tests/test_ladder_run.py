@@ -21,6 +21,7 @@ from bot.lag.ladder_run import (
     MICROS_PER_S,
     NO_ESTIMATE,
     PASS,
+    QUANTILES,
     TICKS_PER_CENT,
     ZERO_ESTIMATE,
     Decision,
@@ -600,6 +601,17 @@ def test_the_quantiles_are_nearest_rank_over_an_even_count(name: str, expected: 
     assert summary["count"] == 4
     assert summary[name] == expected
     assert Decimal(summary["median"]) != (Decimal("2") + Decimal("3")) / 2
+
+
+def test_every_quantile_label_reports_the_fraction_it_names() -> None:
+    values = [np.arange(1, 101, dtype=np.int64) * TICKS_PER_CENT]
+
+    summary = summarise(values, TICKS_PER_CENT)
+
+    assert list(summary) == ["count", "min", *(name for name, _, _ in QUANTILES), "max"]
+    assert {name: Decimal(summary[name]) for name, _, _ in QUANTILES} == {
+        name: Decimal(numerator * 100 // denominator) for name, numerator, denominator in QUANTILES
+    }
 
 
 def test_the_quantiles_of_a_single_value_are_that_value() -> None:

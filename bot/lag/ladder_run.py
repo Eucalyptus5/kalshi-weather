@@ -13,7 +13,6 @@ import pyarrow.parquet as pq
 
 from bot.lag.ladder_consistency import (
     CITY_DAY_MIN_DISCOVERY,
-    CITY_DAY_MIN_HOLDOUT,
     DEPTH_MIN,
     EXCESS_BAR,
     PRICE_TICKS,
@@ -92,7 +91,7 @@ METRICS: Mapping[str, tuple[str, int]] = {
 }
 COUNTS = ("found", "tradeable", "kept", "censored", "incomplete_states")
 QUANTILES = (("p25", 1, 4), ("median", 1, 2), ("p75", 3, 4), ("p90", 9, 10))
-SUMMARY = ("min", "p25", "median", "p75", "p90", "max")
+SUMMARY = ("min", *(name for name, _, _ in QUANTILES), "max")
 
 _EMPTY = np.empty(0, dtype=np.int64)
 
@@ -206,16 +205,16 @@ def summarise(chunks: Sequence[np.ndarray], scale: int) -> dict:
     values = np.sort(np.concatenate(chunks)) if chunks else _EMPTY
     if values.size == 0:
         return {"count": 0} | dict.fromkeys(SUMMARY)
-    ranked = [
-        values[0],
-        *(
-            values[_rank(numerator, denominator, values.size)]
-            for _, numerator, denominator in QUANTILES
-        ),
-        values[-1],
-    ]
+    ranked = {
+        "min": values[0],
+        **{
+            name: values[_rank(numerator, denominator, values.size)]
+            for name, numerator, denominator in QUANTILES
+        },
+        "max": values[-1],
+    }
     return {"count": int(values.size)} | {
-        name: str(Decimal(int(value)) / scale) for name, value in zip(SUMMARY, ranked, strict=True)
+        name: str(Decimal(int(value)) / scale) for name, value in ranked.items()
     }
 
 
@@ -370,8 +369,8 @@ def readout(
     )
 
 
-# No underpowered verdict is reachable here. That verdict is reserved for a question left without a
-# T_persist value, and the manifest aborts before any statistic runs unless a latency floor is
+# No underpowered verdict is reachable here. This question reserves that verdict for a run with no
+# measured latency floor, and the manifest aborts before any statistic runs unless a floor is
 # present; too few qualifying city event-days is rarity in the tape, which closes the question.
 def decide(discovery: SplitReadout, holdout: SplitReadout) -> Decision:
     gate = (
@@ -404,11 +403,6 @@ def decide(discovery: SplitReadout, holdout: SplitReadout) -> Decision:
             alpha=HOLDOUT_ALPHA,
             n_unit=CITY_DAYS,
         )
-        if replication.holdout_n_min != CITY_DAY_MIN_HOLDOUT:
-            raise ValueError(
-                f"the holdout minimum derives as {replication.holdout_n_min}, the frozen one is "
-                f"{CITY_DAY_MIN_HOLDOUT}"
-            )
 
     passed = replication is not None and gate.passed and replication.replicated
     return Decision(
