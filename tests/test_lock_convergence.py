@@ -18,8 +18,8 @@ from bot.lag.lock_convergence import (
     STATION_DAY_MIN,
     TAKING,
     UNDERPOWERED,
-    LockConvergenceRun,
     Sweep,
+    SplitReadout,
     converged,
     decide,
     execute,
@@ -174,6 +174,21 @@ ONE_SIDED_ROWS = [
     touch(3, ABOVE, at(18, 10), "0.94", "0.96"),
 ]
 
+EMPTY_YES_ROWS = [
+    touch(1, ABOVE, at(17, 59), "0.94", "0.96"),
+    touch(11, LOWER, at(17, 59), "0.40", "0.42"),
+    touch(12, LOWER, at(18, 0, 30), "0.00", "0.06", bid_depth="0"),
+    touch(13, LOWER, at(18, 2), "0.04", "0.06"),
+    touch(14, LOWER, at(18, 10), "0.04", "0.06"),
+]
+
+INTERRUPTED_ROWS = [
+    touch(1, ABOVE, at(17, 59), "0.94", "0.96"),
+    touch(2, ABOVE, at(18, 0, 30), "0.94", "1.00", ask_depth="0"),
+    touch(3, ABOVE, at(18, 1), "0.94", "0.96"),
+    touch(4, ABOVE, at(18, 10), "0.94", "0.96"),
+]
+
 BOUNCE_ROWS = [
     touch(1, ABOVE, at(17, 59), "0.94", "0.96"),
     touch(2, ABOVE, at(18, 0, 30), "0.60", "0.62"),
@@ -271,28 +286,12 @@ def half_lives(sweep: Sweep, split: str = DISCOVERY) -> dict[str, list[Decimal]]
     return {name: list(values) for name, values in sweep.values[split].items()}
 
 
-def run_of(sweep: Sweep, tmp_path: Path) -> LockConvergenceRun:
-    powered = len(sweep.values[DISCOVERY]) >= STATION_DAY_MIN
-    discovery = readout(sweep.values[DISCOVERY], split=DISCOVERY, seed=SEED, powered=powered)
-    holdout = readout(sweep.values[HOLDOUT], split=HOLDOUT, seed=SEED, powered=powered)
-    return LockConvergenceRun(
-        run_id=RUN_ID,
-        manifest=tmp_path / MANIFEST_NAME,
-        manifest_sha256="",
-        seed=SEED,
-        sweep=sweep,
-        discovery=discovery,
-        holdout=holdout,
-        decision=decide(discovery, holdout),
-    )
-
-
-def spread(value: str, count: int, *, split: str, powered: bool = True):
+def spread(value: str, count: int, *, split: str) -> SplitReadout:
     return readout(
         {f"ST{index:02d} {DISCOVERY_DAY.isoformat()}": [Decimal(value)] for index in range(count)},
         split=split,
         seed=SEED,
-        powered=powered,
+        powered=True,
     )
 
 
@@ -317,6 +316,31 @@ def test_a_one_sided_book_carries_no_mid_and_never_counts_as_in_band(tmp_path: P
 
     assert sweep.one_sided_rows == 1
     assert values == {f"{STATION} {DISCOVERY_DAY.isoformat()}": [Decimal(180)]}
+    assert values[f"{STATION} {DISCOVERY_DAY.isoformat()}"] != [Decimal(0)]
+
+
+def test_an_empty_yes_book_carries_no_mid_though_its_stored_prices_read_inside_the_band(
+    tmp_path: Path,
+) -> None:
+    sweep = swept(tmp_path, EMPTY_YES_ROWS)
+
+    scored = {item.ticker: item.half_life_s for item in sweep.kept}
+
+    assert sweep.one_sided_rows == 1
+    assert scored[LOWER] == Decimal(120)
+    assert scored[LOWER] != Decimal(30)
+    assert scored[ABOVE] == Decimal(0)
+
+
+def test_a_one_sided_row_inside_the_persistence_window_breaks_the_entry_it_interrupts(
+    tmp_path: Path,
+) -> None:
+    sweep = swept(tmp_path, INTERRUPTED_ROWS)
+
+    values = half_lives(sweep)
+
+    assert sweep.one_sided_rows == 1
+    assert values == {f"{STATION} {DISCOVERY_DAY.isoformat()}": [Decimal(60)]}
     assert values[f"{STATION} {DISCOVERY_DAY.isoformat()}"] != [Decimal(0)]
 
 
@@ -501,13 +525,25 @@ def test_an_evidence_window_meeting_an_exclusion_is_dropped_whole_and_counted_by
 def test_a_reading_under_the_station_day_minimum_reports_no_statistic_but_keeps_the_lock_rate(
     tmp_path: Path,
 ) -> None:
-    run = run_of(swept(tmp_path, LADDER_ROWS), tmp_path)
+    run = execute(
+        run_id=RUN_ID,
+        artifacts=artifacts_dir(tmp_path, LADDER_ROWS),
+        observations=ARCHIVE,
+        arrivals={},
+        settles=SETTLES,
+        floor_source=FloorSource.SIGNED_READ,
+        seed=SEED,
+        run_root=tmp_path / "tape_studies",
+        **run_paths(tmp_path),
+    )
 
     payload = result_payload(run)
 
     assert run.decision.verdict == UNDERPOWERED
     assert run.decision.gate is None
+    assert run.discovery.n_station_days == 1
     assert run.discovery.bootstrap is None
+    assert run.holdout.bootstrap is None
     assert payload["discovery"]["median_half_life_s"] is None
     assert payload["locks"]["lock_rate"] == "2"
     assert payload["locks"]["clean_station_days"] == 1
@@ -540,17 +576,16 @@ def test_a_median_under_the_threshold_closes_the_question() -> None:
     assert decision.gate.economic is False
 
 
-def test_the_underpowered_branch_short_circuits_before_any_bootstrap() -> None:
-    discovery = spread("600", STATION_DAY_MIN - 1, split=DISCOVERY, powered=False)
-    holdout = spread("600", (STATION_DAY_MIN + 1) // 2, split=HOLDOUT, powered=False)
+def test_a_discovery_split_under_the_minimum_is_underpowered_even_carrying_an_estimate() -> None:
+    discovery = spread("600", STATION_DAY_MIN - 1, split=DISCOVERY)
+    holdout = spread("600", (STATION_DAY_MIN + 1) // 2, split=HOLDOUT)
 
     decision = decide(discovery, holdout)
 
     assert decision.verdict == UNDERPOWERED
     assert decision.gate is None
     assert decision.replication is None
-    assert discovery.bootstrap is None
-    assert holdout.bootstrap is None
+    assert discovery.bootstrap is not None
 
 
 def test_the_convergence_instant_is_the_first_durable_entry_into_the_band() -> None:
