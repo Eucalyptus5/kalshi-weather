@@ -304,7 +304,7 @@ def screen_windows(scope: RunScope, windows: Sequence[EvidenceWindow]) -> Screen
 
 
 # screen_windows keeps its input order, so walking the offer against what came back in one pass
-# recovers the mask; two prints sharing a window screen alike, so a greedy match cannot misalign.
+# recovers the mask; two equal windows screen alike, so a greedy match cannot misalign.
 def keep_mask(offered: Sequence[EvidenceWindow], kept: Sequence[EvidenceWindow]) -> np.ndarray:
     mask = np.zeros(len(offered), dtype=bool)
     cursor = 0
