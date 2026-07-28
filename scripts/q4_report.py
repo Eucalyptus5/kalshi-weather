@@ -140,13 +140,24 @@ async def gather_settles(
     wanted = sorted({(day.station, day.event_date) for day in scope.event_days.values()})
     out: dict[tuple[str, date], Decimal] = {}
     fetched = 0
-    for station, event_date in wanted:
+    for index, (station, event_date) in enumerate(wanted, start=1):
         settle = known.get((station, event_date))
+        source = "cache"
         if settle is None:
             settle = await acis.fetch_daily_high(station[1:], event_date)
+            source = "acis"
             fetched += 1
         if settle is not None:
             out[(station, event_date)] = settle
+        logger.info(
+            "q4 settle station=%s event_date=%s from=%s maxt=%s (%d/%d)",
+            station,
+            event_date.isoformat(),
+            source,
+            settle,
+            index,
+            len(wanted),
+        )
     write_settles_cache(path, known | out)
     logger.info(
         "q4 settles wanted=%d settled=%d fetched=%d cached=%d",
