@@ -15,11 +15,13 @@ from bot.lag.lock_convergence import (
     PASS,
     PERSIST_S,
     PROVIDING,
+    ROUNDING_MARGIN_F,
     STATION_DAY_MIN,
     TAKING,
     UNDERPOWERED,
-    Sweep,
     SplitReadout,
+    Sweep,
+    clears_strike,
     converged,
     decide,
     execute,
@@ -28,10 +30,12 @@ from bot.lag.lock_convergence import (
     scan_locks,
     sweep_convergence,
 )
+from bot.lag.lock_events import detect_lock_events
 from bot.lag.r0_universe import Coverage, freeze_universe, write_universe
 from bot.lag.read_rtt import FloorSource
 from bot.lag.run_manifest import MANIFEST_NAME
 from bot.lag.tape_studies import RunScope, load_run_scope
+from bot.markets.parser import parse_ticker
 from bot.observations.metar import StationObservation
 from bot.replay.artifacts import TRADES_SCHEMA
 from bot.replay.run_scope import (
@@ -61,6 +65,7 @@ OPENS = timedelta(hours=7)
 
 SERIES = "KXHIGHDEN"
 STATION = "KDEN"
+ZONE = "America/Denver"
 DISCOVERY_DAY = date(2026, 7, 18)
 HOLDOUT_DAY = date(2026, 7, 19)
 SCOPE_START = datetime(2026, 7, 18, 7, tzinfo=UTC)
@@ -610,6 +615,23 @@ def test_the_scan_reads_every_leg_the_touch_artifact_carries(tmp_path: Path) -> 
     assert sorted(event.ticker for event, _ in scan.clean) == [LOWER, ABOVE]
     assert scan.no_observations == 0
     assert scan.no_lock == 0
+    assert all(clears_strike(event.crossing_temp_f, event) for event, _ in scan.clean)
+
+
+# 70.7 separates a 1.0 margin from a smaller one and 71.5 from a larger one, so a detector default
+# drifting either way off the margin clears_strike measures against shows up here.
+@pytest.mark.parametrize(("temp_f", "ambiguous"), [("70.7", True), ("71.5", False)])
+def test_the_margin_the_detector_locks_on_is_the_margin_the_anchor_measures_against(
+    temp_f: str, ambiguous: bool
+) -> None:
+    market = parse_ticker(ABOVE)
+    recorded = [reading(at(18, 0), temp_f)]
+
+    carried = detect_lock_events(market, recorded, tz_name=ZONE)
+    pinned = detect_lock_events(market, recorded, tz_name=ZONE, rounding_margin_f=ROUNDING_MARGIN_F)
+
+    assert carried == pinned
+    assert [event.lock_ambiguous for event in pinned] == [ambiguous]
 
 
 def test_a_station_day_with_no_recorded_archive_locks_nothing_and_is_counted(

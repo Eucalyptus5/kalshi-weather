@@ -238,7 +238,11 @@ def scan_locks(
             # A tail read on its own parses as a bracket, so the kinds are settled across the whole
             # event ladder before the detector reads any leg's strike.
             for market in resolve_event_kinds(legs):
-                found = detect_lock_events(market, recorded, tz_name=day.timezone)
+                # clears_strike reads this margin for the settle check and the arrival anchor, so
+                # the detector is handed it rather than left to carry its own default.
+                found = detect_lock_events(
+                    market, recorded, tz_name=day.timezone, rounding_margin_f=ROUNDING_MARGIN_F
+                )
                 if not found:
                     no_lock += 1
                     continue
