@@ -10,9 +10,16 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 
+from bot.lag.lock_convergence import (
+    STATION_DAY_MIN,
+    _gate_payload,
+    _replication_payload,
+    decide,
+)
 from bot.lag.run_manifest import MANIFEST_NAME
 from bot.lag.taker_flow_run import RESULTS_NAME
 from bot.lag.tape_studies import RunScope, load_run_scope
+from bot.replay.run_scope import DISCOVERY, HOLDOUT
 from scripts.q4_report import (
     ARRIVALS_QUERY,
     DEFAULT_RUN_ROOT,
@@ -38,6 +45,7 @@ from tests.test_lock_convergence import (
     STATION,
     artifacts_dir,
     scope_dir,
+    spread,
 )
 from tests.test_q3_near_lock_script import write_state_db
 from tests.test_tape_studies import (
@@ -359,6 +367,39 @@ async def test_the_report_reads_the_station_day_counts_before_the_half_life(
     assert report.index(f"n_min={results['station_day_min']}") < half_life
     assert report.index(f"ceiling={results['locks']['population_ceiling']}") < half_life
     assert counts < report.index("== ARRIVAL ANCHOR") < report.index("== POST-LOCK FILLS")
+
+
+async def test_a_gate_and_a_replication_that_ran_are_rendered_off_the_verdicts_they_carry(
+    paths: dict[str, Path],
+    run_root: Path,
+    mock_http: list[httpx.Request],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert await run(args_for(paths, run_root)) == 0
+    capsys.readouterr()
+    decision = decide(
+        spread("600", STATION_DAY_MIN, split=DISCOVERY),
+        spread("600", (STATION_DAY_MIN + 1) // 2, split=HOLDOUT),
+    )
+    gate = _gate_payload(decision.gate)
+    replication = _replication_payload(decision.replication)
+
+    report = format_report(
+        results_of(run_root)
+        | {"gate": gate, "replication": replication, "replication_skipped": decision.skipped}
+    )
+
+    assert f"estimate={gate['estimate']} threshold={gate['threshold']}" in report
+    assert f"p_value={gate['p_value']:.5f}" in report
+    assert f"n={gate['n']} n_min={gate['n_min']}" in report
+    assert f"passed={gate['passed']}" in report
+    assert f"holdout={replication['holdout_estimate']}" in report
+    assert (
+        f"holdout_n={replication['holdout_n']} holdout_n_min={replication['holdout_n_min']}"
+        in report
+    )
+    assert f"replicated={replication['replicated']}" in report
+    assert "did not run" not in report
 
 
 async def test_the_run_reuses_the_cache_the_first_attempt_left_behind(
