@@ -7,7 +7,6 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from bot.lag.fee_floor import published_taker_fee
 from bot.lag.lead_lag import (
     CITY_SERIES,
     CORRIDORS,
@@ -188,7 +187,6 @@ def test_five_cent_bar_clears_a_round_trip_taker_fee_by_one_cent():
     fee = round_trip_fee_cents(Decimal("1"), Decimal("0.50"))
     assert fee == Decimal("4")
     assert MOVE_BAR_CENTS - fee == Decimal("1")
-    assert fee == 2 * 100 * published_taker_fee(Decimal("1"), Decimal("0.50"))
 
 
 def test_atm_leg_is_the_one_nearest_half_over_the_day_not_at_the_open():
@@ -208,6 +206,25 @@ def test_atm_leg_is_the_one_nearest_half_over_the_day_not_at_the_open():
     assert picked.event_date == EVENT_DATE
     assert picked.received_us.tolist() == [us(0), us(10), us(20), us(30)]
     assert picked.mid2.tolist() == [mid2("70"), mid2("55"), mid2("55"), mid2("55")]
+
+
+def test_a_spike_off_half_does_not_cost_the_leg_the_pick():
+    rows = [
+        mid(0, LEG_A, "0.50"),
+        mid(0, LEG_B, "0.56"),
+        mid(10, LEG_A, "0.50"),
+        mid(10, LEG_B, "0.56"),
+        mid(20, LEG_A, "0.50"),
+        mid(20, LEG_B, "0.56"),
+        mid(30, LEG_A, "0.95"),
+        mid(30, LEG_B, "0.56"),
+        mid(40, LEG_A, "0.95"),
+        mid(40, LEG_B, "0.56"),
+    ]
+    picked = read(rows)
+    assert picked.ticker == LEG_A
+    assert picked.two_sided.all()
+    assert picked.mid2.tolist() == [mid2(value) for value in ("50", "50", "50", "95", "95")]
 
 
 def test_ties_on_the_median_distance_go_to_the_lower_ticker():

@@ -168,6 +168,7 @@ def atm_series(
         rows = np.flatnonzero(quoted & (leg == seat))
         if rows.size == 0:
             continue
+        # An even row count puts the median on a half tick, so double again to keep int() exact.
         distance = int(2 * np.median(np.abs(mid2[rows] - PRICE_TICKS)))
         if picked < 0 or distance < nearest:
             picked, nearest = seat, distance
