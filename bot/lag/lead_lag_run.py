@@ -102,8 +102,8 @@ class Sweep:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class MedianInterval:
-    low: Decimal
-    high: Decimal
+    low: Decimal | None
+    high: Decimal | None
     ci_level: float
     tail: float
     tested: int
@@ -363,7 +363,9 @@ def median_interval(
     start = min(range(len(candidates)), key=lambda seat: (abs(candidates[seat] - estimate), seat))
     tested = 0
 
-    low = high = candidates[start]
+    # A bound is the last candidate admitted, so a start refused on its first probe leaves none.
+    low: Decimal | None = None
+    high: Decimal | None = None
     seat = start
     while seat >= 0:
         tested += 1
@@ -578,8 +580,8 @@ def _reading_payload(item: DirectionReadout) -> dict:
         "interval": None
         if interval is None
         else {
-            "low": str(interval.low),
-            "high": str(interval.high),
+            "low": None if interval.low is None else str(interval.low),
+            "high": None if interval.high is None else str(interval.high),
             "ci_level": interval.ci_level,
             "tail": interval.tail,
             "tested": interval.tested,

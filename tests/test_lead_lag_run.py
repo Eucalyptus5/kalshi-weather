@@ -20,6 +20,7 @@ from bot.lag.lead_lag_run import (
     Sweep,
     execute,
     median_interval,
+    pooled_median,
     read_city_day,
     readout,
     result_payload,
@@ -498,6 +499,18 @@ def test_the_interval_covers_a_planted_median() -> None:
     assert interval.tested >= 2
 
 
+def test_a_walk_that_admits_candidates_brackets_its_own_point_estimate() -> None:
+    episodes = panel(tuple(CORRIDORS), NINE_DAYS, LEAD_GRID)
+
+    interval = median_interval(
+        episodes, ci_level=CI_LEVEL, resamples=FIXTURE_RESAMPLES, seed=SEED, block_days=BLOCK_DAYS
+    )
+
+    assert interval.low is not None
+    assert interval.high is not None
+    assert interval.low <= pooled_median(episodes) <= interval.high
+
+
 def test_the_same_seed_walks_the_same_interval_twice() -> None:
     episodes = panel(tuple(CORRIDORS), NINE_DAYS, LEAD_GRID)
     kwargs = {
@@ -554,7 +567,9 @@ def test_at_the_reporting_floor_the_estimate_is_reported() -> None:
     assert result.reading == REVERSE
     assert result.corridor_days == CORRIDOR_DAY_MIN_REPORT
     assert result.median_lead_s == LEAD_S
-    assert result.interval.low == result.interval.high == LEAD_S
+    assert result.interval.tested == 2
+    assert result.interval.low is None
+    assert result.interval.high is None
     assert result.per_pair["DEN->OKC"].median_lead_s == LEAD_S
     assert result.per_pair["OKC->DFW"].median_lead_s is None
     assert result.per_corridor["gulf"].median_lead_s == LEAD_S
@@ -686,4 +701,6 @@ def test_a_full_corridor_sweep_reaches_the_reporting_floor(tmp_path: Path) -> No
     assert swept.kept == swept.offered
     assert result.corridor_days == CORRIDOR_DAY_MIN_REPORT
     assert result.median_lead_s == LEAD_S
-    assert result.interval.low == LEAD_S
+    assert result.interval.tested == 2
+    assert result.interval.low is None
+    assert result.interval.high is None

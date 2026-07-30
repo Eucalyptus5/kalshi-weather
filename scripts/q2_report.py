@@ -172,9 +172,13 @@ def _format_estimate(item: dict, ceiling: int, reporting_floor: int, unit: str) 
     interval = item["interval"]
     return [
         f"  median_lead_s={item['median_lead_s']}  "
-        f"ci{interval['ci_level']}=[{interval['low']}, {interval['high']}]  "
+        f"ci{interval['ci_level']}=[{_bound(interval['low'])}, {_bound(interval['high'])}]  "
         f"tail={interval['tail']:.4f}  tested={interval['tested']}"
     ]
+
+
+def _bound(value: str | None) -> str:
+    return "none admitted" if value is None else value
 
 
 def main(argv: list[str] | None = None) -> int:

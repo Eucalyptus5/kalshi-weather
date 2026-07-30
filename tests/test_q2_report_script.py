@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from bot.lag.lead_lag import CORRIDORS, PAIRS
-from bot.lag.lead_lag_run import CORRIDOR_DAY_MIN_REPORT, FORWARD, RESULTS_NAME, REVERSE
+from bot.lag.lead_lag_run import CI_LEVEL, CORRIDOR_DAY_MIN_REPORT, FORWARD, RESULTS_NAME, REVERSE
 from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME
 from scripts.q2_report import (
     DEFAULT_RUN_ROOT,
@@ -160,9 +160,11 @@ def test_a_run_at_the_floor_prints_the_median_and_its_interval(
     assert results["corridor_day_ceiling"] == len(CORRIDORS) * len(FLOOR_DAYS)
     assert results[FORWARD]["corridor_days"] == CORRIDOR_DAY_MIN_REPORT
     assert Decimal(results[FORWARD]["median_lead_s"]) == LEAD_S
-    assert Decimal(results[FORWARD]["interval"]["low"]) == LEAD_S
+    assert results[FORWARD]["interval"]["low"] is None
+    assert results[FORWARD]["interval"]["high"] is None
     assert Decimal(results[REVERSE]["median_lead_s"]) == LEAD_S
     assert f"median_lead_s={results[FORWARD]['median_lead_s']}" in report
+    assert f"ci{CI_LEVEL}=[none admitted, none admitted]" in report
     assert "declined" not in report
     assert f"    gulf {FLOOR_DAYS[0].isoformat()} 1" in report
 
