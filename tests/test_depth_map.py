@@ -473,6 +473,20 @@ def test_microsecond_weights_stay_exact_across_the_accrual_window() -> None:
     assert tally.weight(0) == 1_200_000_000_001
 
 
+def test_pooling_groups_merges_their_bins() -> None:
+    tally = WeightedTally()
+    tally.add(
+        np.array([0, 1, 1], dtype=np.int64),
+        np.array([5, 5, 11], dtype=np.int64),
+        np.array([10, 30, 10], dtype=np.int64),
+    )
+
+    assert tally.pooled([0, 1]) == {5: 40, 11: 10}
+    assert tally.pooled([1]) == {5: 30, 11: 10}
+    assert tally.pooled([7]) == {}
+    assert weighted_quantile(tally.pooled([0, 1]), 1, 2) == 5
+
+
 def test_an_unseen_group_has_no_weight_and_no_quantile() -> None:
     tally = WeightedTally()
     assert tally.groups() == []

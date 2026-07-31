@@ -1,5 +1,5 @@
 from bisect import bisect_left
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -124,6 +124,15 @@ class WeightedTally:
 
     def weight(self, group: int) -> int:
         return sum(self._bins.get(group, {}).values())
+
+    # A quantile over several groups at once is not a function of their quantiles, so pooling has
+    # to reach the bins themselves; weighted_quantile takes what this returns.
+    def pooled(self, groups: Iterable[int]) -> dict[int, int]:
+        merged: dict[int, int] = {}
+        for group in groups:
+            for value, weight in self._bins.get(group, {}).items():
+                merged[value] = merged.get(value, 0) + weight
+        return merged
 
     def quantile(self, group: int, numerator: int, denominator: int) -> int | None:
         return weighted_quantile(self._bins.get(group, {}), numerator, denominator)
