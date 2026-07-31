@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from bot.execution import fees
-from bot.lag.fee_floor import fee_source
+from bot.lag.fee_floor import MAKER_RATE_SOURCE, PUBLISHED_MAKER_RATE, fee_source
 from bot.lag.r0_universe import (
     Coverage,
     R0Universe,
@@ -29,6 +29,7 @@ from bot.lag.run_manifest import (
     ManifestIncomplete,
     RunInputs,
     build_manifest,
+    fee_payload,
     git_state,
     manifest_payload,
     resolve_latency_floor,
@@ -61,6 +62,8 @@ FIELDS = {
     "fee_module",
     "fee_module_quantum",
     "fee_module_corrected",
+    "fee_maker_rate",
+    "fee_maker_rate_source",
     "latency_floor_source",
     "latency_floor_s",
     "t_persist_s",
@@ -177,6 +180,8 @@ def test_a_complete_run_records_every_field_the_section_names(
     assert payload["fee_module"] == "bot.execution.fees.taker_fee"
     assert payload["fee_module_quantum"] == str(fees.FEE_QUANTUM)
     assert payload["fee_module_corrected"] is True
+    assert payload["fee_maker_rate"] == str(PUBLISHED_MAKER_RATE)
+    assert payload["fee_maker_rate_source"] == MAKER_RATE_SOURCE
     assert payload["latency_floor_source"] == "RTT_read"
     assert payload["latency_floor_s"] == pytest.approx(0.24)
     assert payload["t_persist_s"] == pytest.approx(10.0)
@@ -445,6 +450,43 @@ def test_an_uncorrected_fee_module_is_recorded_as_uncorrected(
 
     assert payload["fee_module_quantum"] == "0.000001"
     assert payload["fee_module_corrected"] is False
+
+
+def test_the_written_manifest_round_trips_both_maker_fee_keys(
+    tmp_path: Path, complete: RunInputs
+) -> None:
+    root = tmp_path / "tape_studies"
+
+    write_manifest(root, complete)
+
+    payload = json.loads((root / RUN_ID / MANIFEST_NAME).read_text())
+    assert payload["fee_maker_rate"] == str(PUBLISHED_MAKER_RATE)
+    assert payload["fee_maker_rate_source"] == MAKER_RATE_SOURCE
+    assert payload["fee_threshold_source"] == "published_formula"
+    assert payload["fee_module"] == "bot.execution.fees.taker_fee"
+    assert payload["fee_module_quantum"] == str(fees.FEE_QUANTUM)
+    assert payload["fee_module_corrected"] is True
+
+
+def test_the_fee_key_derivation_rule_reproduces_the_published_keys_byte_for_byte(
+    complete: RunInputs,
+) -> None:
+    payload = fee_payload(complete.fee)
+
+    assert set(payload) == {
+        "fee_threshold_source",
+        "fee_module",
+        "fee_module_quantum",
+        "fee_module_corrected",
+        "fee_maker_rate",
+        "fee_maker_rate_source",
+    }
+    assert payload["fee_threshold_source"] == "published_formula"
+    assert payload["fee_module"] == "bot.execution.fees.taker_fee"
+    assert payload["fee_module_quantum"] == str(fees.FEE_QUANTUM)
+    assert payload["fee_module_corrected"] is True
+    assert payload["fee_maker_rate"] == str(PUBLISHED_MAKER_RATE)
+    assert payload["fee_maker_rate_source"] == MAKER_RATE_SOURCE
 
 
 def test_the_caller_cannot_supply_the_head_or_the_dirty_flag() -> None:

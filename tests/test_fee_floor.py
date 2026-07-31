@@ -8,12 +8,24 @@ from bot.execution import fees
 from bot.execution.fees import FEE_QUANTUM, taker_fee
 from bot.lag.fee_floor import (
     CENT,
+    MAKER_RATE_SOURCE,
+    PUBLISHED_MAKER_RATE,
     PUBLISHED_TAKER_RATE,
     FeeSource,
     fee_source,
+    published_maker_fee,
     published_taker_fee,
     quantum_is_corrected,
 )
+
+
+FOUR_DP = Decimal("0.0001")
+HALF = Decimal("0.50")
+
+
+def _per_contract_cents(contracts: Decimal, price: Decimal, rate: Decimal) -> Decimal:
+    aggregate = published_maker_fee(contracts, price, rate)
+    return (Decimal(100) * aggregate / contracts).quantize(FOUR_DP)
 
 
 @pytest.mark.parametrize(
@@ -195,3 +207,150 @@ def test_fee_source_follows_the_module_quantum_back_to_uncorrected(
 )
 def test_correction_predicate_is_decided_by_the_quantum(quantum: Decimal, corrected: bool) -> None:
     assert quantum_is_corrected(quantum) is corrected
+
+
+def test_fee_source_carries_the_published_maker_rate_and_its_provenance() -> None:
+    source = fee_source()
+
+    assert source.maker_rate == PUBLISHED_MAKER_RATE
+    assert source.maker_rate == Decimal("0.0175")
+    assert source.maker_rate_source == MAKER_RATE_SOURCE
+
+
+@pytest.mark.parametrize(
+    "contracts, aggregate, per_contract",
+    [
+        (Decimal("12"), Decimal("0.06"), Decimal("0.5000")),
+        (Decimal("12.36"), Decimal("0.06"), Decimal("0.4854")),
+        (Decimal("13"), Decimal("0.06"), Decimal("0.4615")),
+        (Decimal("14"), Decimal("0.07"), Decimal("0.5000")),
+        (Decimal("15"), Decimal("0.07"), Decimal("0.4667")),
+        (Decimal("16"), Decimal("0.07"), Decimal("0.4375")),
+        (Decimal("17"), Decimal("0.08"), Decimal("0.4706")),
+        (Decimal("18"), Decimal("0.08"), Decimal("0.4444")),
+        (Decimal("19"), Decimal("0.09"), Decimal("0.4737")),
+        (Decimal("20"), Decimal("0.09"), Decimal("0.4500")),
+        (Decimal("21"), Decimal("0.10"), Decimal("0.4762")),
+        (Decimal("22"), Decimal("0.10"), Decimal("0.4545")),
+        (Decimal("23"), Decimal("0.11"), Decimal("0.4783")),
+        (Decimal("24"), Decimal("0.11"), Decimal("0.4583")),
+        (Decimal("25"), Decimal("0.11"), Decimal("0.4400")),
+        (Decimal("26"), Decimal("0.12"), Decimal("0.4615")),
+    ],
+)
+def test_maker_fee_golden_table_at_half_price(
+    contracts: Decimal, aggregate: Decimal, per_contract: Decimal
+) -> None:
+    fee = published_maker_fee(contracts, HALF, PUBLISHED_MAKER_RATE)
+
+    assert fee == aggregate
+    assert (Decimal(100) * fee / contracts).quantize(FOUR_DP) == per_contract
+
+
+def test_the_half_price_band_bottoms_at_16_and_the_non_half_cells_top_at_23() -> None:
+    per_contract = {
+        n: _per_contract_cents(Decimal(n), HALF, PUBLISHED_MAKER_RATE) for n in range(12, 27)
+    }
+
+    assert per_contract[16] == Decimal("0.4375")
+    assert min(per_contract.values()) == Decimal("0.4375")
+    non_half = [value for value in per_contract.values() if value != Decimal("0.5000")]
+    assert max(non_half) == Decimal("0.4783")
+    assert per_contract[23] == Decimal("0.4783")
+
+
+def test_exactly_twelve_and_fourteen_land_on_a_half_cent_and_nothing_else_does() -> None:
+    per_contract = {
+        n: _per_contract_cents(Decimal(n), HALF, PUBLISHED_MAKER_RATE) for n in range(12, 27)
+    }
+
+    at_half = sorted(n for n, value in per_contract.items() if value == Decimal("0.5000"))
+    assert at_half == [12, 14]
+    assert all(value <= Decimal("0.5000") for value in per_contract.values())
+
+
+@pytest.mark.parametrize(
+    "contracts", [Decimal("12"), Decimal("12.36"), Decimal("19"), Decimal("26")]
+)
+def test_maker_fee_is_symmetric_around_the_midpoint(contracts: Decimal) -> None:
+    low_tail = published_maker_fee(contracts, Decimal("0.05"), PUBLISHED_MAKER_RATE)
+    high_tail = published_maker_fee(contracts, Decimal("0.95"), PUBLISHED_MAKER_RATE)
+
+    assert low_tail == high_tail
+
+
+@pytest.mark.parametrize(
+    "contracts, aggregate, per_contract, headroom",
+    [
+        (Decimal("12"), Decimal("0.01"), Decimal("0.0833"), Decimal("0.4167")),
+        (Decimal("12.36"), Decimal("0.02"), Decimal("0.1618"), Decimal("0.3382")),
+        (Decimal("13"), Decimal("0.02"), Decimal("0.1538"), Decimal("0.3462")),
+        (Decimal("14"), Decimal("0.02"), Decimal("0.1429"), Decimal("0.3571")),
+        (Decimal("15"), Decimal("0.02"), Decimal("0.1333"), Decimal("0.3667")),
+        (Decimal("16"), Decimal("0.02"), Decimal("0.1250"), Decimal("0.3750")),
+        (Decimal("17"), Decimal("0.02"), Decimal("0.1176"), Decimal("0.3824")),
+        (Decimal("18"), Decimal("0.02"), Decimal("0.1111"), Decimal("0.3889")),
+        (Decimal("19"), Decimal("0.02"), Decimal("0.1053"), Decimal("0.3947")),
+        (Decimal("20"), Decimal("0.02"), Decimal("0.1000"), Decimal("0.4000")),
+        (Decimal("21"), Decimal("0.02"), Decimal("0.0952"), Decimal("0.4048")),
+        (Decimal("22"), Decimal("0.02"), Decimal("0.0909"), Decimal("0.4091")),
+        (Decimal("23"), Decimal("0.02"), Decimal("0.0870"), Decimal("0.4130")),
+        (Decimal("24"), Decimal("0.02"), Decimal("0.0833"), Decimal("0.4167")),
+        (Decimal("25"), Decimal("0.03"), Decimal("0.1200"), Decimal("0.3800")),
+        (Decimal("26"), Decimal("0.03"), Decimal("0.1154"), Decimal("0.3846")),
+    ],
+)
+def test_maker_fee_golden_table_at_the_tails(
+    contracts: Decimal, aggregate: Decimal, per_contract: Decimal, headroom: Decimal
+) -> None:
+    fee = published_maker_fee(contracts, Decimal("0.05"), PUBLISHED_MAKER_RATE)
+    cents = (Decimal(100) * fee / contracts).quantize(FOUR_DP)
+
+    assert fee == aggregate
+    assert cents == per_contract
+    assert (Decimal("0.5") - cents).quantize(FOUR_DP) == headroom
+
+
+def test_tail_headroom_spans_from_thirteen_to_twelve_and_twenty_four() -> None:
+    headroom = {
+        n: (Decimal("0.5") - _per_contract_cents(Decimal(n), Decimal("0.05"), PUBLISHED_MAKER_RATE))
+        for n in range(12, 27)
+    }
+
+    assert headroom[13] == Decimal("0.3462")
+    assert min(headroom.values()) == Decimal("0.3462")
+    assert headroom[12] == Decimal("0.4167")
+    assert headroom[24] == Decimal("0.4167")
+    assert max(headroom.values()) == Decimal("0.4167")
+    assert {n for n, value in headroom.items() if value == Decimal("0.4167")} == {12, 24}
+
+    at_fractional = Decimal("0.5") - _per_contract_cents(
+        Decimal("12.36"), Decimal("0.05"), PUBLISHED_MAKER_RATE
+    )
+    assert at_fractional == Decimal("0.3382")
+    assert at_fractional < min(headroom.values())
+
+
+def test_rate_is_a_genuine_parameter_not_a_hidden_constant() -> None:
+    low = published_maker_fee(Decimal("20"), HALF, Decimal("0.0175"))
+    high = published_maker_fee(Decimal("20"), HALF, Decimal("0.07"))
+
+    assert low != high
+
+
+@pytest.mark.parametrize(
+    "contracts, price",
+    [
+        (Decimal("1"), Decimal("0.07")),
+        (Decimal("10"), Decimal("0.07")),
+        (Decimal("100"), Decimal("0.50")),
+        (Decimal("27"), Decimal("0.10")),
+        (Decimal("0.39"), Decimal("0.50")),
+    ],
+)
+def test_maker_fee_at_the_taker_rate_agrees_with_the_taker_floor(
+    contracts: Decimal, price: Decimal
+) -> None:
+    assert published_maker_fee(contracts, price, PUBLISHED_TAKER_RATE) == published_taker_fee(
+        contracts, price
+    )

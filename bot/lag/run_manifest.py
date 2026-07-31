@@ -3,7 +3,7 @@ import json
 import os
 import subprocess
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -146,6 +146,15 @@ def build_manifest(inputs: RunInputs) -> Manifest:
     )
 
 
+def fee_payload(fee: FeeSource) -> dict[str, str | bool]:
+    payload: dict[str, str | bool] = {}
+    for field in fields(fee):
+        value = getattr(fee, field.name)
+        key = field.name if field.name.startswith("fee") else f"fee_{field.name}"
+        payload[key] = str(value) if isinstance(value, Decimal) else value
+    return payload
+
+
 def manifest_payload(manifest: Manifest) -> dict:
     return {
         "run_id": manifest.run_id,
@@ -158,10 +167,7 @@ def manifest_payload(manifest: Manifest) -> dict:
         "git_dirty": manifest.git.dirty,
         "r0_fraction_invalid_max": str(manifest.r0_fraction_invalid_max),
         "r0_universe_sha256": manifest.r0_universe_sha256,
-        "fee_threshold_source": manifest.fee.threshold_source,
-        "fee_module": manifest.fee.fee_module,
-        "fee_module_quantum": str(manifest.fee.fee_module_quantum),
-        "fee_module_corrected": manifest.fee.fee_module_corrected,
+        **fee_payload(manifest.fee),
         "latency_floor_source": manifest.floor.source.value,
         "latency_floor_s": manifest.floor.floor_s,
         "t_persist_s": manifest.floor.t_persist_s,
