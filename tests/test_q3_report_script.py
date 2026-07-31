@@ -130,7 +130,12 @@ def test_the_results_carry_the_readout_the_question_asked_for(
     assert results["holdout"]["split"] == HOLDOUT
     assert results["gate"]["economic"] is True
     assert results["gate"]["powered"] is False
+    assert results["gate"]["undecidable"] is True
+    assert results["replication"]["undecidable"] is True
     assert results["replication"]["replicated"] is False
+    report = format_report(results)
+    assert "undecidable=True  passed=False" in report
+    assert "undecidable=True  replicated=False" in report
     assert results["prints"] == {
         "in_scope_pooled": 6,
         "in_scope_discovery": 4,

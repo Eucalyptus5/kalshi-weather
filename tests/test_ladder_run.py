@@ -23,6 +23,7 @@ from bot.lag.ladder_run import (
     PASS,
     QUANTILES,
     TICKS_PER_CENT,
+    UNDECIDABLE,
     ZERO_ESTIMATE,
     Decision,
     SplitReadout,
@@ -339,12 +340,23 @@ def run_paths(tmp_path: Path, samples: int = ADEQUATE_SAMPLES) -> dict[str, Path
 
 
 def spread(value: str, count: int, *, split: str) -> SplitReadout:
-    return readout(
-        {f"{SERIES} city{index:02d}": [Decimal(value)] for index in range(count)},
+    return panel(
+        {
+            f"{SERIES} city{index:02d}": [Decimal(value) + Decimal(2 * index - (count - 1)) / 20]
+            for index in range(count)
+        },
         split=split,
-        population=count,
-        seed=SEED,
     )
+
+
+def flat(value: str, count: int, *, split: str) -> SplitReadout:
+    return panel(
+        {f"{SERIES} city{index:02d}": [Decimal(value)] for index in range(count)}, split=split
+    )
+
+
+def panel(values: dict[str, list[Decimal]], *, split: str) -> SplitReadout:
+    return readout(values, split=split, population=len(values), seed=SEED)
 
 
 def decided(swept: Sweep) -> Decision:
@@ -404,7 +416,11 @@ def test_a_holdout_violation_feeds_the_replication(swept: Sweep) -> None:
     assert decision.replication.same_sign
     assert decision.replication.magnitude
     assert decision.replication.holdout_n_min == CITY_DAY_MIN_HOLDOUT
-    assert decision.verdict == CLOSED
+    # One city event-day per split resamples to itself every time, so the tape says nothing about
+    # the edge either way and the question stays open.
+    assert decision.gate.undecidable
+    assert decision.replication.undecidable
+    assert decision.verdict == UNDECIDABLE
 
 
 def test_rarity_closes_the_question_rather_than_underpowering_it() -> None:
@@ -440,6 +456,59 @@ def test_a_median_under_the_bar_closes_the_question() -> None:
     assert decision.gate.estimate < EXCESS_BAR
     assert not decision.gate.economic
     assert decision.replication.replicated
+    assert decision.verdict == CLOSED
+
+
+def test_a_median_under_the_bar_closes_the_question_however_the_resamples_landed() -> None:
+    decision = decide(
+        flat("1", CITY_DAY_MIN_DISCOVERY, split=DISCOVERY),
+        flat("1", CITY_DAY_MIN_HOLDOUT, split=HOLDOUT),
+    )
+
+    assert decision.gate.undecidable
+    assert not decision.gate.economic
+    assert decision.verdict == CLOSED
+
+
+def test_a_median_over_the_bar_that_no_resample_moved_refuses_a_verdict() -> None:
+    decision = decide(
+        flat("7.12", CITY_DAY_MIN_DISCOVERY, split=DISCOVERY),
+        flat("7.12", CITY_DAY_MIN_HOLDOUT, split=HOLDOUT),
+    )
+
+    assert decision.gate.economic
+    assert decision.gate.powered
+    assert decision.gate.undecidable
+    assert not decision.gate.significant
+    assert not decision.gate.passed
+    assert decision.verdict == UNDECIDABLE
+
+
+def test_a_holdout_no_resample_moved_refuses_a_verdict_the_discovery_alone_would_pass() -> None:
+    decision = decide(
+        spread("7.12", CITY_DAY_MIN_DISCOVERY, split=DISCOVERY),
+        flat("7.12", CITY_DAY_MIN_HOLDOUT, split=HOLDOUT),
+    )
+
+    assert decision.gate.passed
+    assert not decision.gate.undecidable
+    assert decision.replication.undecidable
+    assert decision.replication.same_sign
+    assert decision.replication.magnitude
+    assert decision.replication.powered
+    assert not decision.replication.replicated
+    assert decision.verdict == UNDECIDABLE
+
+
+def test_a_degenerate_median_with_no_holdout_estimate_closes_the_question() -> None:
+    decision = decide(
+        flat("7.12", CITY_DAY_MIN_DISCOVERY, split=DISCOVERY), panel({}, split=HOLDOUT)
+    )
+
+    assert decision.gate.economic
+    assert decision.gate.undecidable
+    assert decision.replication is None
+    assert decision.skipped == NO_ESTIMATE
     assert decision.verdict == CLOSED
 
 

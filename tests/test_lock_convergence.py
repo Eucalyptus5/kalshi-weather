@@ -12,12 +12,14 @@ from bot.lag.lock_convergence import (
     CLOSED,
     HALF_LIFE_THRESHOLD_S,
     LOCK_BAND,
+    NO_ESTIMATE,
     PASS,
     PERSIST_S,
     PROVIDING,
     ROUNDING_MARGIN_F,
     STATION_DAY_MIN,
     TAKING,
+    UNDECIDABLE,
     UNDERPOWERED,
     SplitReadout,
     Sweep,
@@ -292,12 +294,26 @@ def half_lives(sweep: Sweep, split: str = DISCOVERY) -> dict[str, list[Decimal]]
 
 
 def spread(value: str, count: int, *, split: str) -> SplitReadout:
-    return readout(
+    return panel(
+        {
+            f"ST{index:02d} {DISCOVERY_DAY.isoformat()}": [
+                Decimal(value) + Decimal(2 * index - (count - 1)) / 20
+            ]
+            for index in range(count)
+        },
+        split=split,
+    )
+
+
+def flat(value: str, count: int, *, split: str) -> SplitReadout:
+    return panel(
         {f"ST{index:02d} {DISCOVERY_DAY.isoformat()}": [Decimal(value)] for index in range(count)},
         split=split,
-        seed=SEED,
-        powered=True,
     )
+
+
+def panel(values: dict[str, list[Decimal]], *, split: str) -> SplitReadout:
+    return readout(values, split=split, seed=SEED, powered=True)
 
 
 def run_paths(tmp_path: Path) -> dict[str, Path]:
@@ -579,6 +595,53 @@ def test_a_median_under_the_threshold_closes_the_question() -> None:
 
     assert decision.verdict == CLOSED
     assert decision.gate.economic is False
+
+
+def test_a_median_under_the_threshold_closes_it_however_the_resamples_landed() -> None:
+    decision = decide(
+        flat("30", STATION_DAY_MIN, split=DISCOVERY),
+        flat("30", (STATION_DAY_MIN + 1) // 2, split=HOLDOUT),
+    )
+
+    assert decision.gate.undecidable
+    assert decision.gate.economic is False
+    assert decision.verdict == CLOSED
+
+
+def test_a_median_over_the_threshold_that_no_resample_moved_refuses_a_verdict() -> None:
+    decision = decide(
+        flat("600", STATION_DAY_MIN, split=DISCOVERY),
+        flat("600", (STATION_DAY_MIN + 1) // 2, split=HOLDOUT),
+    )
+
+    assert decision.gate.economic
+    assert decision.gate.undecidable
+    assert not decision.gate.significant
+    assert not decision.gate.passed
+    assert decision.verdict == UNDECIDABLE
+
+
+def test_a_holdout_no_resample_moved_refuses_a_verdict_the_discovery_alone_would_pass() -> None:
+    decision = decide(
+        spread("600", STATION_DAY_MIN, split=DISCOVERY),
+        flat("600", (STATION_DAY_MIN + 1) // 2, split=HOLDOUT),
+    )
+
+    assert decision.gate.passed
+    assert decision.replication.undecidable
+    assert decision.replication.powered
+    assert not decision.replication.replicated
+    assert decision.verdict == UNDECIDABLE
+
+
+def test_a_degenerate_median_with_no_holdout_estimate_closes_the_question() -> None:
+    decision = decide(flat("600", STATION_DAY_MIN, split=DISCOVERY), panel({}, split=HOLDOUT))
+
+    assert decision.gate.economic
+    assert decision.gate.undecidable
+    assert decision.replication is None
+    assert decision.skipped == NO_ESTIMATE
+    assert decision.verdict == CLOSED
 
 
 def test_a_discovery_split_under_the_minimum_is_underpowered_even_carrying_an_estimate() -> None:

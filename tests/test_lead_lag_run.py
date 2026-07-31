@@ -659,7 +659,7 @@ def test_the_study_names_no_verdict_anywhere(tmp_path: Path) -> None:
         **paths,
     )
 
-    for token in ("evaluate_gate", "evaluate_holdout", "PASS", "CLOSED", "verdict"):
+    for token in ("evaluate_gate", "evaluate_holdout", "PASS", "CLOSED", "UNDECIDABLE", "verdict"):
         assert token not in source
     assert {"verdict", "gate", "holdout", "replication"}.isdisjoint(
         set(payload_keys(result_payload(run)))

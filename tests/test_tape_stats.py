@@ -16,6 +16,7 @@ import pytest
 
 from bot.lag.tape_stats import (
     BLOCK_DAYS,
+    BootstrapResult,
     ClusterAggregate,
     CorridorDayAggregate,
     ValueCluster,
@@ -49,6 +50,20 @@ FLAT_PANELS: dict[str, list[tuple[str, str]]] = {
     "terminating rate": [("0.1", "1"), ("0.2", "2"), ("0.3", "3"), ("0.4", "4")],
     "repeating rate": [("1", "3"), ("2", "6"), ("3", "9"), ("4", "12")],
 }
+
+
+def counted(n_clusters: int) -> BootstrapResult:
+    return cluster_bootstrap(
+        [
+            ClusterAggregate(cluster=f"city-{index}", total=Decimal("1"), weight=Decimal("1"))
+            for index in range(n_clusters)
+        ],
+        null_value=Decimal("0"),
+        direction="greater",
+        resamples=FIXTURE_RESAMPLES,
+        seed=3,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
 
 
 def _unit_clusters(values: np.ndarray, prefix: str = "city") -> list[ClusterAggregate]:
@@ -188,12 +203,13 @@ def test_point_estimate_stays_exact_where_float_addition_would_not() -> None:
     verdict = evaluate_gate(
         estimate=result.estimate,
         p_value=result.p_value,
-        n=result.n_clusters,
+        result=result,
         threshold=Decimal("0.3"),
         direction="less",
         alpha=FIXTURE_ALPHA,
         n_min=2,
         n_unit="city event-days",
+        undecidable=False,
     )
     assert verdict.economic
 
@@ -876,12 +892,13 @@ def test_gate_reports_its_conditions_separately() -> None:
     verdict = evaluate_gate(
         estimate=Decimal("0.04"),
         p_value=0.01,
-        n=120,
+        result=counted(120),
         threshold=Decimal("0.02"),
         direction="greater",
         alpha=FIXTURE_ALPHA,
         n_min=100,
         n_unit="market-days",
+        undecidable=False,
     )
     assert (verdict.economic, verdict.significant, verdict.powered, verdict.passed) == (
         True,
@@ -895,12 +912,13 @@ def test_gate_reports_its_conditions_separately() -> None:
     thin = evaluate_gate(
         estimate=Decimal("0.04"),
         p_value=0.01,
-        n=99,
+        result=counted(99),
         threshold=Decimal("0.02"),
         direction="greater",
         alpha=FIXTURE_ALPHA,
         n_min=100,
         n_unit="market-days",
+        undecidable=False,
     )
     assert thin.economic
     assert thin.significant
@@ -910,12 +928,13 @@ def test_gate_reports_its_conditions_separately() -> None:
     exact = evaluate_gate(
         estimate=Decimal("0.04"),
         p_value=0.01,
-        n=100,
+        result=counted(100),
         threshold=Decimal("0.02"),
         direction="greater",
         alpha=FIXTURE_ALPHA,
         n_min=100,
         n_unit="market-days",
+        undecidable=False,
     )
     assert exact.powered
     assert exact.passed
@@ -925,12 +944,13 @@ def test_gate_significance_is_strict() -> None:
     verdict = evaluate_gate(
         estimate=Decimal("0.04"),
         p_value=FIXTURE_ALPHA,
-        n=120,
+        result=counted(120),
         threshold=Decimal("0.02"),
         direction="greater",
         alpha=FIXTURE_ALPHA,
         n_min=100,
         n_unit="market-days",
+        undecidable=False,
     )
     assert not verdict.significant
     assert not verdict.passed
@@ -940,42 +960,46 @@ def test_gate_economics_run_in_both_directions() -> None:
     upward = evaluate_gate(
         estimate=Decimal("0.02"),
         p_value=0.01,
-        n=10,
+        result=counted(10),
         threshold=Decimal("0.02"),
         direction="greater",
         alpha=FIXTURE_ALPHA,
         n_min=10,
         n_unit="clusters",
+        undecidable=False,
     )
     downward = evaluate_gate(
         estimate=Decimal("0.02"),
         p_value=0.01,
-        n=10,
+        result=counted(10),
         threshold=Decimal("0.02"),
         direction="less",
         alpha=FIXTURE_ALPHA,
         n_min=10,
         n_unit="clusters",
+        undecidable=False,
     )
     short = evaluate_gate(
         estimate=Decimal("0.019"),
         p_value=0.01,
-        n=10,
+        result=counted(10),
         threshold=Decimal("0.02"),
         direction="greater",
         alpha=FIXTURE_ALPHA,
         n_min=10,
         n_unit="clusters",
+        undecidable=False,
     )
     over = evaluate_gate(
         estimate=Decimal("0.021"),
         p_value=0.01,
-        n=10,
+        result=counted(10),
         threshold=Decimal("0.02"),
         direction="less",
         alpha=FIXTURE_ALPHA,
         n_min=10,
         n_unit="clusters",
+        undecidable=False,
     )
     assert upward.economic
     assert downward.economic
@@ -991,12 +1015,13 @@ def test_gate_economics_run_in_both_directions() -> None:
         evaluate_gate(
             estimate=Decimal("0.02"),
             p_value=0.01,
-            n=10,
+            result=counted(10),
             threshold=Decimal("0.02"),
             direction="sideways",
             alpha=FIXTURE_ALPHA,
             n_min=10,
             n_unit="clusters",
+            undecidable=False,
         )
 
 
@@ -1005,10 +1030,11 @@ def test_holdout_needs_the_discovery_sign() -> None:
         discovery_estimate=Decimal("0.04"),
         holdout_estimate=Decimal("-0.04"),
         holdout_p_value=0.001,
-        holdout_n=100,
+        holdout_result=counted(100),
         discovery_n_min=100,
         alpha=FIXTURE_ALPHA,
         n_unit="clusters",
+        undecidable=False,
     )
     assert not verdict.same_sign
     assert verdict.magnitude
@@ -1020,28 +1046,31 @@ def test_holdout_replicates_a_negative_discovery_estimate() -> None:
         discovery_estimate=Decimal("-0.04"),
         holdout_estimate=Decimal("-0.03"),
         holdout_p_value=0.001,
-        holdout_n=100,
+        holdout_result=counted(100),
         discovery_n_min=100,
         alpha=FIXTURE_ALPHA,
         n_unit="clusters",
+        undecidable=False,
     )
     up = evaluate_holdout(
         discovery_estimate=Decimal("-0.04"),
         holdout_estimate=Decimal("0.03"),
         holdout_p_value=0.001,
-        holdout_n=100,
+        holdout_result=counted(100),
         discovery_n_min=100,
         alpha=FIXTURE_ALPHA,
         n_unit="clusters",
+        undecidable=False,
     )
     flat = evaluate_holdout(
         discovery_estimate=Decimal("-0.04"),
         holdout_estimate=Decimal("0"),
         holdout_p_value=0.001,
-        holdout_n=100,
+        holdout_result=counted(100),
         discovery_n_min=100,
         alpha=FIXTURE_ALPHA,
         n_unit="clusters",
+        undecidable=False,
     )
     assert down.same_sign
     assert down.replicated
@@ -1057,19 +1086,21 @@ def test_holdout_magnitude_bar_is_half_the_discovery_estimate() -> None:
         discovery_estimate=Decimal("0.04"),
         holdout_estimate=Decimal("0.0196"),
         holdout_p_value=0.001,
-        holdout_n=100,
+        holdout_result=counted(100),
         discovery_n_min=100,
         alpha=FIXTURE_ALPHA,
         n_unit="clusters",
+        undecidable=False,
     )
     exact = evaluate_holdout(
         discovery_estimate=Decimal("0.04"),
         holdout_estimate=Decimal("0.02"),
         holdout_p_value=0.001,
-        holdout_n=100,
+        holdout_result=counted(100),
         discovery_n_min=100,
         alpha=FIXTURE_ALPHA,
         n_unit="clusters",
+        undecidable=False,
     )
     assert not short.magnitude
     assert not short.replicated
@@ -1082,10 +1113,11 @@ def test_holdout_minimum_rounds_up_and_keeps_the_caller_unit() -> None:
         discovery_estimate=Decimal("0.04"),
         holdout_estimate=Decimal("0.04"),
         holdout_p_value=0.001,
-        holdout_n=2,
+        holdout_result=counted(2),
         discovery_n_min=5,
         alpha=FIXTURE_ALPHA,
         n_unit="prints",
+        undecidable=False,
     )
     assert verdict.holdout_n_min == 3
     assert not verdict.powered
@@ -1096,10 +1128,11 @@ def test_holdout_minimum_rounds_up_and_keeps_the_caller_unit() -> None:
         discovery_estimate=Decimal("0.04"),
         holdout_estimate=Decimal("0.04"),
         holdout_p_value=0.001,
-        holdout_n=3,
+        holdout_result=counted(3),
         discovery_n_min=5,
         alpha=FIXTURE_ALPHA,
         n_unit="prints",
+        undecidable=False,
     )
     assert powered.powered
     assert powered.replicated
@@ -1110,19 +1143,21 @@ def test_holdout_significance_uses_the_caller_alpha() -> None:
         discovery_estimate=Decimal("0.04"),
         holdout_estimate=Decimal("0.04"),
         holdout_p_value=FIXTURE_ALPHA,
-        holdout_n=100,
+        holdout_result=counted(100),
         discovery_n_min=100,
         alpha=FIXTURE_ALPHA,
         n_unit="clusters",
+        undecidable=False,
     )
     loose = evaluate_holdout(
         discovery_estimate=Decimal("0.04"),
         holdout_estimate=Decimal("0.04"),
         holdout_p_value=FIXTURE_ALPHA,
-        holdout_n=100,
+        holdout_result=counted(100),
         discovery_n_min=100,
         alpha=0.10,
         n_unit="clusters",
+        undecidable=False,
     )
     assert not verdict.significant
     assert loose.significant
@@ -1134,8 +1169,74 @@ def test_holdout_rejects_a_zero_discovery_estimate() -> None:
             discovery_estimate=Decimal("0"),
             holdout_estimate=Decimal("0.04"),
             holdout_p_value=0.001,
-            holdout_n=100,
+            holdout_result=counted(100),
             discovery_n_min=100,
             alpha=FIXTURE_ALPHA,
             n_unit="clusters",
+            undecidable=False,
         )
+
+
+def test_an_undecidable_gate_cannot_reach_a_pass_the_same_call_otherwise_reaches() -> None:
+    refused = evaluate_gate(
+        estimate=Decimal("0.04"),
+        p_value=0.001,
+        result=counted(120),
+        threshold=Decimal("0.02"),
+        direction="greater",
+        alpha=FIXTURE_ALPHA,
+        n_min=100,
+        n_unit="market-days",
+        undecidable=True,
+    )
+    read = evaluate_gate(
+        estimate=Decimal("0.04"),
+        p_value=0.001,
+        result=counted(120),
+        threshold=Decimal("0.02"),
+        direction="greater",
+        alpha=FIXTURE_ALPHA,
+        n_min=100,
+        n_unit="market-days",
+        undecidable=False,
+    )
+    assert (refused.undecidable, refused.significant, refused.passed) == (True, False, False)
+    assert refused.economic
+    assert refused.powered
+    assert (read.undecidable, read.significant, read.passed) == (False, True, True)
+
+
+def test_an_undecidable_holdout_suppresses_significance_and_nothing_else() -> None:
+    verdict = evaluate_holdout(
+        discovery_estimate=Decimal("0.04"),
+        holdout_estimate=Decimal("0.04"),
+        holdout_p_value=0.001,
+        holdout_result=counted(15),
+        discovery_n_min=30,
+        alpha=FIXTURE_ALPHA,
+        n_unit="city event-days",
+        undecidable=True,
+    )
+    assert verdict.holdout_n == 15
+    assert verdict.holdout_n_min == 15
+    assert (verdict.same_sign, verdict.magnitude, verdict.powered) == (True, True, True)
+    assert verdict.undecidable
+    assert not verdict.significant
+    assert not verdict.replicated
+
+
+def test_the_gate_powers_off_the_cluster_count_the_result_carries() -> None:
+    verdict = evaluate_gate(
+        estimate=Decimal("0.04"),
+        p_value=0.001,
+        result=counted(3),
+        threshold=Decimal("0.02"),
+        direction="greater",
+        alpha=FIXTURE_ALPHA,
+        n_min=30,
+        n_unit="tickers",
+        undecidable=False,
+    )
+    assert verdict.n == 3
+    assert not verdict.powered
+    assert not verdict.passed

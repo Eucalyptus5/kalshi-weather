@@ -391,7 +391,8 @@ def _format_gate(gate: dict | None) -> list[str]:
         f"direction={gate['direction']} p_value={_fixed(gate['p_value'], 5)} "
         f"alpha={gate['alpha']} n={gate['n']} n_min={gate['n_min']} "
         f"economic={gate['economic']} significant={gate['significant']} "
-        f"powered={gate['powered']} passed={gate['passed']}"
+        f"powered={gate['powered']} undecidable={gate['undecidable']} "
+        f"passed={gate['passed']}"
     ]
 
 
@@ -405,7 +406,7 @@ def _format_replication(replication: dict | None, skipped: str) -> list[str]:
         f"holdout_n={replication['holdout_n']} holdout_n_min={replication['holdout_n_min']} "
         f"same_sign={replication['same_sign']} magnitude={replication['magnitude']} "
         f"significant={replication['significant']} powered={replication['powered']} "
-        f"replicated={replication['replicated']}"
+        f"undecidable={replication['undecidable']} replicated={replication['replicated']}"
     ]
 
 

@@ -70,12 +70,16 @@ SPLITS = (DISCOVERY, HOLDOUT)
 CI_LEVEL = 0.95
 NULL_VALUE = Decimal("0")
 DIRECTION = "greater"
-PRINTS = "prints"
+TICKERS = "tickers"
 
 PASS = "PASS"
 CLOSED = "CLOSED"
 UNDERPOWERED = "UNDERPOWERED"
+UNDECIDABLE = "UNDECIDABLE"
 PRINT_MIN_HOLDOUT = (PRINT_MIN_DISCOVERY + 1) // 2
+# The gate resamples tickers, so its power is the cluster count, not the prints inside them. Set at
+# the city event-day floor the other two questions carry rather than at anything read off this tape.
+TICKER_MIN_DISCOVERY = 30
 ZERO_ESTIMATE = "a discovery estimate of exactly zero fixes no direction to replicate"
 NO_ESTIMATE = "a split with no usable prints carries no estimate to replicate"
 
@@ -364,12 +368,13 @@ def decide(discovery: HorizonReadout, holdout: HorizonReadout) -> Decision:
         else evaluate_gate(
             estimate=discovery.bootstrap.estimate,
             p_value=discovery.bootstrap.p_value,
-            n=discovery.result.n_prints,
+            result=discovery.bootstrap,
             threshold=CENT_BAR,
             direction=DIRECTION,
             alpha=ALPHA,
-            n_min=PRINT_MIN_DISCOVERY,
-            n_unit=PRINTS,
+            n_min=TICKER_MIN_DISCOVERY,
+            n_unit=TICKERS,
+            undecidable=discovery.bootstrap.degenerate,
         )
     )
     replication = None
@@ -383,17 +388,27 @@ def decide(discovery: HorizonReadout, holdout: HorizonReadout) -> Decision:
             discovery_estimate=gate.estimate,
             holdout_estimate=holdout.bootstrap.estimate,
             holdout_p_value=holdout.bootstrap.p_value,
-            holdout_n=holdout.result.n_prints,
-            discovery_n_min=PRINT_MIN_DISCOVERY,
+            holdout_result=holdout.bootstrap,
+            discovery_n_min=TICKER_MIN_DISCOVERY,
             alpha=HOLDOUT_ALPHA,
-            n_unit=PRINTS,
+            n_unit=TICKERS,
+            undecidable=holdout.bootstrap.degenerate,
         )
 
+    # A shortfall in either unit keeps the question open for more tape, and an edge under the bar
+    # is closed on its economics whatever the resamples did, so degeneracy is read last of the three.
     if (
-        discovery.result.n_prints < PRINT_MIN_DISCOVERY
+        gate is None
+        or not gate.powered
+        or discovery.result.n_prints < PRINT_MIN_DISCOVERY
         or holdout.result.n_prints < PRINT_MIN_HOLDOUT
+        or (replication is not None and not replication.powered)
     ):
         verdict = UNDERPOWERED
+    elif not gate.economic:
+        verdict = CLOSED
+    elif replication is not None and (gate.undecidable or replication.undecidable):
+        verdict = UNDECIDABLE
     elif replication is not None and gate.passed and replication.replicated:
         verdict = PASS
     else:
@@ -565,6 +580,7 @@ def _gate_payload(gate: GateVerdict | None) -> dict | None:
         "economic": gate.economic,
         "significant": gate.significant,
         "powered": gate.powered,
+        "undecidable": gate.undecidable,
         "passed": gate.passed,
     }
 
@@ -584,6 +600,7 @@ def _replication_payload(replication: HoldoutVerdict | None) -> dict | None:
         "magnitude": replication.magnitude,
         "significant": replication.significant,
         "powered": replication.powered,
+        "undecidable": replication.undecidable,
         "replicated": replication.replicated,
     }
 

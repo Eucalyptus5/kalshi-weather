@@ -339,6 +339,7 @@ class GateVerdict:
     economic: bool
     significant: bool
     powered: bool
+    undecidable: bool
     passed: bool
     estimate: Decimal
     threshold: Decimal
@@ -356,6 +357,7 @@ class HoldoutVerdict:
     magnitude: bool
     significant: bool
     powered: bool
+    undecidable: bool
     replicated: bool
     discovery_estimate: Decimal
     holdout_estimate: Decimal
@@ -370,29 +372,33 @@ def evaluate_gate(
     *,
     estimate: Decimal,
     p_value: float,
-    n: int,
+    result: BootstrapResult,
     threshold: Decimal,
     direction: Direction,
     alpha: float,
     n_min: int,
     n_unit: str,
+    undecidable: bool,
 ) -> GateVerdict:
     if direction not in DIRECTIONS:
         raise ValueError(f"direction must be one of {DIRECTIONS}, got {direction!r}")
     economic = estimate >= threshold if direction == "greater" else estimate <= threshold
-    significant = p_value < alpha
-    powered = n >= n_min
+    # An undecidable estimate carries no p-value worth comparing, and refusing at significance
+    # rather than at passed is what makes the refusal bind on every condition downstream of it.
+    significant = not undecidable and p_value < alpha
+    powered = result.n_clusters >= n_min
     return GateVerdict(
         economic=economic,
         significant=significant,
         powered=powered,
+        undecidable=undecidable,
         passed=economic and significant and powered,
         estimate=estimate,
         threshold=threshold,
         direction=direction,
         p_value=p_value,
         alpha=alpha,
-        n=n,
+        n=result.n_clusters,
         n_min=n_min,
         n_unit=n_unit,
     )
@@ -403,29 +409,31 @@ def evaluate_holdout(
     discovery_estimate: Decimal,
     holdout_estimate: Decimal,
     holdout_p_value: float,
-    holdout_n: int,
+    holdout_result: BootstrapResult,
     discovery_n_min: int,
     alpha: float,
     n_unit: str,
+    undecidable: bool,
 ) -> HoldoutVerdict:
     if discovery_estimate == 0:
         raise ValueError("a discovery estimate of zero fixes no direction for holdout to replicate")
     same_sign = (holdout_estimate > 0) == (discovery_estimate > 0) and holdout_estimate != 0
     magnitude = abs(holdout_estimate) >= abs(discovery_estimate) / 2
-    significant = holdout_p_value < alpha
+    significant = not undecidable and holdout_p_value < alpha
     holdout_n_min = (discovery_n_min + 1) // 2
-    powered = holdout_n >= holdout_n_min
+    powered = holdout_result.n_clusters >= holdout_n_min
     return HoldoutVerdict(
         same_sign=same_sign,
         magnitude=magnitude,
         significant=significant,
         powered=powered,
+        undecidable=undecidable,
         replicated=same_sign and magnitude and significant and powered,
         discovery_estimate=discovery_estimate,
         holdout_estimate=holdout_estimate,
         holdout_p_value=holdout_p_value,
         alpha=alpha,
-        holdout_n=holdout_n,
+        holdout_n=holdout_result.n_clusters,
         holdout_n_min=holdout_n_min,
         n_unit=n_unit,
     )

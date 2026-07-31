@@ -20,7 +20,10 @@ from bot.lag.taker_flow_run import (
     NO_ESTIMATE,
     PASS,
     PRINT_MIN_HOLDOUT,
+    TICKER_MIN_DISCOVERY,
+    TICKERS,
     TOUCH_COLUMNS,
+    UNDECIDABLE,
     UNDERPOWERED,
     ZERO_ESTIMATE,
     HorizonReadout,
@@ -71,6 +74,8 @@ BLINK = datetime(2026, 7, 18, 12, tzinfo=UTC)
 SEED = 20260812
 POWERED = PRINT_MIN_DISCOVERY + 1_000
 HOLDOUT_POWERED = 3_000
+TICKER_MIN_HOLDOUT = (TICKER_MIN_DISCOVERY + 1) // 2
+THIN_TICKERS = 3
 
 
 def when(day: date, hour: int, minute: int, second: int) -> datetime:
@@ -324,6 +329,26 @@ def clusters_of(*totals: tuple[str, str, str]) -> tuple[ClusterAggregate, ...]:
     )
 
 
+def spread(total: str, count: int, *, split: str) -> tuple[ClusterAggregate, ...]:
+    return tuple(
+        ClusterAggregate(
+            cluster=f"{SERIES}-{split}-{index:03d}",
+            total=Decimal(total) + Decimal(2 * index - (count - 1)) / 2,
+            weight=Decimal("10"),
+        )
+        for index in range(count)
+    )
+
+
+def flat(total: str, count: int, *, split: str) -> tuple[ClusterAggregate, ...]:
+    return tuple(
+        ClusterAggregate(
+            cluster=f"{SERIES}-{split}-{index:03d}", total=Decimal(total), weight=Decimal("10")
+        )
+        for index in range(count)
+    )
+
+
 def readout_of(
     clusters: tuple[ClusterAggregate, ...], *, split: str, n_prints: int
 ) -> HorizonReadout:
@@ -553,42 +578,76 @@ def test_a_missing_partition_still_carries_the_pruned_columns(tmp_path: Path) ->
     assert TOUCH_SCHEMA.names != list(TOUCH_COLUMNS)
 
 
-def test_a_discovery_too_thin_to_power_the_gate_is_underpowered() -> None:
+def test_a_discovery_too_thin_in_prints_to_power_the_gate_is_underpowered() -> None:
     discovery = readout_of(
-        clusters_of(("a", "20", "10"), ("b", "20", "10")), split=DISCOVERY, n_prints=100
+        spread("20", TICKER_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY, n_prints=100
     )
     holdout = readout_of(
-        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
-    )
-
-    decision = decide(discovery, holdout)
-
-    assert not decision.gate.powered
-    assert decision.verdict == UNDERPOWERED
-
-
-def test_a_holdout_too_thin_to_replicate_is_underpowered() -> None:
-    discovery = readout_of(
-        clusters_of(("a", "20", "10"), ("b", "20", "10")), split=DISCOVERY, n_prints=POWERED
-    )
-    holdout = readout_of(
-        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=100
+        spread("20", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
     )
 
     decision = decide(discovery, holdout)
 
     assert decision.gate.powered
+    assert decision.verdict == UNDERPOWERED
+
+
+def test_a_discovery_over_too_few_tickers_is_underpowered_at_any_print_count() -> None:
+    discovery = readout_of(
+        spread("20", THIN_TICKERS, split=DISCOVERY), split=DISCOVERY, n_prints=POWERED
+    )
+    holdout = readout_of(
+        spread("20", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert discovery.result.n_prints > PRINT_MIN_DISCOVERY
+    assert decision.gate.n == THIN_TICKERS
+    assert decision.gate.n_min == TICKER_MIN_DISCOVERY
+    assert decision.gate.n_unit == TICKERS
+    assert not decision.gate.powered
+    assert decision.verdict == UNDERPOWERED
+
+
+def test_a_holdout_too_thin_in_prints_to_replicate_is_underpowered() -> None:
+    discovery = readout_of(
+        spread("20", TICKER_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY, n_prints=POWERED
+    )
+    holdout = readout_of(
+        spread("20", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=100
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert holdout.result.n_prints < PRINT_MIN_HOLDOUT
+    assert decision.gate.powered
+    assert decision.replication.powered
+    assert decision.verdict == UNDERPOWERED
+
+
+def test_a_holdout_over_too_few_tickers_is_underpowered() -> None:
+    discovery = readout_of(
+        spread("20", TICKER_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY, n_prints=POWERED
+    )
+    holdout = readout_of(
+        spread("20", THIN_TICKERS, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert decision.replication.holdout_n == THIN_TICKERS
+    assert decision.replication.holdout_n_min == TICKER_MIN_HOLDOUT
     assert not decision.replication.powered
-    assert decision.replication.holdout_n_min == PRINT_MIN_HOLDOUT
     assert decision.verdict == UNDERPOWERED
 
 
 def test_an_estimate_under_the_cent_bar_closes_the_question() -> None:
     discovery = readout_of(
-        clusters_of(("a", "5", "10"), ("b", "5", "10")), split=DISCOVERY, n_prints=POWERED
+        spread("5", TICKER_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY, n_prints=POWERED
     )
     holdout = readout_of(
-        clusters_of(("c", "5", "10"), ("d", "5", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+        spread("5", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
     )
 
     decision = decide(discovery, holdout)
@@ -600,14 +659,28 @@ def test_an_estimate_under_the_cent_bar_closes_the_question() -> None:
     assert decision.verdict == CLOSED
 
 
-def test_an_estimate_over_the_bar_that_does_not_replicate_closes_the_question() -> None:
+def test_an_estimate_under_the_cent_bar_closes_it_however_the_resamples_landed() -> None:
     discovery = readout_of(
-        clusters_of(("a", "20", "10"), ("b", "20", "10")), split=DISCOVERY, n_prints=POWERED
+        flat("5", TICKER_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY, n_prints=POWERED
     )
     holdout = readout_of(
-        clusters_of(("c", "-20", "10"), ("d", "-20", "10")),
-        split=HOLDOUT,
-        n_prints=HOLDOUT_POWERED,
+        flat("5", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert decision.gate.estimate == Decimal("0.5")
+    assert decision.gate.undecidable
+    assert not decision.gate.economic
+    assert decision.verdict == CLOSED
+
+
+def test_an_estimate_over_the_bar_that_does_not_replicate_closes_the_question() -> None:
+    discovery = readout_of(
+        spread("20", TICKER_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY, n_prints=POWERED
+    )
+    holdout = readout_of(
+        spread("-20", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
     )
 
     decision = decide(discovery, holdout)
@@ -620,25 +693,62 @@ def test_an_estimate_over_the_bar_that_does_not_replicate_closes_the_question() 
 
 def test_a_gate_that_clears_and_replicates_passes() -> None:
     discovery = readout_of(
-        clusters_of(("a", "20", "10"), ("b", "20", "10")), split=DISCOVERY, n_prints=POWERED
+        spread("20", TICKER_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY, n_prints=POWERED
     )
     holdout = readout_of(
-        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+        spread("20", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
     )
 
     decision = decide(discovery, holdout)
 
     assert decision.gate.passed
+    assert decision.gate.n == TICKER_MIN_DISCOVERY
     assert decision.replication.replicated
     assert decision.verdict == PASS
 
 
-def test_a_zero_estimate_on_a_discovery_too_thin_to_power_the_gate_is_underpowered() -> None:
+def test_an_estimate_no_resample_moved_refuses_a_verdict() -> None:
     discovery = readout_of(
-        clusters_of(("a", "0", "10"), ("b", "0", "10")), split=DISCOVERY, n_prints=100
+        flat("20", TICKER_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY, n_prints=POWERED
     )
     holdout = readout_of(
-        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+        flat("20", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert decision.gate.economic
+    assert decision.gate.powered
+    assert decision.gate.undecidable
+    assert not decision.gate.significant
+    assert not decision.gate.passed
+    assert decision.verdict == UNDECIDABLE
+
+
+def test_a_holdout_no_resample_moved_refuses_a_verdict_the_discovery_alone_would_pass() -> None:
+    discovery = readout_of(
+        spread("20", TICKER_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY, n_prints=POWERED
+    )
+    holdout = readout_of(
+        flat("20", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+    )
+
+    decision = decide(discovery, holdout)
+
+    assert decision.gate.passed
+    assert not decision.gate.undecidable
+    assert decision.replication.undecidable
+    assert decision.replication.powered
+    assert not decision.replication.replicated
+    assert decision.verdict == UNDECIDABLE
+
+
+def test_a_zero_estimate_on_a_discovery_too_thin_to_power_the_gate_is_underpowered() -> None:
+    discovery = readout_of(
+        spread("0", THIN_TICKERS, split=DISCOVERY), split=DISCOVERY, n_prints=100
+    )
+    holdout = readout_of(
+        spread("20", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
     )
 
     decision = decide(discovery, holdout)
@@ -661,7 +771,7 @@ def test_a_split_with_no_usable_prints_carries_no_bootstrap() -> None:
 
 def test_a_holdout_with_no_usable_prints_is_underpowered() -> None:
     discovery = readout_of(
-        clusters_of(("a", "20", "10"), ("b", "20", "10")), split=DISCOVERY, n_prints=POWERED
+        spread("20", TICKER_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY, n_prints=POWERED
     )
     holdout = readout(Tally(), split=HOLDOUT, horizon_s=PRIMARY_HORIZON_S, seed=SEED)
 
@@ -676,7 +786,7 @@ def test_a_holdout_with_no_usable_prints_is_underpowered() -> None:
 def test_a_discovery_with_no_usable_prints_carries_no_gate() -> None:
     discovery = readout(Tally(), split=DISCOVERY, horizon_s=PRIMARY_HORIZON_S, seed=SEED)
     holdout = readout_of(
-        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+        spread("20", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
     )
 
     decision = decide(discovery, holdout)
@@ -689,10 +799,10 @@ def test_a_discovery_with_no_usable_prints_carries_no_gate() -> None:
 
 def test_a_discovery_estimate_of_exactly_zero_closes_without_a_replication() -> None:
     discovery = readout_of(
-        clusters_of(("a", "0", "10"), ("b", "0", "10")), split=DISCOVERY, n_prints=POWERED
+        spread("0", TICKER_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY, n_prints=POWERED
     )
     holdout = readout_of(
-        clusters_of(("c", "20", "10"), ("d", "20", "10")), split=HOLDOUT, n_prints=HOLDOUT_POWERED
+        spread("20", TICKER_MIN_HOLDOUT, split=HOLDOUT), split=HOLDOUT, n_prints=HOLDOUT_POWERED
     )
 
     decision = decide(discovery, holdout)
@@ -707,8 +817,9 @@ def test_a_discovery_estimate_of_exactly_zero_closes_without_a_replication() -> 
             discovery_estimate=Decimal("0"),
             holdout_estimate=Decimal("2"),
             holdout_p_value=0.0,
-            holdout_n=HOLDOUT_POWERED,
-            discovery_n_min=PRINT_MIN_DISCOVERY,
+            holdout_result=holdout.bootstrap,
+            discovery_n_min=TICKER_MIN_DISCOVERY,
             alpha=0.05,
-            n_unit="prints",
+            n_unit=TICKERS,
+            undecidable=False,
         )

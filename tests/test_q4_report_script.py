@@ -44,6 +44,7 @@ from tests.test_lock_convergence import (
     SEED,
     STATION,
     artifacts_dir,
+    flat,
     scope_dir,
     spread,
 )
@@ -399,7 +400,37 @@ async def test_a_gate_and_a_replication_that_ran_are_rendered_off_the_verdicts_t
         in report
     )
     assert f"replicated={replication['replicated']}" in report
+    assert f"undecidable={gate['undecidable']} passed={gate['passed']}" in report
+    assert (
+        f"undecidable={replication['undecidable']} replicated={replication['replicated']}" in report
+    )
     assert "did not run" not in report
+
+
+async def test_a_verdict_no_resample_moved_names_the_refusal_in_the_report(
+    paths: dict[str, Path],
+    run_root: Path,
+    mock_http: list[httpx.Request],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert await run(args_for(paths, run_root)) == 0
+    capsys.readouterr()
+    decision = decide(
+        flat("600", STATION_DAY_MIN, split=DISCOVERY),
+        flat("600", (STATION_DAY_MIN + 1) // 2, split=HOLDOUT),
+    )
+
+    report = format_report(
+        results_of(run_root)
+        | {
+            "gate": _gate_payload(decision.gate),
+            "replication": _replication_payload(decision.replication),
+            "replication_skipped": decision.skipped,
+        }
+    )
+
+    assert "undecidable=True passed=False" in report
+    assert "undecidable=True replicated=False" in report
 
 
 async def test_the_run_reuses_the_cache_the_first_attempt_left_behind(

@@ -65,6 +65,7 @@ BUCKETS = (TAKING, PROVIDING)
 PASS = "PASS"
 CLOSED = "CLOSED"
 UNDERPOWERED = "UNDERPOWERED"
+UNDECIDABLE = "UNDECIDABLE"
 
 NOT_POWERED = "discovery carries too few station event-days for any statistic to be read"
 NO_ESTIMATE = "a split with no surviving half-life carries no estimate to replicate"
@@ -547,33 +548,43 @@ def decide(discovery: SplitReadout, holdout: SplitReadout) -> Decision:
     gate = evaluate_gate(
         estimate=discovery.bootstrap.estimate,
         p_value=discovery.bootstrap.p_value,
-        n=discovery.n_station_days,
+        result=discovery.bootstrap,
         threshold=HALF_LIFE_THRESHOLD_S,
         direction=DIRECTION,
         alpha=ALPHA,
         n_min=STATION_DAY_MIN,
         n_unit=STATION_DAYS,
+        undecidable=discovery.bootstrap.degenerate,
     )
+    replication = None
     if holdout.bootstrap is None:
-        return Decision(gate=gate, replication=None, skipped=NO_ESTIMATE, verdict=CLOSED)
-    if gate.estimate == 0:
-        return Decision(gate=gate, replication=None, skipped=ZERO_ESTIMATE, verdict=CLOSED)
+        skipped = NO_ESTIMATE
+    elif gate.estimate == 0:
+        skipped = ZERO_ESTIMATE
+    else:
+        skipped = ""
+        replication = evaluate_holdout(
+            discovery_estimate=gate.estimate,
+            holdout_estimate=holdout.bootstrap.estimate,
+            holdout_p_value=holdout.bootstrap.p_value,
+            holdout_result=holdout.bootstrap,
+            discovery_n_min=STATION_DAY_MIN,
+            alpha=HOLDOUT_ALPHA,
+            n_unit=STATION_DAYS,
+            undecidable=holdout.bootstrap.degenerate,
+        )
 
-    replication = evaluate_holdout(
-        discovery_estimate=gate.estimate,
-        holdout_estimate=holdout.bootstrap.estimate,
-        holdout_p_value=holdout.bootstrap.p_value,
-        holdout_n=holdout.n_station_days,
-        discovery_n_min=STATION_DAY_MIN,
-        alpha=HOLDOUT_ALPHA,
-        n_unit=STATION_DAYS,
-    )
-    return Decision(
-        gate=gate,
-        replication=replication,
-        skipped="",
-        verdict=PASS if gate.passed and replication.replicated else CLOSED,
-    )
+    # A half-life the threshold already rejects is closed on its economics whatever the resamples
+    # did, so degeneracy is only read once the estimate has cleared it.
+    if not gate.economic:
+        verdict = CLOSED
+    elif replication is not None and (gate.undecidable or replication.undecidable):
+        verdict = UNDECIDABLE
+    elif replication is not None and gate.passed and replication.replicated:
+        verdict = PASS
+    else:
+        verdict = CLOSED
+    return Decision(gate=gate, replication=replication, skipped=skipped, verdict=verdict)
 
 
 def execute(
@@ -785,6 +796,7 @@ def _gate_payload(gate: GateVerdict | None) -> dict | None:
         "economic": gate.economic,
         "significant": gate.significant,
         "powered": gate.powered,
+        "undecidable": gate.undecidable,
         "passed": gate.passed,
     }
 
@@ -804,5 +816,6 @@ def _replication_payload(replication: HoldoutVerdict | None) -> dict | None:
         "magnitude": replication.magnitude,
         "significant": replication.significant,
         "powered": replication.powered,
+        "undecidable": replication.undecidable,
         "replicated": replication.replicated,
     }

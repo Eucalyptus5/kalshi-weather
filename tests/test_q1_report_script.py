@@ -14,7 +14,7 @@ from bot.lag.ladder_consistency import (
     SUM_BUY,
     SUM_SELL,
 )
-from bot.lag.ladder_run import CLOSED, RESULTS_NAME
+from bot.lag.ladder_run import CLOSED, RESULTS_NAME, UNDECIDABLE
 from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME
 from bot.replay.run_scope import DISCOVERY, HOLDOUT, RESUBSCRIBE_BLIND
 from scripts.q1_report import (
@@ -131,7 +131,7 @@ def test_the_results_carry_the_readout_the_question_asked_for(
     assert run(args_for(paths, run_root)) == 0
 
     results = results_of(run_root)
-    assert results["verdict"] == CLOSED
+    assert results["verdict"] == UNDECIDABLE
     assert results["excess_bar"] == str(EXCESS_BAR)
     assert results["depth_min"] == str(DEPTH_MIN)
     assert results["universe"] == {"read": "recorded", "series": [SERIES]}
@@ -146,8 +146,13 @@ def test_the_results_carry_the_readout_the_question_asked_for(
     assert results["gate"]["powered"] is False
     assert results["gate"]["n_min"] == CITY_DAY_MIN_DISCOVERY
     assert results["gate"]["n_unit"] == "city event-days"
+    assert results["gate"]["undecidable"] is True
     assert results["replication"]["holdout_n_min"] == CITY_DAY_MIN_HOLDOUT
+    assert results["replication"]["undecidable"] is True
     assert results["replication"]["replicated"] is False
+    report = format_report(results)
+    assert "undecidable=True  passed=False" in report
+    assert "undecidable=True  replicated=False" in report
     assert results["rows"] == 16
     assert results["cities"] == [SERIES]
     assert results["tickers_per_city_day"] == {
@@ -162,14 +167,14 @@ def test_the_results_carry_the_readout_the_question_asked_for(
     }
 
 
-def test_a_rare_edge_closes_the_question_without_calling_it_underpowered(
+def test_a_rare_edge_refuses_a_verdict_without_calling_itself_underpowered(
     paths: dict[str, Path], run_root: Path
 ) -> None:
     assert run(args_for(paths, run_root)) == 0
 
     results = results_of(run_root)
     assert results["discovery"]["n_city_days"] < CITY_DAY_MIN_DISCOVERY
-    assert results["verdict"] == CLOSED
+    assert results["verdict"] == UNDECIDABLE
     assert "UNDERPOWERED" not in json.dumps(results)
     assert "UNDERPOWERED" not in format_report(results)
 

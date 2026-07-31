@@ -79,6 +79,7 @@ ADMITTED = "kept_tradeable"
 
 PASS = "PASS"
 CLOSED = "CLOSED"
+UNDECIDABLE = "UNDECIDABLE"
 ZERO_ESTIMATE = "a discovery estimate of exactly zero fixes no direction to replicate"
 NO_ESTIMATE = "a split with no surviving tradeable episode carries no estimate to replicate"
 
@@ -379,12 +380,13 @@ def decide(discovery: SplitReadout, holdout: SplitReadout) -> Decision:
         else evaluate_gate(
             estimate=discovery.bootstrap.estimate,
             p_value=discovery.bootstrap.p_value,
-            n=discovery.n_city_days,
+            result=discovery.bootstrap,
             threshold=EXCESS_BAR,
             direction=DIRECTION,
             alpha=ALPHA,
             n_min=CITY_DAY_MIN_DISCOVERY,
             n_unit=CITY_DAYS,
+            undecidable=discovery.bootstrap.degenerate,
         )
     )
     replication = None
@@ -398,16 +400,24 @@ def decide(discovery: SplitReadout, holdout: SplitReadout) -> Decision:
             discovery_estimate=gate.estimate,
             holdout_estimate=holdout.bootstrap.estimate,
             holdout_p_value=holdout.bootstrap.p_value,
-            holdout_n=holdout.n_city_days,
+            holdout_result=holdout.bootstrap,
             discovery_n_min=CITY_DAY_MIN_DISCOVERY,
             alpha=HOLDOUT_ALPHA,
             n_unit=CITY_DAYS,
+            undecidable=holdout.bootstrap.degenerate,
         )
 
-    passed = replication is not None and gate.passed and replication.replicated
-    return Decision(
-        gate=gate, replication=replication, skipped=skipped, verdict=PASS if passed else CLOSED
-    )
+    # An edge under the bar is closed on its economics whatever the resamples did, so degeneracy is
+    # only read once the estimate has cleared the bar.
+    if gate is None or not gate.economic:
+        verdict = CLOSED
+    elif replication is not None and (gate.undecidable or replication.undecidable):
+        verdict = UNDECIDABLE
+    elif replication is not None and gate.passed and replication.replicated:
+        verdict = PASS
+    else:
+        verdict = CLOSED
+    return Decision(gate=gate, replication=replication, skipped=skipped, verdict=verdict)
 
 
 def execute(
@@ -578,6 +588,7 @@ def _gate_payload(gate: GateVerdict | None) -> dict | None:
         "economic": gate.economic,
         "significant": gate.significant,
         "powered": gate.powered,
+        "undecidable": gate.undecidable,
         "passed": gate.passed,
     }
 
@@ -597,5 +608,6 @@ def _replication_payload(replication: HoldoutVerdict | None) -> dict | None:
         "magnitude": replication.magnitude,
         "significant": replication.significant,
         "powered": replication.powered,
+        "undecidable": replication.undecidable,
         "replicated": replication.replicated,
     }
