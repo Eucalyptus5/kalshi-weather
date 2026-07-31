@@ -18,6 +18,7 @@ from bot.lag.depth_map import (
     TOUCH_DEPTH_BAR,
     YES_SIDE,
     WeightedTally,
+    _FOLD_PAIRS,
     atm_leg,
     cell_edges,
     classify_print,
@@ -506,6 +507,82 @@ def test_an_unseen_group_has_no_span_and_no_quantile() -> None:
     assert tally.groups() == []
     assert pooled_span(tally, 7) == 0
     assert pooled_quantile(tally, 7, 1, 2) is None
+
+
+def test_a_pair_seen_on_both_sides_of_a_fold_lands_in_one_bin() -> None:
+    tally = WeightedTally()
+    batch = _FOLD_PAIRS // 4
+    for _ in range(6):
+        tally.add(
+            np.full(batch, 3, dtype=np.int64),
+            np.full(batch, 11, dtype=np.int64),
+            np.ones(batch, dtype=np.int64),
+        )
+    assert tally.pooled([3]) == {11: 6 * batch}
+    assert tally.entries() == 1
+
+
+def test_interleaved_groups_and_values_read_back_sorted() -> None:
+    tally = WeightedTally()
+    tally.add(
+        np.array([1, 0, 1], dtype=np.int64),
+        np.array([9, 5, 2], dtype=np.int64),
+        np.array([10, 4, 30], dtype=np.int64),
+    )
+    tally.add(
+        np.array([0, 1], dtype=np.int64),
+        np.array([3, 9], dtype=np.int64),
+        np.array([6, 10], dtype=np.int64),
+    )
+    assert tally.groups() == [0, 1]
+    assert list(tally.pooled([1])) == [2, 9]
+    assert tally.pooled([1]) == {2: 30, 9: 20}
+    assert tally.pooled([0]) == {3: 6, 5: 4}
+    assert weighted_quantile(tally.pooled([0, 1]), 1, 2) == 2
+
+
+def test_weights_past_the_float_mantissa_sum_without_losing_the_low_bit() -> None:
+    tally = WeightedTally()
+    heavy = 2**53 + 1
+    tally.add(
+        np.zeros(3, dtype=np.int64),
+        np.full(3, 7, dtype=np.int64),
+        np.full(3, heavy, dtype=np.int64),
+    )
+    tally.add(
+        np.zeros(2, dtype=np.int64),
+        np.full(2, 7, dtype=np.int64),
+        np.full(2, heavy, dtype=np.int64),
+    )
+    assert tally.pooled([0]) == {7: 5 * heavy}
+
+
+def test_entries_counts_each_packed_bin_once() -> None:
+    tally = WeightedTally()
+    assert tally.entries() == 0
+    tally.add(
+        np.array([0, 0, 1], dtype=np.int64),
+        np.array([5, 6, 5], dtype=np.int64),
+        np.array([1, 2, 3], dtype=np.int64),
+    )
+    assert tally.entries() == 3
+    tally.add(
+        np.array([0, 1], dtype=np.int64),
+        np.array([5, 7], dtype=np.int64),
+        np.array([4, 5], dtype=np.int64),
+    )
+    assert tally.entries() == 4
+    assert tally.pooled([0]) == {5: 5, 6: 2}
+
+
+def test_a_group_never_added_pools_to_nothing_beside_a_packed_one() -> None:
+    tally = WeightedTally()
+    tally.add(
+        np.array([2], dtype=np.int64), np.array([4], dtype=np.int64), np.array([9], dtype=np.int64)
+    )
+    assert tally.pooled([5]) == {}
+    assert weighted_quantile(tally.pooled([5]), 1, 2) is None
+    assert tally.entries() == 1
 
 
 def test_weighted_quantile_reads_a_bare_mapping() -> None:

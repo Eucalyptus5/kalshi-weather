@@ -31,6 +31,7 @@ _HOURS_PER_DAY = 24
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MICROSECOND = timedelta(microseconds=1)
 _BEFORE_EVERYTHING = np.iinfo(np.int64).min
+_FOLD_PAIRS = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,31 +109,67 @@ def walk_capacity(
 
 class WeightedTally:
     def __init__(self) -> None:
-        self._bins: dict[int, dict[int, int]] = {}
+        self._packed: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+        self._buffered: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        self._pending = 0
 
     def add(self, groups: np.ndarray, values: np.ndarray, weights: np.ndarray) -> None:
-        pairs, inverse = np.unique(np.stack((groups, values)), axis=1, return_inverse=True)
-        # The weights are microsecond durations and the whole accrual window is 1.2e12 of them,
-        # far under 2**53, so the float64 sum and the cast back are both exact.
-        totals = np.bincount(np.ravel(inverse), weights=weights, minlength=pairs.shape[1]).astype(
-            np.int64
-        )
-        for column in range(pairs.shape[1]):
-            bins = self._bins.setdefault(int(pairs[0, column]), {})
-            value = int(pairs[1, column])
-            bins[value] = bins.get(value, 0) + int(totals[column])
+        self._buffered.append((groups, values, weights))
+        self._pending += values.size
+        if self._pending >= _FOLD_PAIRS:
+            self._fold()
 
     # A quantile over several groups at once is not a function of their quantiles, so pooling has
     # to reach the bins themselves; weighted_quantile takes what this returns.
     def pooled(self, groups: Iterable[int]) -> dict[int, int]:
+        self._fold()
         merged: dict[int, int] = {}
         for group in groups:
-            for value, weight in self._bins.get(group, {}).items():
+            packed = self._packed.get(group)
+            if packed is None:
+                continue
+            for value, weight in zip(packed[0].tolist(), packed[1].tolist(), strict=True):
                 merged[value] = merged.get(value, 0) + weight
         return merged
 
     def groups(self) -> list[int]:
-        return sorted(self._bins)
+        self._fold()
+        return sorted(self._packed)
+
+    def entries(self) -> int:
+        self._fold()
+        return sum(values.size for values, _ in self._packed.values())
+
+    def _fold(self) -> None:
+        if self._pending == 0:
+            return
+        chunks = self._buffered
+        self._buffered = []
+        self._pending = 0
+        touched: set[int] = set()
+        for chunk in chunks:
+            touched.update(np.unique(chunk[0]).tolist())
+        # A group already packed rejoins the stream: a value seen again many batches later has to
+        # land back in the bin it already holds rather than opening a second one beside it.
+        for group in touched & self._packed.keys():
+            packed = self._packed.pop(group)
+            chunks.append((np.full(packed[0].size, group, dtype=np.int64), packed[0], packed[1]))
+
+        groups = np.concatenate([chunk[0] for chunk in chunks])
+        values = np.concatenate([chunk[1] for chunk in chunks])
+        weights = np.concatenate([chunk[2] for chunk in chunks])
+        order = np.lexsort((values, groups))
+        groups, values, weights = groups[order], values[order], weights[order]
+        opens = np.ones(groups.size, dtype=bool)
+        opens[1:] = (groups[1:] != groups[:-1]) | (values[1:] != values[:-1])
+        starts = np.flatnonzero(opens)
+        keys, bins, sums = groups[starts], values[starts], np.add.reduceat(weights, starts)
+        edges = np.flatnonzero(keys[1:] != keys[:-1]) + 1
+        # Copied rather than sliced: a view would pin the whole folded stream behind one group.
+        for part_keys, part_values, part_weights in zip(
+            np.split(keys, edges), np.split(bins, edges), np.split(sums, edges), strict=True
+        ):
+            self._packed[int(part_keys[0])] = (part_values.copy(), part_weights.copy())
 
 
 def weighted_quantile(bins: Mapping[int, int], numerator: int, denominator: int) -> int | None:

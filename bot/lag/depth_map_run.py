@@ -314,11 +314,16 @@ def sweep_depth(scope: RunScope, artifacts: Path, closes: Mapping[str, datetime]
         rows += root.rows
         cells += root.cells
         logger.info(
-            "depth_map root=%s rows=%d cells=%d legs=%d elapsed_s=%.1f",
+            "depth_map root=%s rows=%d cells=%d legs=%d entries=%d elapsed_s=%.1f",
             series,
             root.rows,
             root.cells,
             len(root.plans),
+            sum(
+                getattr(tally, name).entries()
+                for tally in tallies.values()
+                for name in (*SIDED_TALLIES, "spread")
+            ),
             time.monotonic() - started,
         )
 
