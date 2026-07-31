@@ -293,6 +293,40 @@ def test_cluster_labels_are_opaque() -> None:
     assert first == second
 
 
+def test_cluster_bootstrap_flags_identical_clusters_as_degenerate() -> None:
+    clusters = [
+        ClusterAggregate(cluster=f"city-{i}", total=Decimal("1"), weight=Decimal("1"))
+        for i in range(30)
+    ]
+    result = cluster_bootstrap(
+        clusters,
+        null_value=Decimal("0"),
+        direction="greater",
+        resamples=10000,
+        seed=1,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    assert result.degenerate
+    assert result.replicate_spread == 0.0
+    assert result.p_value == pytest.approx(9.999e-05)
+    assert (result.ci_low, result.ci_high) == (1.0, 1.0)
+
+
+def test_cluster_bootstrap_does_not_flag_clusters_that_genuinely_differ() -> None:
+    rng = np.random.default_rng(2026)
+    clusters = _unit_clusters(rng.standard_normal(30) + 1.0)
+    result = cluster_bootstrap(
+        clusters,
+        null_value=Decimal("0"),
+        direction="greater",
+        resamples=FIXTURE_RESAMPLES,
+        seed=9,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    assert not result.degenerate
+    assert result.replicate_spread > 0.0
+
+
 def test_median_of_an_odd_pool_is_the_middle_observation() -> None:
     result = cluster_median_bootstrap(
         [_pool("den", "1", "5", "9"), _pool("aus", "2", "4")],
@@ -376,6 +410,39 @@ def test_median_interval_reflects_the_replicates_through_the_estimate() -> None:
     assert low_q < high_q
     assert result.ci_low == pytest.approx(2 * theta - high_q)
     assert result.ci_high == pytest.approx(2 * theta - low_q)
+
+
+def test_cluster_median_bootstrap_flags_clusters_that_do_not_differ_as_degenerate() -> None:
+    clusters = [_pool(f"city-{i}", "0", "1", "2") for i in range(30)]
+    result = cluster_median_bootstrap(
+        clusters,
+        null_value=Decimal("0"),
+        direction="greater",
+        resamples=MEDIAN_RESAMPLES,
+        seed=1,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    assert result.degenerate
+    assert result.replicate_spread == 0.0
+
+
+def test_cluster_median_bootstrap_does_not_flag_clusters_that_genuinely_differ() -> None:
+    clusters = [
+        _pool("den", "1", "2", "3"),
+        _pool("aus", "4", "40"),
+        _pool("nyc", "5"),
+        _pool("chi", "6", "60", "600"),
+    ]
+    result = cluster_median_bootstrap(
+        clusters,
+        null_value=Decimal("0"),
+        direction="greater",
+        resamples=MEDIAN_RESAMPLES,
+        seed=404,
+        ci_level=FIXTURE_CI_LEVEL,
+    )
+    assert not result.degenerate
+    assert result.replicate_spread > 0.0
 
 
 def test_a_seed_repeats_the_median_bootstrap() -> None:

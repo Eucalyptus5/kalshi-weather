@@ -55,6 +55,8 @@ class BootstrapResult:
     ci_level: float
     ci_low: float
     ci_high: float
+    replicate_spread: float
+    degenerate: bool
     n_clusters: int
     resamples: int
     seed: int
@@ -114,6 +116,7 @@ def cluster_bootstrap(
     # The basic interval reflects the replicates through the estimate, so it inverts the same
     # pivot the p-value tests and its upper quantile carries the lower bound.
     low_q, high_q = np.percentile(replicates, [50 * (1 - ci_level), 50 * (1 + ci_level)])
+    replicate_spread, degenerate = _replicate_spread(replicates)
 
     return BootstrapResult(
         estimate=estimate,
@@ -123,6 +126,8 @@ def cluster_bootstrap(
         ci_level=ci_level,
         ci_low=2 * theta - float(high_q),
         ci_high=2 * theta - float(low_q),
+        replicate_spread=replicate_spread,
+        degenerate=degenerate,
         n_clusters=len(clusters),
         resamples=resamples,
         seed=seed,
@@ -163,6 +168,7 @@ def cluster_median_bootstrap(
     extreme = pivot >= observed if direction == "greater" else pivot <= observed
 
     low_q, high_q = np.percentile(replicates, [50 * (1 - ci_level), 50 * (1 + ci_level)])
+    replicate_spread, degenerate = _replicate_spread(replicates)
 
     return BootstrapResult(
         estimate=estimate,
@@ -172,6 +178,8 @@ def cluster_median_bootstrap(
         ci_level=ci_level,
         ci_low=2 * theta - float(high_q),
         ci_high=2 * theta - float(low_q),
+        replicate_spread=replicate_spread,
+        degenerate=degenerate,
         n_clusters=len(clusters),
         resamples=resamples,
         seed=seed,
@@ -206,6 +214,13 @@ def _vanishes(block_se: np.ndarray, scale: np.ndarray, n_terms: int) -> np.ndarr
     # that reaches float64 is summation noise, which only reads as zero against the scale it
     # cancelled from. Testing == 0 instead lets a rate like 1/3 carry a 1e-29 standard error.
     return block_se <= n_terms * np.finfo(float).eps * scale
+
+
+def _replicate_spread(replicates: np.ndarray) -> tuple[float, bool]:
+    spread = float(np.std(replicates))
+    scale = float(np.mean(np.abs(replicates)))
+    degenerate = _vanishes(np.array([spread]), np.array([scale]), replicates.size)[0]
+    return spread, bool(degenerate)
 
 
 def _wild_t(
