@@ -122,9 +122,6 @@ class WeightedTally:
             value = int(pairs[1, column])
             bins[value] = bins.get(value, 0) + int(totals[column])
 
-    def weight(self, group: int) -> int:
-        return sum(self._bins.get(group, {}).values())
-
     # A quantile over several groups at once is not a function of their quantiles, so pooling has
     # to reach the bins themselves; weighted_quantile takes what this returns.
     def pooled(self, groups: Iterable[int]) -> dict[int, int]:
@@ -133,9 +130,6 @@ class WeightedTally:
             for value, weight in self._bins.get(group, {}).items():
                 merged[value] = merged.get(value, 0) + weight
         return merged
-
-    def quantile(self, group: int, numerator: int, denominator: int) -> int | None:
-        return weighted_quantile(self._bins.get(group, {}), numerator, denominator)
 
     def groups(self) -> list[int]:
         return sorted(self._bins)
@@ -188,20 +182,14 @@ def screen_cells(
 
 # The leg picker bot.lag.lead_lag.atm_series carries, on integer arrays rather than on a parquet
 # table of strings: that one converts prices in a per-element Decimal loop and materialises every
-# column through to_pylist(), which neither finishes nor fits in 3 GB over 239 million rows.
-def atm_leg(
-    legs: Sequence[str],
-    seats: np.ndarray,
-    mid2: np.ndarray,
-    two_sided: np.ndarray,
-    inside: np.ndarray,
-) -> int | None:
-    quoted = inside & two_sided
+# column through to_pylist(), which neither finishes nor fits in 3 GB over 239 million rows. The
+# caller hands over the rows that already quoted two-sided inside the event-day window.
+def atm_leg(legs: Sequence[str], seats: np.ndarray, mid2: np.ndarray) -> int | None:
     distance = np.abs(mid2 - PRICE_TICKS)
     picked = -1
     nearest = 0
     for seat in range(len(legs)):
-        rows = np.flatnonzero(quoted & (seats == seat))
+        rows = np.flatnonzero(seats == seat)
         if rows.size == 0:
             continue
         # An even row count puts the median on a half tick, so double again to keep int() exact.

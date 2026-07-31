@@ -172,16 +172,30 @@ def touch_table(rows: Sequence[dict]) -> pa.Table:
     )
 
 
-def leg_arrays(
-    rows: Sequence[dict],
-) -> tuple[tuple[str, ...], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+# The sweep hands atm_leg the rows it already filtered, so the fixture filters the same way.
+def leg_arrays(rows: Sequence[dict]) -> tuple[tuple[str, ...], np.ndarray, np.ndarray]:
     legs = tuple(sorted({row["ticker"] for row in rows}))
     seats = np.array([legs.index(row["ticker"]) for row in rows], dtype=np.int64)
     yes_bid = np.array([int(Decimal(row["yes_bid"]) * PRICE_TICKS) for row in rows], dtype=np.int64)
     no_bid = np.array([int(Decimal(row["no_bid"]) * PRICE_TICKS) for row in rows], dtype=np.int64)
     received = np.array([micros(row["received_at"]) for row in rows], dtype=np.int64)
-    inside = (received >= micros(WINDOW_START)) & (received <= micros(WINDOW_END))
-    return legs, seats, yes_bid + PRICE_TICKS - no_bid, (yes_bid > 0) & (no_bid > 0), inside
+    quoted = (
+        (yes_bid > 0)
+        & (no_bid > 0)
+        & (received >= micros(WINDOW_START))
+        & (received <= micros(WINDOW_END))
+    )
+    return legs, seats[quoted], (yes_bid + PRICE_TICKS - no_bid)[quoted]
+
+
+def pooled_span(tally: WeightedTally, group: int) -> int:
+    return sum(tally.pooled([group]).values())
+
+
+def pooled_quantile(
+    tally: WeightedTally, group: int, numerator: int, denominator: int
+) -> int | None:
+    return weighted_quantile(tally.pooled([group]), numerator, denominator)
 
 
 def event_day() -> EventDay:
@@ -432,8 +446,8 @@ def test_an_hour_at_depth_one_outweighs_a_second_at_depth_two_hundred() -> None:
         np.array([1, 200], dtype=np.int64),
         np.array([3_600_000_000, 1_000_000], dtype=np.int64),
     )
-    assert tally.quantile(0, 1, 2) == 1
-    assert tally.weight(0) == 3_601_000_000
+    assert pooled_quantile(tally, 0, 1, 2) == 1
+    assert pooled_span(tally, 0) == 3_601_000_000
 
 
 def test_the_tally_keeps_its_groups_apart() -> None:
@@ -444,11 +458,11 @@ def test_the_tally_keeps_its_groups_apart() -> None:
         np.array([10, 30, 10], dtype=np.int64),
     )
     assert tally.groups() == [0, 1]
-    assert tally.weight(0) == 10
-    assert tally.weight(1) == 40
-    assert tally.quantile(0, 1, 2) == 5
-    assert tally.quantile(1, 1, 2) == 9
-    assert tally.quantile(1, 9, 10) == 11
+    assert pooled_span(tally, 0) == 10
+    assert pooled_span(tally, 1) == 40
+    assert pooled_quantile(tally, 0, 1, 2) == 5
+    assert pooled_quantile(tally, 1, 1, 2) == 9
+    assert pooled_quantile(tally, 1, 9, 10) == 11
 
 
 def test_repeated_batches_fold_into_the_same_bin() -> None:
@@ -459,8 +473,8 @@ def test_repeated_batches_fold_into_the_same_bin() -> None:
             np.array([4, 4], dtype=np.int64),
             np.array([7, 5], dtype=np.int64),
         )
-    assert tally.weight(2) == 36
-    assert tally.quantile(2, 1, 2) == 4
+    assert pooled_span(tally, 2) == 36
+    assert pooled_quantile(tally, 2, 1, 2) == 4
 
 
 def test_microsecond_weights_stay_exact_across_the_accrual_window() -> None:
@@ -470,7 +484,7 @@ def test_microsecond_weights_stay_exact_across_the_accrual_window() -> None:
         np.array([3, 4], dtype=np.int64),
         np.array([1_200_000_000_000, 1], dtype=np.int64),
     )
-    assert tally.weight(0) == 1_200_000_000_001
+    assert pooled_span(tally, 0) == 1_200_000_000_001
 
 
 def test_pooling_groups_merges_their_bins() -> None:
@@ -487,11 +501,11 @@ def test_pooling_groups_merges_their_bins() -> None:
     assert weighted_quantile(tally.pooled([0, 1]), 1, 2) == 5
 
 
-def test_an_unseen_group_has_no_weight_and_no_quantile() -> None:
+def test_an_unseen_group_has_no_span_and_no_quantile() -> None:
     tally = WeightedTally()
     assert tally.groups() == []
-    assert tally.weight(7) == 0
-    assert tally.quantile(7, 1, 2) is None
+    assert pooled_span(tally, 7) == 0
+    assert pooled_quantile(tally, 7, 1, 2) is None
 
 
 def test_weighted_quantile_reads_a_bare_mapping() -> None:
@@ -653,8 +667,8 @@ def test_the_atm_leg_matches_the_series_picker_on_two_legs() -> None:
     picked = atm_series(
         SERIES, EVENT_DATE, touch_table(rows), window_start=WINDOW_START, window_end=WINDOW_END
     )
-    legs, seats, mid2, two_sided, inside = leg_arrays(rows)
-    seat = atm_leg(legs, seats, mid2, two_sided, inside)
+    legs, seats, mid2 = leg_arrays(rows)
+    seat = atm_leg(legs, seats, mid2)
     assert legs[seat] == picked.ticker == LEG_B
 
 
@@ -668,8 +682,8 @@ def test_the_atm_leg_breaks_a_tie_the_same_way_the_series_picker_does() -> None:
     picked = atm_series(
         SERIES, EVENT_DATE, touch_table(rows), window_start=WINDOW_START, window_end=WINDOW_END
     )
-    legs, seats, mid2, two_sided, inside = leg_arrays(rows)
-    assert legs[atm_leg(legs, seats, mid2, two_sided, inside)] == picked.ticker == LEG_A
+    legs, seats, mid2 = leg_arrays(rows)
+    assert legs[atm_leg(legs, seats, mid2)] == picked.ticker == LEG_A
 
 
 def test_the_atm_leg_picks_nothing_when_no_state_is_two_sided() -> None:
@@ -680,8 +694,8 @@ def test_the_atm_leg_picks_nothing_when_no_state_is_two_sided() -> None:
         )
         is None
     )
-    legs, seats, mid2, two_sided, inside = leg_arrays(rows)
-    assert atm_leg(legs, seats, mid2, two_sided, inside) is None
+    legs, seats, mid2 = leg_arrays(rows)
+    assert atm_leg(legs, seats, mid2) is None
 
 
 def test_the_atm_leg_ignores_states_outside_the_window() -> None:
@@ -692,8 +706,11 @@ def test_the_atm_leg_ignores_states_outside_the_window() -> None:
         quoted(10, LEG_A, "0.90"),
         quoted(10, LEG_B, "0.55"),
     ]
-    legs, seats, mid2, two_sided, inside = leg_arrays(rows)
-    assert legs[atm_leg(legs, seats, mid2, two_sided, inside)] == LEG_B
+    picked = atm_series(
+        SERIES, EVENT_DATE, touch_table(rows), window_start=WINDOW_START, window_end=WINDOW_END
+    )
+    legs, seats, mid2 = leg_arrays(rows)
+    assert legs[atm_leg(legs, seats, mid2)] == picked.ticker == LEG_B
 
 
 def test_a_print_at_the_yes_bid_consumed_the_yes_side() -> None:

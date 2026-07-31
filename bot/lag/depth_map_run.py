@@ -68,8 +68,9 @@ MAX_BUCKETS = 8
 HOURS_PER_DAY = 24
 PRICE_DECIMALS = 4
 SIZE_DECIMALS = 2
-SLIPPAGE_BAR_UNITS = PRICE_TICKS // 100
+SLIPPAGE_BAR_UNITS = int(SLIPPAGE_BAR_CENTS * PRICE_TICKS // 100)
 TICKS_PER_CENT = PRICE_TICKS // 100
+REPLENISH_NUMERATOR, REPLENISH_DENOMINATOR = REPLENISH_FRACTION.as_integer_ratio()
 MICROS_PER_S = 1_000_000
 MICROS_PER_HOUR = 3_600 * MICROS_PER_S
 FINAL_BUCKETS = tuple(range(FINAL_HOURS // BUCKET_HOURS))
@@ -425,7 +426,7 @@ def _measure(
 
     at = (np.searchsorted(book.times, starts, side="right") - 1)[keep]
     starts, durations = starts[keep], durations[keep]
-    bucket = hours_to_close_bucket(np.full(starts.shape, plan.close_us), starts, BUCKET_HOURS)
+    bucket = _bucket_of(np.full(starts.shape, plan.close_us), starts)
     if int(bucket.max()) >= MAX_BUCKETS:
         raise ValueError(
             f"{plan.series} {plan.event_date.isoformat()} closes more than "
@@ -474,8 +475,7 @@ def _picks(root: _Root, scope: RunScope) -> dict[date, str | None]:
         ]
         mid2 = np.concatenate(quotes) if quotes else _NO_QUOTES
         seats = np.repeat(np.arange(len(legs), dtype=np.int64), [chunk.size for chunk in quotes])
-        quoted = np.ones(mid2.size, dtype=bool)
-        seat = atm_leg(legs, seats, mid2, quoted, quoted)
+        seat = atm_leg(legs, seats, mid2)
         picked[event_date] = None if seat is None else legs[seat]
     return picked
 
@@ -588,8 +588,6 @@ def _replenishment(
     trade_price: np.ndarray,
     targets: Sequence[Resilience],
 ) -> None:
-    if trade_times.size == 0:
-        return
     pre = np.searchsorted(times, trade_times, side="right") - 1
     opens = np.concatenate(([0], np.flatnonzero(np.diff(pre)) + 1))
     closes = np.append(opens[1:], pre.size)
@@ -648,10 +646,8 @@ def _replenishment(
             continue
 
         bucket = int(
-            hours_to_close_bucket(
-                np.array([close_us], dtype=np.int64),
-                np.array([printed_at], dtype=np.int64),
-                BUCKET_HOURS,
+            _bucket_of(
+                np.array([close_us], dtype=np.int64), np.array([printed_at], dtype=np.int64)
             )[0]
         )
         if bucket >= MAX_BUCKETS:
@@ -661,15 +657,15 @@ def _replenishment(
             )
 
         depth = depths[0] if side == YES_SIDE else depths[1]
-        before = int(depth[state])
+        bar = REPLENISH_NUMERATOR * int(depth[state])
         tallies = [target.tally(series, bucket) for target in targets]
         for tally in tallies:
             tally.matched += 1
-        if 2 * int(depth[post]) >= before:
+        if REPLENISH_DENOMINATOR * int(depth[post]) >= bar:
             continue
 
         limit = int(np.searchsorted(times, deadline, side="right"))
-        refilled = np.flatnonzero(2 * depth[post:limit] >= before)
+        refilled = np.flatnonzero(REPLENISH_DENOMINATOR * depth[post:limit] >= bar)
         for tally in tallies:
             tally.events += 1
             if refilled.size:
@@ -1112,7 +1108,16 @@ def _last_at_each(times: np.ndarray) -> np.ndarray:
     return keep
 
 
-def _key(seat: int | np.ndarray, bucket: int | np.ndarray, hour: int | np.ndarray) -> int:
+# hours_to_close_bucket is right-closed, so an instant sitting on a bucket edge reads as the older
+# bucket. A cell's interior and a print at close - FINAL_HOURS both belong to the newer one, so
+# take the bucket a microsecond past the instant handed in.
+def _bucket_of(close_us: np.ndarray, at_us: np.ndarray) -> np.ndarray:
+    return hours_to_close_bucket(close_us, at_us + 1, BUCKET_HOURS)
+
+
+def _key(
+    seat: int | np.ndarray, bucket: int | np.ndarray, hour: int | np.ndarray
+) -> int | np.ndarray:
     return (seat * MAX_BUCKETS + bucket) * HOURS_PER_DAY + hour
 
 

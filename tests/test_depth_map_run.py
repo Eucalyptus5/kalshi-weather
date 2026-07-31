@@ -11,7 +11,13 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from bot.lag.depth_map import BUCKET_HOURS, TOUCH_DEPTH_BAR
+from bot.lag.depth_map import (
+    BUCKET_HOURS,
+    FINAL_HOURS,
+    REPLENISH_FRACTION,
+    SLIPPAGE_BAR_CENTS,
+    TOUCH_DEPTH_BAR,
+)
 from bot.lag.depth_map_run import (
     ALL_LEGS,
     ATM,
@@ -19,16 +25,23 @@ from bot.lag.depth_map_run import (
     CONFIRMED,
     NO,
     REFUTED,
+    REPLENISH_DENOMINATOR,
+    REPLENISH_NUMERATOR,
+    SLIPPAGE_BAR_UNITS,
     YES,
     DepthSweep,
+    PrintTally,
     ResilienceSweep,
+    _prints_payload,
     execute,
     load_close_times,
+    replenish_median_s,
     result_payload,
     sweep_depth,
     sweep_resilience,
     universe_readout,
 )
+from bot.lag.ladder_consistency import PRICE_TICKS
 from bot.lag.r0_universe import Coverage, freeze_universe, write_universe
 from bot.lag.read_rtt import FloorSource
 from bot.lag.tape_studies import load_run_scope
@@ -315,6 +328,13 @@ DEEP_ROWS = (
 DEEP_TRADES = (trade_row(1, LEG_A, stamp(FINAL_HOUR), YES_BID),)
 
 
+def test_the_applied_bars_are_the_preregistered_ones() -> None:
+    assert SLIPPAGE_BAR_UNITS == 100
+    assert (REPLENISH_NUMERATOR, REPLENISH_DENOMINATOR) == (1, 2)
+    assert SLIPPAGE_BAR_CENTS * PRICE_TICKS == SLIPPAGE_BAR_UNITS * 100
+    assert REPLENISH_FRACTION * REPLENISH_DENOMINATOR == REPLENISH_NUMERATOR
+
+
 def test_load_close_times_reads_every_in_scope_leg(tmp_path: Path) -> None:
     scope = load_run_scope(scope_dir(tmp_path))
 
@@ -354,11 +374,36 @@ def test_a_leg_with_no_market_row_stops_the_sweep(tmp_path: Path) -> None:
         sweep_depth(scope, artifacts, closes)
 
 
-def test_an_hour_at_one_contract_outweighs_a_second_at_two_hundred(tmp_path: Path) -> None:
-    readout = universe_readout(swept(tmp_path, THIN_ROWS), ALL_LEGS)
+def test_hours_at_one_contract_outweigh_more_states_at_two_hundred(tmp_path: Path) -> None:
+    rows = (
+        flat(1, LEG_A, stamp(21), THIN),
+        flat(2, LEG_A, stamp(22, 0, 0), "200"),
+        flat(3, LEG_A, stamp(22, 0, 1), "200"),
+        flat(4, LEG_A, stamp(22, 0, 2), "200"),
+        flat(5, LEG_A, stamp(22, 0, 3), "200"),
+        flat(6, LEG_A, stamp(22, 0, 4), THIN),
+    )
+    sweep = swept(tmp_path, rows)
 
-    assert readout.by_city[(SERIES, YES)].touch.p50 == Decimal("1")
-    assert readout.by_hour[(10, YES)].kept_s == Decimal("7200")
+    cell = universe_readout(sweep, ALL_LEGS).by_city[(SERIES, YES)]
+
+    assert sweep.cells == 7
+    assert cell.kept_s == Decimal("10800")
+    assert cell.touch.p50 == Decimal("1")
+    assert cell.touch.p75 == Decimal("1")
+
+
+def test_the_at_the_money_universe_is_not_every_leg(tmp_path: Path) -> None:
+    rows = (flat(1, LEG_A, stamp(10), THIN), flat(2, LEG_B, stamp(10), "300"))
+    sweep = swept(tmp_path, rows)
+
+    all_legs = universe_readout(sweep, ALL_LEGS).by_city[(SERIES, YES)]
+    atm = universe_readout(sweep, ATM).by_city[(SERIES, YES)]
+
+    assert sweep.picks == {(SERIES, EVENT_DATE): LEG_A}
+    assert all_legs.kept_s == atm.kept_s * 2 == Decimal("100800")
+    assert all_legs.touch.p75 == Decimal("300")
+    assert atm.touch.p75 == Decimal("1")
 
 
 def test_a_snapshot_batch_contributes_only_its_final_book(tmp_path: Path) -> None:
@@ -383,6 +428,16 @@ def test_a_state_outliving_an_hour_boundary_is_split_across_both_hours(tmp_path:
     assert readout.by_hour[(10, YES)].kept_s == Decimal("1800")
     assert readout.by_hour[(11, YES)].kept_s == Decimal("3600")
     assert readout.by_hour[(11, YES)].touch.p50 == Decimal("7")
+
+
+def test_a_cell_opening_on_a_bucket_break_lands_in_the_newer_bucket(tmp_path: Path) -> None:
+    rows = (flat(1, LEG_A, stamp(17, 30), "5"), flat(2, LEG_A, stamp(18), "9"))
+
+    readout = universe_readout(swept(tmp_path, rows), ALL_LEGS)
+
+    assert readout.by_bucket[(1, YES)].kept_s == Decimal("1800")
+    assert readout.by_bucket[(0, YES)].kept_s == Decimal("21600")
+    assert readout.by_bucket[(0, YES)].touch.p50 == Decimal("9")
 
 
 def test_a_cell_straddling_an_exclusion_is_dropped_whole(tmp_path: Path) -> None:
@@ -491,6 +546,19 @@ def test_a_ladder_inside_the_stored_width_is_not_censored(tmp_path: Path) -> Non
     assert cell.capacity.p50 == Decimal("1005")
 
 
+def test_a_side_shallower_than_the_stored_width_is_not_censored(tmp_path: Path) -> None:
+    rows = (
+        ladder_row(1, LEG_A, stamp(10), [(YES_BID, "5")], SIX_LEVELS[:5]),
+        ladder_row(2, LEG_A, stamp(11), [(YES_BID, "5")], SIX_LEVELS[:5]),
+    )
+
+    cell = universe_readout(swept(tmp_path, rows), ALL_LEGS).by_hour[(10, NO)]
+
+    assert cell.censored_s == Decimal(0)
+    assert cell.censored_p50 is None
+    assert cell.capacity.p50 == Decimal("1004")
+
+
 def test_a_print_that_halves_the_touch_and_refills_inside_the_window_replenishes(
     tmp_path: Path,
 ) -> None:
@@ -516,6 +584,20 @@ def test_a_refill_after_the_window_does_not_replenish(tmp_path: Path) -> None:
     assert tally.events == 1
     assert tally.replenished == 0
     assert tally.times_us == []
+
+
+def test_a_print_on_the_bucket_break_lands_in_the_final_bucket(tmp_path: Path) -> None:
+    rows = (
+        flat(1, LEG_A, stamp(FINAL_HOUR - 2), DEEP),
+        flat(2, LEG_A, stamp(FINAL_HOUR - 2, 0, 5), "100"),
+    )
+    trades = (trade_row(1, LEG_A, stamp(FINAL_HOUR - 2), YES_BID),)
+
+    result = resilience_of(tmp_path, rows, trades, "break")
+
+    assert stamp(FINAL_HOUR - 2) == CLOSE - timedelta(hours=FINAL_HOURS)
+    assert result.universes[ALL_LEGS].tallies[(SERIES, 0)].events == 1
+    assert (SERIES, 1) not in result.universes[ALL_LEGS].tallies
 
 
 def test_a_print_that_leaves_the_touch_above_half_is_no_resilience_event(tmp_path: Path) -> None:
@@ -552,6 +634,17 @@ def test_several_trades_between_two_states_are_one_print(tmp_path: Path) -> None
 
     assert result.universes[ALL_LEGS].accounting.prints == 1
     assert result.universes[ALL_LEGS].tallies[(SERIES, 0)].events == 1
+
+
+def test_the_replenish_median_is_the_crossing_and_is_declined_under_censoring() -> None:
+    crossed = PrintTally(matched=3, events=3, replenished=2, times_us=[10_000_000, 40_000_000])
+    censored = PrintTally(matched=4, events=4, replenished=2, times_us=[10_000_000, 40_000_000])
+
+    assert replenish_median_s(crossed) == Decimal("40")
+    assert _prints_payload(crossed)["median_replenish_s"] == "40"
+    assert replenish_median_s(censored) is None
+    assert _prints_payload(censored)["median_replenish_s"] is None
+    assert _prints_payload(censored)["replenished_fraction"] == "0.5"
 
 
 def test_a_thin_book_confirms_the_small_capacity_reading(tmp_path: Path) -> None:
@@ -594,6 +687,7 @@ def test_a_deep_book_that_replenishes_refutes_the_small_capacity_reading(tmp_pat
     assert payload["headline"]["median_touch_depth_contracts"] == {YES: "500", NO: "500"}
     assert payload["headline"]["resilience"]["events"] == 1
     assert payload["headline"]["resilience"]["replenished"] == 1
+    assert payload["headline"]["resilience"]["median_replenish_s"] == "35"
 
 
 def test_the_reading_carries_no_inference_field(tmp_path: Path) -> None:
