@@ -20,15 +20,21 @@ from bot.lag.r0_universe import (
     universe_payload,
     write_universe,
 )
+from bot.lag.tape_studies import load_run_scope
 from bot.replay.run_scope import EVENT_DAYS_SCHEMA
-from scripts.freeze_r0_universe import build_parser, run
+from scripts.freeze_r0_universe import R0_LOW_SERIES, R0_UNION_SERIES, build_parser, run
 from scripts.lag_report import R0_FRACTION_INVALID_MAX, R0_PASSING_SERIES
 
 
 UTC = timezone.utc
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FROZEN_RUN_SCOPE = REPO_ROOT / "data" / "tape_studies" / "run_scope"
+
 THRESHOLD = Decimal("0.5")
-PASSING = ("KXHIGHDEN", "KXHIGHCHI", LOCK_CARVE_OUT, "KXHIGHNY")
+HIGH_CARVE_OUT, LOW_CARVE_OUT = LOCK_CARVE_OUT
+PASSING = ("KXHIGHDEN", "KXHIGHCHI", HIGH_CARVE_OUT, "KXHIGHNY")
+LOW_PASSING = ("KXLOWTDEN", "KXLOWTCHI", LOW_CARVE_OUT, "KXLOWTNYC")
 LADDER = 6
 CITY_DAYS = 56
 
@@ -83,19 +89,30 @@ def event_day_row(series: str, event_date: date, *, tickers: int, in_scope: bool
 def test_the_lock_dependent_set_is_the_passing_set_less_miami() -> None:
     lock = lock_dependent_series(PASSING)
 
-    assert LOCK_CARVE_OUT in PASSING
-    assert set(lock) == set(PASSING) - {LOCK_CARVE_OUT}
+    assert HIGH_CARVE_OUT in PASSING
+    assert set(lock) == set(PASSING) - {HIGH_CARVE_OUT}
     assert len(lock) == len(PASSING) - 1
     assert lock == tuple(sorted(lock))
+
+
+def test_miami_is_carved_off_the_low_ladder_for_the_same_basis_offset() -> None:
+    lock = lock_dependent_series(LOW_PASSING)
+
+    assert LOCK_CARVE_OUT == ("KXHIGHMIA", "KXLOWTMIA")
+    assert LOW_CARVE_OUT in LOW_PASSING
+    assert set(lock) == set(LOW_PASSING) - {LOW_CARVE_OUT}
+    assert lock_dependent_series(PASSING + LOW_PASSING) == tuple(
+        sorted(set(PASSING + LOW_PASSING) - set(LOCK_CARVE_OUT))
+    )
 
 
 def test_the_carve_out_never_reaches_the_unconditional_universe() -> None:
     payload = universe_payload(universe())
 
-    assert LOCK_CARVE_OUT in payload["passing"]
-    assert LOCK_CARVE_OUT in payload["recorded"]
-    assert LOCK_CARVE_OUT not in payload["lock_dependent"]
-    assert payload["lock_carve_out"] == LOCK_CARVE_OUT
+    assert HIGH_CARVE_OUT in payload["passing"]
+    assert HIGH_CARVE_OUT in payload["recorded"]
+    assert HIGH_CARVE_OUT not in payload["lock_dependent"]
+    assert payload["lock_carve_out"] == list(LOCK_CARVE_OUT)
 
 
 def test_the_recorded_set_and_the_passing_set_stay_distinct_fields() -> None:
@@ -221,7 +238,7 @@ def test_the_script_freezes_the_constants_the_gate_actually_reads(
     assert payload["sha256"] in capsys.readouterr().out
 
 
-def test_the_script_reports_a_disagreement_without_raising(
+def test_the_script_reports_a_disagreement_and_freezes_nothing(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     days = tmp_path / "event_days.parquet"
@@ -234,9 +251,56 @@ def test_the_script_reports_a_disagreement_without_raising(
 
     code = run(build_parser().parse_args(["--event-days", str(days), "--out", str(out)]))
 
-    payload = json.loads((out / "r0_universe.json").read_text())
+    printed = capsys.readouterr().out
     assert code == 1
-    assert payload["reconciliation"] == DISAGREE
-    assert payload["passing_not_recorded"] == [R0_PASSING_SERIES[-1]]
-    assert payload["passing"] == sorted(R0_PASSING_SERIES)
-    assert DISAGREE in capsys.readouterr().out
+    assert not (out / "r0_universe.json").exists()
+    assert not out.exists()
+    assert DISAGREE in printed
+    assert R0_PASSING_SERIES[-1] in printed
+
+
+@pytest.mark.parametrize(
+    ("selector", "expected"),
+    [("high", R0_PASSING_SERIES), ("low", R0_LOW_SERIES), ("union", R0_UNION_SERIES)],
+)
+def test_the_script_freezes_the_passing_set_the_operator_selected(
+    tmp_path: Path, selector: str, expected: tuple[str, ...]
+) -> None:
+    days = tmp_path / "event_days.parquet"
+    rows = [
+        event_day_row(series, date(2026, 7, 19), tickers=LADDER, in_scope=True)
+        for series in expected
+    ]
+    pq.write_table(pa.Table.from_pylist(rows, schema=EVENT_DAYS_SCHEMA), days)
+    out = tmp_path / "run_scope"
+
+    code = run(
+        build_parser().parse_args(
+            ["--event-days", str(days), "--out", str(out), "--passing", selector]
+        )
+    )
+
+    payload = json.loads((out / "r0_universe.json").read_text())
+    assert code == 0
+    assert payload["passing"] == sorted(expected)
+    assert payload["reconciliation"] == AGREE
+
+
+def test_the_default_passing_set_is_still_the_high_twenty() -> None:
+    args = build_parser().parse_args(["--event-days", "days.parquet", "--out", "out"])
+
+    assert args.passing == "high"
+    assert R0_LOW_SERIES == tuple(sorted(R0_LOW_SERIES))
+    assert len(R0_LOW_SERIES) == 20
+    assert set(R0_UNION_SERIES) == set(R0_PASSING_SERIES) | set(R0_LOW_SERIES)
+    assert len(R0_UNION_SERIES) == 40
+
+
+@pytest.mark.skipif(not FROZEN_RUN_SCOPE.exists(), reason="the recorded tape is not on this host")
+def test_the_frozen_run_scope_still_validates_against_its_own_digest() -> None:
+    scope = load_run_scope(FROZEN_RUN_SCOPE)
+
+    stored = json.loads((FROZEN_RUN_SCOPE / "r0_universe.json").read_text())
+    assert stored["lock_carve_out"] == HIGH_CARVE_OUT
+    assert scope.universe.lock_dependent
+    assert HIGH_CARVE_OUT not in scope.universe.lock_dependent

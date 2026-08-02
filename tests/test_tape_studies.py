@@ -118,6 +118,7 @@ ARTIFACT_PARTITIONS = (
 )
 CONSUMED = {TOUCH: 10, LADDER: 5, TRADES: 6}
 FRACTION_INVALID_MAX = Decimal("0.4")
+CARVED_OUT = LOCK_CARVE_OUT[0]
 EXCLUSION_ROWS = 5
 EVENT_DAY_ROWS = 3
 
@@ -357,7 +358,7 @@ def scope_dir(
         directory / "r0_universe.json",
         freeze_universe(
             fraction_invalid_max=FRACTION_INVALID_MAX,
-            passing=(SERIES, "KXHIGHLAX", LOCK_CARVE_OUT),
+            passing=(SERIES, "KXHIGHLAX", CARVED_OUT),
             coverage=Coverage(
                 cities=("KXHIGHCHI", SERIES, "KXHIGHLAX"),
                 ladder_widths=(6, 7),
@@ -621,14 +622,14 @@ def test_the_frozen_universe_round_trips_field_for_field(tmp_path: Path) -> None
     universe = load_run_scope(directory).universe
 
     assert universe.fraction_invalid_max == Decimal("0.4")
-    assert universe.passing == (SERIES, "KXHIGHLAX", LOCK_CARVE_OUT)
+    assert universe.passing == (SERIES, "KXHIGHLAX", CARVED_OUT)
     assert universe.lock_dependent == (SERIES, "KXHIGHLAX")
     assert universe.recorded == ("KXHIGHCHI", SERIES, "KXHIGHLAX")
     assert universe.ladder_widths == (6, 7)
     assert universe.in_scope_city_days == 28
     assert universe.reconciliation == DISAGREE
     assert universe.recorded_not_passing == ("KXHIGHCHI",)
-    assert universe.passing_not_recorded == (LOCK_CARVE_OUT,)
+    assert universe.passing_not_recorded == (CARVED_OUT,)
     assert freeze_digest(universe_payload(universe)) == stored
 
 

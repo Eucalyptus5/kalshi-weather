@@ -1,5 +1,6 @@
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -24,8 +25,10 @@ from bot.lag.lock_convergence import (
     TAKING,
     UNDECIDABLE,
     UNDERPOWERED,
+    ArrivalTally,
     SplitReadout,
     Sweep,
+    arrival_anchor,
     clears_strike,
     converged,
     decide,
@@ -35,7 +38,7 @@ from bot.lag.lock_convergence import (
     scan_locks,
     sweep_convergence,
 )
-from bot.lag.lock_events import detect_lock_events
+from bot.lag.lock_events import LockEvent, detect_lock_events
 from bot.lag.r0_universe import Coverage, freeze_universe, write_universe
 from bot.lag.read_rtt import FloorSource
 from bot.lag.run_manifest import MANIFEST_NAME
@@ -79,6 +82,10 @@ WINDOW_END = datetime(2026, 7, 19, 7, tzinfo=UTC)
 
 ABOVE = f"{SERIES}-26JUL18-T70"
 LOWER = f"{SERIES}-26JUL18-T60"
+
+LOW_SERIES = "KXLOWTDEN"
+LOW_ABOVE = f"{LOW_SERIES}-26JUL18-T67"
+LOW_BELOW = f"{LOW_SERIES}-26JUL18-T60"
 
 LOCK_AT = datetime(2026, 7, 18, 18, tzinfo=UTC)
 BLINK = datetime(2026, 7, 18, 12, tzinfo=UTC)
@@ -772,3 +779,78 @@ def test_a_full_run_writes_its_manifest_and_reports_a_json_safe_payload(tmp_path
     assert payload["arrival_anchor"]["count"] == 2
     assert payload["arrival_anchor"]["gating"] is False
     assert json.loads(json.dumps(payload))["run_id"] == RUN_ID
+
+
+def low_event(ticker: str, side: str, strike: str, crossing: str) -> LockEvent:
+    return LockEvent(
+        ticker=ticker,
+        side_locked=side,
+        t0=LOCK_AT,
+        strike=Decimal(strike),
+        crossing_temp_f=Decimal(crossing),
+        lock_ambiguous=False,
+    )
+
+
+def test_a_low_event_is_measured_against_a_bar_below_its_strike() -> None:
+    won = low_event(LOW_BELOW, "yes", "60", "59")
+    died = low_event(LOW_ABOVE, "no", "67", "65")
+
+    assert clears_strike(Decimal("59"), won) is True
+    assert clears_strike(Decimal("59.5"), won) is False
+    assert clears_strike(Decimal("65.9"), died) is True
+    assert clears_strike(Decimal("66"), died) is False
+    assert ROUNDING_MARGIN_F == Decimal("1.0")
+
+
+def test_a_high_event_is_still_measured_against_a_bar_above_its_strike() -> None:
+    won = LockEvent(
+        ticker=ABOVE,
+        side_locked="yes",
+        t0=LOCK_AT,
+        strike=Decimal("70"),
+        crossing_temp_f=Decimal("72"),
+        lock_ambiguous=False,
+    )
+
+    assert clears_strike(Decimal("71"), won) is True
+    assert clears_strike(Decimal("70.5"), won) is False
+
+
+def test_the_arrival_anchor_reads_the_running_min_on_a_low_ladder(tmp_path: Path) -> None:
+    day = load_run_scope(scope_dir(tmp_path)).event_days[(SERIES, DISCOVERY_DAY)]
+    tally = ArrivalTally()
+    rows = [
+        reading(at(18, 2), "70"),
+        reading(at(18, 4), "59", published=at(18, 5)),
+        reading(at(18, 6), "80"),
+    ]
+
+    arrival_anchor(rows, day, low_event(LOW_BELOW, "yes", "60", "59"), tally)
+
+    assert tally.deltas == [Decimal(300)]
+    assert tally.never_clears == 0
+    assert tally.arrival_precedes_lock == 0
+
+
+def test_a_scope_disjoint_from_its_universe_is_refused(tmp_path: Path) -> None:
+    scope = load_run_scope(scope_dir(tmp_path))
+    mispaired = replace(scope, universe=replace(scope.universe, lock_dependent=(LOW_SERIES,)))
+
+    with pytest.raises(ValueError) as refused:
+        scan_locks(mispaired, artifacts_dir(tmp_path, LADDER_ROWS), ARCHIVE)
+
+    assert SERIES in str(refused.value)
+    assert LOW_SERIES in str(refused.value)
+
+
+def test_a_scope_that_only_narrows_its_universe_still_scans(tmp_path: Path) -> None:
+    scope = load_run_scope(scope_dir(tmp_path))
+    narrowed = replace(
+        scope, universe=replace(scope.universe, lock_dependent=(SERIES, "KXHIGHTSEA"))
+    )
+
+    scan = scan_locks(narrowed, artifacts_dir(tmp_path, LADDER_ROWS), ARCHIVE)
+
+    assert scan.cities == (SERIES,)
+    assert len(scan.clean) == 2

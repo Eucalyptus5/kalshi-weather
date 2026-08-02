@@ -12,7 +12,7 @@ import pyarrow.compute as pc
 
 from bot.lag.fee_floor import published_taker_fee
 from bot.lag.ladder_run import census
-from bot.lag.lock_events import LockEvent, detect_lock_events
+from bot.lag.lock_events import LockEvent, detect_lock_events, is_low_ladder
 from bot.lag.read_rtt import FloorSource
 from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME, write_manifest
 from bot.lag.tape_stats import (
@@ -220,7 +220,16 @@ def scan_locks(
     artifacts: Path,
     observations: Mapping[tuple[str, date], list[StationObservation]],
 ) -> LockScan:
-    cities = sorted({series for series, _ in scope.event_days} & set(scope.universe.lock_dependent))
+    scoped = {series for series, _ in scope.event_days}
+    lock_dependent = set(scope.universe.lock_dependent)
+    cities = sorted(scoped & lock_dependent)
+    # Zero locks would otherwise read as an underpowered run rather than a freeze paired with the
+    # wrong ladder.
+    if not cities:
+        raise ValueError(
+            f"the scope's series {sorted(scoped)} share nothing with the universe's "
+            f"lock-dependent series {sorted(lock_dependent)}"
+        )
     markets = 0
     ambiguous = 0
     no_lock = 0
@@ -332,6 +341,9 @@ def converged(
 
 
 def clears_strike(temp_f: Decimal, event: LockEvent) -> bool:
+    if is_low_ladder(event.series):
+        bar = event.strike - ROUNDING_MARGIN_F
+        return temp_f <= bar if event.side_locked == YES else temp_f < bar
     bar = event.strike + ROUNDING_MARGIN_F
     return temp_f >= bar if event.side_locked == YES else temp_f > bar
 
@@ -346,10 +358,11 @@ def arrival_anchor(
     if not in_window:
         tally.no_arrival_rows += 1
         return
-    running_max_f = Decimal("-Infinity")
+    low = is_low_ladder(event.series)
+    running_f = Decimal("Infinity") if low else Decimal("-Infinity")
     for row in in_window:
-        running_max_f = max(running_max_f, row.temp_f)
-        if not clears_strike(running_max_f, event):
+        running_f = min(running_f, row.temp_f) if low else max(running_f, row.temp_f)
+        if not clears_strike(running_f, event):
             continue
         if row.publication_time < event.t0:
             tally.arrival_precedes_lock += 1

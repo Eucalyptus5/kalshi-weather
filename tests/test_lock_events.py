@@ -4,8 +4,10 @@ from datetime import datetime, timedelta
 from datetime import timezone as _timezone
 from decimal import Decimal
 
-from bot.lag.lock_events import LockEvent, detect_lock_events
-from bot.markets.parser import ParsedTicker, parse_ticker
+import pytest
+
+from bot.lag.lock_events import LockEvent, detect_lock_events, is_low_ladder
+from bot.markets.parser import ParsedTicker, parse_ticker, resolve_event_kinds
 from bot.observations.metar import StationObservation
 
 
@@ -254,3 +256,149 @@ def test_single_event_rule_back_to_back_crossings() -> None:
     assert events[0].t0 == obs[0].publication_time
     assert events[0].crossing_temp_f == Decimal("85")
     assert events[0].lock_ambiguous is True
+
+
+def _low_tails() -> tuple[ParsedTicker, ParsedTicker]:
+    below, above = resolve_event_kinds(
+        [parse_ticker("KXLOWTDEN-26JUL17-T60"), parse_ticker("KXLOWTDEN-26JUL17-T67")]
+    )
+    assert below.kind == "below"
+    assert above.kind == "above"
+    return below, above
+
+
+def _low_obs(*temps: Decimal | str | int) -> list[StationObservation]:
+    return [
+        _obs("KDEN", datetime(2026, 7, 17, 12 + 2 * index, 0, tzinfo=UTC), temp)
+        for index, temp in enumerate(temps)
+    ]
+
+
+def test_low_above_tail_dies_clean_as_the_minimum_falls() -> None:
+    _, market = _low_tails()
+    obs = _low_obs(70, 68, 65, 60)
+
+    events = detect_lock_events(market, obs, tz_name="America/Denver")
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.ticker == "KXLOWTDEN-26JUL17-T67"
+    assert ev.side_locked == "no"
+    assert ev.strike == Decimal("67")
+    assert ev.t0 == obs[2].publication_time
+    assert ev.crossing_temp_f == Decimal("65")
+    assert ev.lock_ambiguous is False
+    assert obs[3].temp_f < ev.crossing_temp_f
+
+
+def test_low_above_tail_within_the_margin_is_ambiguous() -> None:
+    _, market = _low_tails()
+    obs = _low_obs(70, 68, "66.5", 60)
+
+    events = detect_lock_events(market, obs, tz_name="America/Denver")
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.side_locked == "no"
+    assert ev.strike == Decimal("67")
+    assert ev.t0 == obs[2].publication_time
+    assert ev.crossing_temp_f == Decimal("66.5")
+    assert ev.lock_ambiguous is True
+    assert obs[3].temp_f < ev.crossing_temp_f
+
+
+def test_low_below_tail_wins_clean_as_the_minimum_falls() -> None:
+    market, _ = _low_tails()
+    obs = _low_obs(70, 62, 59, 55)
+
+    events = detect_lock_events(market, obs, tz_name="America/Denver")
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.ticker == "KXLOWTDEN-26JUL17-T60"
+    assert ev.side_locked == "yes"
+    assert ev.strike == Decimal("60")
+    assert ev.t0 == obs[2].publication_time
+    assert ev.crossing_temp_f == Decimal("59")
+    assert ev.lock_ambiguous is False
+    assert obs[3].temp_f < ev.crossing_temp_f
+
+
+def test_low_below_tail_at_the_strike_is_ambiguous() -> None:
+    market, _ = _low_tails()
+    obs = _low_obs(70, 62, 60, 55)
+
+    events = detect_lock_events(market, obs, tz_name="America/Denver")
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.side_locked == "yes"
+    assert ev.strike == Decimal("60")
+    assert ev.t0 == obs[2].publication_time
+    assert ev.crossing_temp_f == Decimal("60")
+    assert ev.lock_ambiguous is True
+    assert obs[3].temp_f < ev.crossing_temp_f
+
+
+def test_low_bracket_dies_clean_under_its_low_edge() -> None:
+    market = parse_ticker("KXLOWTDEN-26JUL17-B62.5")
+    obs = _low_obs(70, 64, 60, 58)
+
+    events = detect_lock_events(market, obs, tz_name="America/Denver")
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.side_locked == "no"
+    assert ev.strike == market.strikes[0]
+    assert ev.strike == Decimal("62")
+    assert ev.strike != market.strikes[1]
+    assert ev.t0 == obs[2].publication_time
+    assert ev.crossing_temp_f == Decimal("60")
+    assert ev.lock_ambiguous is False
+    assert obs[3].temp_f < ev.crossing_temp_f
+
+
+def test_low_bracket_within_the_margin_of_its_low_edge_is_ambiguous() -> None:
+    market = parse_ticker("KXLOWTDEN-26JUL17-B62.5")
+    obs = _low_obs(70, 64, "61.5", 58)
+
+    events = detect_lock_events(market, obs, tz_name="America/Denver")
+
+    assert len(events) == 1
+    ev = events[0]
+    assert ev.side_locked == "no"
+    assert ev.strike == market.strikes[0]
+    assert ev.t0 == obs[2].publication_time
+    assert ev.crossing_temp_f == Decimal("61.5")
+    assert ev.lock_ambiguous is True
+    assert obs[3].temp_f < ev.crossing_temp_f
+
+
+def test_low_bracket_resting_on_its_low_edge_never_locks() -> None:
+    market = parse_ticker("KXLOWTDEN-26JUL17-B62.5")
+    obs = _low_obs(70, 64, 62)
+
+    assert detect_lock_events(market, obs, tz_name="America/Denver") == []
+
+
+def test_low_ladder_never_locks_on_a_rising_first_reading() -> None:
+    below, above = _low_tails()
+    obs = _low_obs(70, 75, 80)
+
+    assert detect_lock_events(below, obs, tz_name="America/Denver") == []
+    assert detect_lock_events(above, obs, tz_name="America/Denver") == []
+
+
+def test_a_rain_root_is_refused_rather_than_read_off_the_high_path() -> None:
+    market = parse_ticker("KXRAINNYCM-26JUL17-T0.5")
+
+    with pytest.raises(ValueError, match="KXRAINNYCM"):
+        detect_lock_events(market, _low_obs(70, 60), tz_name="America/New_York")
+
+
+def test_the_ladder_is_read_off_the_series_root() -> None:
+    assert is_low_ladder("KXLOWTDEN") is True
+    assert is_low_ladder("KXHIGHDEN") is False
+
+    with pytest.raises(ValueError, match="KXRAINNYCM"):
+        is_low_ladder("KXRAINNYCM")

@@ -9,8 +9,8 @@ import pyarrow.parquet as pq
 
 
 # Not bot.main.STRATEGY_BLACKLIST: that frozenset also drops KXHIGHLAX on a strategy verdict, and
-# the carve-out here is the KMIA basis offset alone.
-LOCK_CARVE_OUT = "KXHIGHMIA"
+# the carve-out here is the KMIA basis offset alone. Both ladders settle on KMIA, so both carry it.
+LOCK_CARVE_OUT: tuple[str, ...] = ("KXHIGHMIA", "KXLOWTMIA")
 
 AGREE = "agree"
 DISAGREE = "disagree"
@@ -47,7 +47,7 @@ def read_recorded_coverage(path: Path) -> Coverage:
 
 
 def lock_dependent_series(passing: Sequence[str]) -> tuple[str, ...]:
-    return tuple(sorted(series for series in passing if series != LOCK_CARVE_OUT))
+    return tuple(sorted(series for series in passing if series not in LOCK_CARVE_OUT))
 
 
 def freeze_universe(
@@ -74,7 +74,7 @@ def universe_payload(universe: R0Universe) -> dict:
     return {
         "fraction_invalid_max": str(universe.fraction_invalid_max),
         "passing": list(universe.passing),
-        "lock_carve_out": LOCK_CARVE_OUT,
+        "lock_carve_out": list(LOCK_CARVE_OUT),
         "lock_dependent": list(universe.lock_dependent),
         "recorded": list(universe.recorded),
         "ladder_widths": list(universe.ladder_widths),
