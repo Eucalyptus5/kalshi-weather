@@ -152,12 +152,18 @@ def test_city_series_is_a_golden_table(city: str, root: str):
     assert CITY_SERIES[city] == root
 
 
-def test_chicago_and_dallas_break_the_station_code_rule():
+def test_chicago_dallas_and_houston_break_the_station_code_rule():
     assert CITY_SERIES["CHI"] == "KXHIGHCHI"
     assert STATIONS["KXHIGHCHI"].station == "KMDW"
     assert CITY_SERIES["DFW"] == "KXHIGHTDAL"
     assert STATIONS["KXHIGHTDAL"].station == "KDFW"
-    stripped = {city: STATIONS[root].station for city, root in CITY_SERIES.items() if city != "CHI"}
+    assert CITY_SERIES["IAH"] == "KXHIGHTHOU"
+    assert STATIONS["KXHIGHTHOU"].station == "KHOU"
+    stripped = {
+        city: STATIONS[root].station
+        for city, root in CITY_SERIES.items()
+        if city not in {"CHI", "IAH"}
+    }
     assert stripped == {city: f"K{city}" for city in stripped}
 
 

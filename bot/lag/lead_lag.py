@@ -16,9 +16,10 @@ from bot.lag.ladder_consistency import PRICE_TICKS
 MOVE_BAR_CENTS: Decimal = Decimal("5")
 WINDOW_S: int = 600
 
-# Written out rather than derived: 17 of the 18 codes are the station in bot.main.STATIONS with its
-# leading K stripped and CHI is not (its station is KMDW), and the root suffix repeats neither
-# (DFW records as KXHIGHTDAL). A rule that got either wrong would corrupt every pair silently.
+# Written out rather than derived: 16 of the 18 codes are the station in bot.main.STATIONS with its
+# leading K stripped, CHI is not (its station is KMDW), IAH is not either (KXHIGHTHOU settles on
+# KHOU, Hobby), and the root suffix repeats neither (DFW records as KXHIGHTDAL). A rule that got
+# any of them wrong would corrupt every pair silently.
 CITY_SERIES: Mapping[str, str] = {
     "DEN": "KXHIGHDEN",
     "OKC": "KXHIGHTOKC",

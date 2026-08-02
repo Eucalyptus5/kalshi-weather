@@ -245,9 +245,9 @@ STATIONS: dict[str, StationConfig] = {
     ),
     "KXHIGHTHOU": StationConfig(
         series="KXHIGHTHOU",
-        station="KIAH",
-        latitude=29.9844,
-        longitude=-95.3607,
+        station="KHOU",
+        latitude=29.6375,
+        longitude=-95.2825,
         timezone="America/Chicago",
     ),
     "KXHIGHTLV": StationConfig(
