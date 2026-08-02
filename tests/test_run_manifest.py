@@ -25,7 +25,11 @@ from bot.lag.read_rtt import (
 )
 from bot.lag.run_manifest import (
     BOOTSTRAP_RESAMPLES,
+    EXEMPTIBLE_FIELDS,
     MANIFEST_NAME,
+    SUPPLIED_FIELDS,
+    Exemption,
+    ExemptionRefused,
     Manifest,
     ManifestIncomplete,
     RunInputs,
@@ -52,6 +56,14 @@ FOUR_DP = Decimal("0.0001")
 BAR_SIZE = Decimal("26")
 BAR_PRICE = Decimal("0.50")
 BAR_PRICE_SOURCE = "preregistration"
+NO_TAPE = "the statistic reads no ws tape"
+NO_READS = "the statistic places no read against the api"
+FLOOR_KEYS = (
+    "latency_floor_source",
+    "latency_floor_s",
+    "t_persist_s",
+    "latency_floor_samples",
+)
 
 FIELDS = {
     "run_id",
@@ -704,3 +716,178 @@ def test_an_abort_writes_nothing_into_a_run_directory_that_already_exists(
         write_manifest(root, replace(complete, bootstrap_seed=None))
 
     assert list((root / RUN_ID).iterdir()) == []
+
+
+def test_exactly_two_supplied_fields_are_exemptible() -> None:
+    assert EXEMPTIBLE_FIELDS == ("r0_fraction_invalid_max", "latency_floor")
+    assert set(EXEMPTIBLE_FIELDS) < {field for _, field in SUPPLIED_FIELDS}
+
+
+def test_an_exempt_r0_threshold_is_recorded_with_its_reason(
+    tmp_path: Path, complete: RunInputs
+) -> None:
+    root = tmp_path / "tape_studies"
+    exempt = replace(
+        complete,
+        universe=None,
+        exemptions=(Exemption(field="r0_fraction_invalid_max", reason=NO_TAPE),),
+    )
+
+    digest = write_manifest(root, exempt)
+
+    payload = json.loads((root / RUN_ID / MANIFEST_NAME).read_text())
+    assert payload.pop("sha256") == digest
+    assert freeze_digest(payload) == digest
+    assert payload["exemptions"] == [{"field": "r0_fraction_invalid_max", "reason": NO_TAPE}]
+    assert payload["r0_fraction_invalid_max"] is None
+    assert payload["r0_universe_sha256"] is None
+    assert payload["latency_floor_samples"] == 240
+
+
+def test_an_exempt_latency_floor_is_recorded_with_its_reason(
+    tmp_path: Path, complete: RunInputs
+) -> None:
+    root = tmp_path / "tape_studies"
+    exempt = replace(
+        complete, floor=None, exemptions=(Exemption(field="latency_floor", reason=NO_READS),)
+    )
+
+    digest = write_manifest(root, exempt)
+
+    payload = json.loads((root / RUN_ID / MANIFEST_NAME).read_text())
+    assert payload.pop("sha256") == digest
+    assert payload["exemptions"] == [{"field": "latency_floor", "reason": NO_READS}]
+    assert [payload[key] for key in FLOOR_KEYS] == [None, None, None, None]
+    assert payload["r0_fraction_invalid_max"] == str(THRESHOLD)
+
+
+def test_a_run_that_reads_no_tape_exempts_both_permitted_fields(
+    tmp_path: Path, complete: RunInputs
+) -> None:
+    root = tmp_path / "tape_studies"
+    exempt = replace(
+        complete,
+        universe=None,
+        floor=None,
+        exemptions=(
+            Exemption(field="r0_fraction_invalid_max", reason=NO_TAPE),
+            Exemption(field="latency_floor", reason=NO_READS),
+        ),
+    )
+
+    digest = write_manifest(root, exempt)
+
+    payload = json.loads((root / RUN_ID / MANIFEST_NAME).read_text())
+    assert payload.pop("sha256") == digest
+    assert set(payload) == FIELDS | {"exemptions"}
+    assert payload["exemptions"] == [
+        {"field": "latency_floor", "reason": NO_READS},
+        {"field": "r0_fraction_invalid_max", "reason": NO_TAPE},
+    ]
+    assert payload["r0_fraction_invalid_max"] is None
+    assert payload["r0_universe_sha256"] is None
+    assert [payload[key] for key in FLOOR_KEYS] == [None, None, None, None]
+    assert payload["bootstrap_seed"] == SEED
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "bootstrap_seed",
+        "economic_bar_price",
+        "fee_source",
+        "row_counts",
+        "git_head",
+        "universe",
+        "floor",
+    ],
+)
+def test_a_field_the_preregistration_left_closed_cannot_be_exempted(field: str) -> None:
+    with pytest.raises(ExemptionRefused) as excinfo:
+        Exemption(field=field, reason=NO_TAPE)
+
+    assert field in str(excinfo.value)
+    assert not isinstance(excinfo.value, ManifestIncomplete)
+
+
+@pytest.mark.parametrize("reason", ["", "   ", "\n"])
+def test_an_exemption_with_no_stated_reason_is_not_a_declaration(reason: str) -> None:
+    with pytest.raises(ExemptionRefused) as excinfo:
+        Exemption(field="latency_floor", reason=reason)
+
+    assert "latency_floor" in str(excinfo.value)
+
+
+def test_an_exemption_reason_padded_with_whitespace_freezes_the_same_digest(
+    tmp_path: Path, complete: RunInputs
+) -> None:
+    padded = replace(
+        complete,
+        universe=None,
+        exemptions=(Exemption(field="r0_fraction_invalid_max", reason=f"  {NO_TAPE}  "),),
+    )
+    stripped = replace(
+        complete,
+        universe=None,
+        exemptions=(Exemption(field="r0_fraction_invalid_max", reason=NO_TAPE),),
+    )
+
+    padded_digest = write_manifest(tmp_path / "padded", padded)
+    stripped_digest = write_manifest(tmp_path / "stripped", stripped)
+
+    assert padded_digest == stripped_digest
+
+
+def test_an_undeclared_gap_still_aborts_the_run(tmp_path: Path, complete: RunInputs) -> None:
+    root = tmp_path / "tape_studies"
+
+    with pytest.raises(ManifestIncomplete) as excinfo:
+        write_manifest(root, replace(complete, floor=None, exemptions=()))
+
+    assert excinfo.value.fields == ("latency_floor",)
+    assert not root.exists()
+
+
+def test_an_exemption_narrows_nothing_about_a_field_it_did_not_name(
+    tmp_path: Path, complete: RunInputs
+) -> None:
+    root = tmp_path / "tape_studies"
+    half = replace(
+        complete,
+        universe=None,
+        floor=None,
+        exemptions=(Exemption(field="latency_floor", reason=NO_READS),),
+    )
+
+    with pytest.raises(ManifestIncomplete) as excinfo:
+        write_manifest(root, half)
+
+    assert excinfo.value.fields == ("r0_fraction_invalid_max",)
+    assert "latency_floor" not in str(excinfo.value)
+    assert not root.exists()
+
+
+def test_a_field_the_run_supplied_cannot_also_be_declared_exempt(
+    tmp_path: Path, complete: RunInputs
+) -> None:
+    root = tmp_path / "tape_studies"
+
+    with pytest.raises(ExemptionRefused) as excinfo:
+        write_manifest(
+            root, replace(complete, exemptions=(Exemption(field="latency_floor", reason=NO_READS),))
+        )
+
+    assert "latency_floor" in str(excinfo.value)
+    assert not root.exists()
+
+
+def test_a_run_declaring_no_exemption_writes_the_payload_it_wrote_before(
+    complete: RunInputs,
+) -> None:
+    declared = manifest_payload(build_manifest(replace(complete, exemptions=())))
+    undeclared = manifest_payload(build_manifest(complete))
+
+    assert set(declared) == FIELDS
+    assert "exemptions" not in declared
+    assert declared == undeclared
+    assert freeze_digest(declared) == freeze_digest(undeclared)

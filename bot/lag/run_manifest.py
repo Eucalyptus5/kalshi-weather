@@ -36,6 +36,8 @@ SUPPLIED_FIELDS = (
     ("bootstrap_seed", "bootstrap_seed"),
 )
 
+EXEMPTIBLE_FIELDS = ("r0_fraction_invalid_max", "latency_floor")
+
 
 class ManifestIncomplete(RuntimeError):
     """A field the manifest must record has no value, so the run aborts."""
@@ -43,6 +45,26 @@ class ManifestIncomplete(RuntimeError):
     def __init__(self, fields: Sequence[str], detail: str) -> None:
         super().__init__(f"run aborted, unavailable: {', '.join(fields)}: {detail}")
         self.fields = tuple(fields)
+
+
+class ExemptionRefused(ValueError):
+    """A declared exemption is not one the pre-registration opened."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Exemption:
+    field: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        if self.field not in EXEMPTIBLE_FIELDS:
+            raise ExemptionRefused(
+                f"{self.field} is not exemptible, only {' and '.join(EXEMPTIBLE_FIELDS)} are"
+            )
+        stripped = self.reason.strip()
+        if not stripped:
+            raise ExemptionRefused(f"{self.field} is exempt for no stated reason")
+        object.__setattr__(self, "reason", stripped)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -60,6 +82,7 @@ class RunInputs:
     economic_bar_price: Decimal | None
     economic_bar_price_source: str | None
     bootstrap_seed: int | None
+    exemptions: tuple[Exemption, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,15 +100,16 @@ class Manifest:
     accrual_end: datetime
     row_counts: Mapping[str, int]
     git: GitState
-    r0_fraction_invalid_max: Decimal
-    r0_universe_sha256: str
+    r0_fraction_invalid_max: Decimal | None
+    r0_universe_sha256: str | None
     fee: FeeSource
-    floor: LatencyFloor
+    floor: LatencyFloor | None
     economic_bar_size: Decimal
     economic_bar_price: Decimal
     economic_bar_price_source: str
     economic_bar_cents_per_contract: Decimal
     bootstrap_seed: int
+    exemptions: tuple[Exemption, ...]
 
 
 def preregistration_sha256(path: Path) -> str:
@@ -131,15 +155,21 @@ def build_manifest(inputs: RunInputs) -> Manifest:
             ("run_id",), f"{inputs.run_id} does not name one directory under the run root"
         )
 
+    exempt = {exemption.field for exemption in inputs.exemptions}
     missing = []
     for attribute, field in SUPPLIED_FIELDS:
         value = getattr(inputs, attribute)
         # An empty count map records nothing consumed rather than a run that consumed nothing.
-        if value is None or value == {}:
+        absent = value is None or value == {}
+        if field in exempt:
+            if not absent:
+                raise ExemptionRefused(f"{field} is declared exempt but the run supplied it anyway")
+        elif absent:
             missing.append(field)
     if missing:
         raise ManifestIncomplete(missing, "the run supplied no value")
 
+    universe = inputs.universe
     return Manifest(
         run_id=inputs.run_id,
         preregistration=inputs.preregistration,
@@ -148,8 +178,8 @@ def build_manifest(inputs: RunInputs) -> Manifest:
         accrual_end=inputs.accrual_end,
         row_counts=inputs.row_counts,
         git=git_state(inputs.repo),
-        r0_fraction_invalid_max=inputs.universe.fraction_invalid_max,
-        r0_universe_sha256=freeze_digest(universe_payload(inputs.universe)),
+        r0_fraction_invalid_max=None if universe is None else universe.fraction_invalid_max,
+        r0_universe_sha256=None if universe is None else freeze_digest(universe_payload(universe)),
         fee=inputs.fee,
         floor=inputs.floor,
         economic_bar_size=inputs.economic_bar_size,
@@ -159,6 +189,7 @@ def build_manifest(inputs: RunInputs) -> Manifest:
             inputs.economic_bar_size, inputs.economic_bar_price
         ),
         bootstrap_seed=inputs.bootstrap_seed,
+        exemptions=tuple(sorted(inputs.exemptions, key=lambda exemption: exemption.field)),
     )
 
 
@@ -171,8 +202,25 @@ def fee_payload(fee: FeeSource) -> dict[str, str | bool]:
     return payload
 
 
-def manifest_payload(manifest: Manifest) -> dict:
+def floor_payload(floor: LatencyFloor | None) -> dict[str, str | float | int | None]:
+    if floor is None:
+        return {
+            "latency_floor_source": None,
+            "latency_floor_s": None,
+            "t_persist_s": None,
+            "latency_floor_samples": None,
+        }
     return {
+        "latency_floor_source": floor.source.value,
+        "latency_floor_s": floor.floor_s,
+        "t_persist_s": floor.t_persist_s,
+        "latency_floor_samples": floor.n_usable,
+    }
+
+
+def manifest_payload(manifest: Manifest) -> dict:
+    threshold = manifest.r0_fraction_invalid_max
+    payload = {
         "run_id": manifest.run_id,
         "preregistration_path": str(manifest.preregistration),
         "preregistration_sha256": manifest.preregistration_sha256,
@@ -181,13 +229,10 @@ def manifest_payload(manifest: Manifest) -> dict:
         "row_counts": dict(manifest.row_counts),
         "git_head": manifest.git.head,
         "git_dirty": manifest.git.dirty,
-        "r0_fraction_invalid_max": str(manifest.r0_fraction_invalid_max),
+        "r0_fraction_invalid_max": None if threshold is None else str(threshold),
         "r0_universe_sha256": manifest.r0_universe_sha256,
         **fee_payload(manifest.fee),
-        "latency_floor_source": manifest.floor.source.value,
-        "latency_floor_s": manifest.floor.floor_s,
-        "t_persist_s": manifest.floor.t_persist_s,
-        "latency_floor_samples": manifest.floor.n_usable,
+        **floor_payload(manifest.floor),
         "economic_bar_size": str(manifest.economic_bar_size),
         "economic_bar_price": str(manifest.economic_bar_price),
         "economic_bar_price_source": manifest.economic_bar_price_source,
@@ -195,6 +240,13 @@ def manifest_payload(manifest: Manifest) -> dict:
         "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
         "bootstrap_seed": manifest.bootstrap_seed,
     }
+    # An empty list is still a key, and would move every digest frozen before the channel existed.
+    if manifest.exemptions:
+        payload["exemptions"] = [
+            {"field": exemption.field, "reason": exemption.reason}
+            for exemption in manifest.exemptions
+        ]
+    return payload
 
 
 def write_manifest(root: Path, inputs: RunInputs) -> str:
