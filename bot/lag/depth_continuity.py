@@ -24,7 +24,15 @@ from bot.lag.depth_map_run import (
 from bot.lag.ladder_consistency import PRICE_TICKS, SIZE_UNITS
 from bot.lag.read_rtt import FloorSource, LatencyFloor
 from bot.lag.run_manifest import MANIFEST_NAME, write_manifest
-from bot.lag.tape_studies import LADDER, RunScope, assemble_run_inputs, load_run_scope, window_dates
+from bot.lag.tape_studies import (
+    LADDER,
+    SELF_CHARGED_BAR,
+    SELF_CHARGED_BAR_SOURCE,
+    RunScope,
+    assemble_run_inputs,
+    load_run_scope,
+    window_dates,
+)
 from bot.replay.run_scope import EventDay
 
 
@@ -414,6 +422,9 @@ def execute(
         artifacts=artifacts,
         rtt_samples=rtt_samples,
         floor_source=floor_source,
+        economic_bar_size=SELF_CHARGED_BAR,
+        economic_bar_price=SELF_CHARGED_BAR,
+        economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
         bootstrap_seed=seed,
     )
     digest = write_manifest(run_root, inputs)

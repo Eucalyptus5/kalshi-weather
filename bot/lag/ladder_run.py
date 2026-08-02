@@ -70,6 +70,9 @@ TOUCH_COLUMNS = (
 SPLITS = (DISCOVERY, HOLDOUT)
 CI_LEVEL = 0.95
 NULL_VALUE = Decimal("0")
+ECONOMIC_BAR_SIZE: Decimal = Decimal("26")
+ECONOMIC_BAR_PRICE: Decimal = Decimal("0.50")
+ECONOMIC_BAR_PRICE_SOURCE = "preregistration"
 DIRECTION = "greater"
 CITY_DAYS = "city event-days"
 RECORDED = "recorded"
@@ -429,6 +432,9 @@ def execute(
     artifacts: Path,
     rtt_samples: Path,
     floor_source: FloorSource,
+    economic_bar_size: Decimal,
+    economic_bar_price: Decimal,
+    economic_bar_price_source: str,
     seed: int,
     run_root: Path,
 ) -> LadderRun:
@@ -440,6 +446,9 @@ def execute(
         artifacts=artifacts,
         rtt_samples=rtt_samples,
         floor_source=floor_source,
+        economic_bar_size=economic_bar_size,
+        economic_bar_price=economic_bar_price,
+        economic_bar_price_source=economic_bar_price_source,
         bootstrap_seed=seed,
     )
     digest = write_manifest(run_root, inputs)

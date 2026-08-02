@@ -26,6 +26,7 @@ from bot.lag.read_rtt import (
 from bot.lag.run_manifest import (
     BOOTSTRAP_RESAMPLES,
     MANIFEST_NAME,
+    Manifest,
     ManifestIncomplete,
     RunInputs,
     build_manifest,
@@ -35,6 +36,7 @@ from bot.lag.run_manifest import (
     resolve_latency_floor,
     write_manifest,
 )
+from bot.lag.tape_studies import SELF_CHARGED_BAR, SELF_CHARGED_BAR_SOURCE
 
 
 UTC = timezone.utc
@@ -46,6 +48,10 @@ ACCRUAL_START = datetime(2026, 7, 18, tzinfo=UTC)
 ACCRUAL_END = datetime(2026, 8, 1, tzinfo=UTC)
 ROW_COUNTS = {"ws_book_deltas": 482_113, "ws_trades": 51_204}
 SEED = 20260812
+FOUR_DP = Decimal("0.0001")
+BAR_SIZE = Decimal("26")
+BAR_PRICE = Decimal("0.50")
+BAR_PRICE_SOURCE = "preregistration"
 
 FIELDS = {
     "run_id",
@@ -68,6 +74,10 @@ FIELDS = {
     "latency_floor_s",
     "t_persist_s",
     "latency_floor_samples",
+    "economic_bar_size",
+    "economic_bar_price",
+    "economic_bar_price_source",
+    "economic_bar_cents_per_contract",
     "bootstrap_resamples",
     "bootstrap_seed",
 }
@@ -151,6 +161,9 @@ def complete(preregistration: Path, repo: Path) -> RunInputs:
         universe=_universe(),
         fee=fee_source(),
         floor=derive_latency_floor(_adequate_samples(), FloorSource.SIGNED_READ),
+        economic_bar_size=BAR_SIZE,
+        economic_bar_price=BAR_PRICE,
+        economic_bar_price_source=BAR_PRICE_SOURCE,
         bootstrap_seed=SEED,
     )
 
@@ -186,6 +199,12 @@ def test_a_complete_run_records_every_field_the_section_names(
     assert payload["latency_floor_s"] == pytest.approx(0.24)
     assert payload["t_persist_s"] == pytest.approx(10.0)
     assert payload["latency_floor_samples"] == 240
+    assert payload["economic_bar_size"] == str(BAR_SIZE)
+    assert payload["economic_bar_price"] == str(BAR_PRICE)
+    assert payload["economic_bar_price_source"] == BAR_PRICE_SOURCE
+    assert Decimal(payload["economic_bar_cents_per_contract"]).quantize(FOUR_DP) == Decimal(
+        "2.7692"
+    )
     assert payload["bootstrap_resamples"] == 10_000
     assert payload["bootstrap_seed"] == SEED
 
@@ -199,6 +218,9 @@ def test_a_complete_run_records_every_field_the_section_names(
         ("universe", "r0_fraction_invalid_max"),
         ("fee", "fee_source"),
         ("floor", "latency_floor"),
+        ("economic_bar_size", "economic_bar_size"),
+        ("economic_bar_price", "economic_bar_price"),
+        ("economic_bar_price_source", "economic_bar_price_source"),
         ("bootstrap_seed", "bootstrap_seed"),
     ],
 )
@@ -280,6 +302,98 @@ def test_a_bootstrap_seed_of_zero_is_a_seed_not_a_missing_field(complete: RunInp
 
     assert payload["bootstrap_seed"] == 0
     assert payload["bootstrap_resamples"] == BOOTSTRAP_RESAMPLES
+
+
+def test_the_stated_bar_and_the_bar_it_derives_round_trip_through_the_written_manifest(
+    tmp_path: Path, complete: RunInputs
+) -> None:
+    root = tmp_path / "tape_studies"
+    manifest = build_manifest(complete)
+
+    write_manifest(root, complete)
+
+    payload = json.loads((root / RUN_ID / MANIFEST_NAME).read_text())
+    assert manifest.economic_bar_size == BAR_SIZE
+    assert manifest.economic_bar_price == BAR_PRICE
+    assert manifest.economic_bar_price_source == BAR_PRICE_SOURCE
+    assert manifest.economic_bar_cents_per_contract.quantize(FOUR_DP) == Decimal("2.7692")
+    assert isinstance(payload["economic_bar_size"], str)
+    assert isinstance(payload["economic_bar_price"], str)
+    assert isinstance(payload["economic_bar_cents_per_contract"], str)
+    assert Decimal(payload["economic_bar_size"]).as_tuple() == BAR_SIZE.as_tuple()
+    assert Decimal(payload["economic_bar_price"]).as_tuple() == BAR_PRICE.as_tuple()
+    assert payload["economic_bar_price_source"] == BAR_PRICE_SOURCE
+    assert (
+        Decimal(payload["economic_bar_cents_per_contract"])
+        == manifest.economic_bar_cents_per_contract
+    )
+
+
+@pytest.mark.parametrize(
+    ("price", "bar"),
+    [
+        (Decimal("0.50"), Decimal("2.7692")),
+        (Decimal("0.05"), Decimal("1.3462")),
+        (Decimal("0.95"), Decimal("1.3462")),
+    ],
+)
+def test_the_manifest_carries_the_bar_the_stated_price_derives(
+    tmp_path: Path, complete: RunInputs, price: Decimal, bar: Decimal
+) -> None:
+    root = tmp_path / "tape_studies"
+
+    write_manifest(root, replace(complete, economic_bar_price=price))
+
+    payload = json.loads((root / RUN_ID / MANIFEST_NAME).read_text())
+    assert payload["economic_bar_size"] == "26"
+    assert payload["economic_bar_price"] == str(price)
+    assert Decimal(payload["economic_bar_cents_per_contract"]).quantize(FOUR_DP) == bar
+
+
+def test_both_tails_of_the_price_grid_derive_the_same_bar(complete: RunInputs) -> None:
+    low = manifest_payload(build_manifest(replace(complete, economic_bar_price=Decimal("0.05"))))
+    high = manifest_payload(build_manifest(replace(complete, economic_bar_price=Decimal("0.95"))))
+    middle = manifest_payload(build_manifest(complete))
+
+    assert low["economic_bar_cents_per_contract"] == high["economic_bar_cents_per_contract"]
+    assert Decimal(low["economic_bar_cents_per_contract"]) < Decimal(
+        middle["economic_bar_cents_per_contract"]
+    )
+
+
+def test_a_size_stated_without_a_price_aborts_and_writes_nothing(
+    tmp_path: Path, complete: RunInputs
+) -> None:
+    root = tmp_path / "tape_studies"
+
+    with pytest.raises(ManifestIncomplete) as excinfo:
+        write_manifest(root, replace(complete, economic_bar_price=None))
+
+    assert "economic_bar_price" in excinfo.value.fields
+    assert "economic_bar_price" in str(excinfo.value)
+    assert not (root / RUN_ID / MANIFEST_NAME).exists()
+    assert not root.exists()
+
+
+def test_a_stated_zero_bar_is_a_bar_not_a_missing_field(
+    tmp_path: Path, complete: RunInputs
+) -> None:
+    root = tmp_path / "tape_studies"
+    charged = replace(
+        complete,
+        economic_bar_size=SELF_CHARGED_BAR,
+        economic_bar_price=SELF_CHARGED_BAR,
+        economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
+    )
+
+    write_manifest(root, charged)
+
+    payload = json.loads((root / RUN_ID / MANIFEST_NAME).read_text())
+    assert "economic_bar_cents_per_contract" in payload
+    assert Decimal(payload["economic_bar_size"]) == 0
+    assert Decimal(payload["economic_bar_price"]) == 0
+    assert Decimal(payload["economic_bar_cents_per_contract"]) == 0
+    assert payload["economic_bar_price_source"] == SELF_CHARGED_BAR_SOURCE
 
 
 def test_a_preregistration_file_that_is_not_on_disk_aborts(
@@ -495,6 +609,14 @@ def test_the_caller_cannot_supply_the_head_or_the_dirty_flag() -> None:
     assert "repo" in supplied
     assert "git_head" not in supplied
     assert "git_dirty" not in supplied
+
+
+def test_the_caller_states_the_bar_inputs_but_not_the_bar() -> None:
+    supplied = {field.name for field in fields(RunInputs)}
+
+    assert {"economic_bar_size", "economic_bar_price", "economic_bar_price_source"} <= supplied
+    assert "economic_bar_cents_per_contract" not in supplied
+    assert "economic_bar_cents_per_contract" in {field.name for field in fields(Manifest)}
 
 
 def test_the_dirty_flag_follows_the_working_tree(tmp_path: Path, complete: RunInputs) -> None:

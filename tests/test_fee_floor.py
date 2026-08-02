@@ -11,7 +11,9 @@ from bot.lag.fee_floor import (
     MAKER_RATE_SOURCE,
     PUBLISHED_MAKER_RATE,
     PUBLISHED_TAKER_RATE,
+    TICK_CENTS,
     FeeSource,
+    economic_bar_cents_per_contract,
     fee_source,
     published_maker_fee,
     published_taker_fee,
@@ -21,6 +23,7 @@ from bot.lag.fee_floor import (
 
 FOUR_DP = Decimal("0.0001")
 HALF = Decimal("0.50")
+BAR_SIZE = Decimal("26")
 
 
 def _per_contract_cents(contracts: Decimal, price: Decimal, rate: Decimal) -> Decimal:
@@ -354,3 +357,38 @@ def test_maker_fee_at_the_taker_rate_agrees_with_the_taker_floor(
     assert published_maker_fee(contracts, price, PUBLISHED_TAKER_RATE) == published_taker_fee(
         contracts, price
     )
+
+
+@pytest.mark.parametrize(
+    "size, price, expected",
+    [
+        (BAR_SIZE, Decimal("0.50"), Decimal("2.7692")),
+        (BAR_SIZE, Decimal("0.05"), Decimal("1.3462")),
+        (BAR_SIZE, Decimal("0.95"), Decimal("1.3462")),
+    ],
+)
+def test_economic_bar_golden_table(size: Decimal, price: Decimal, expected: Decimal) -> None:
+    assert economic_bar_cents_per_contract(size, price).quantize(FOUR_DP) == expected
+
+
+def test_the_bar_is_the_per_contract_fee_plus_one_tick() -> None:
+    fee = Decimal(100) * published_taker_fee(BAR_SIZE, HALF) / BAR_SIZE
+
+    assert published_taker_fee(BAR_SIZE, HALF) == Decimal("0.46")
+    assert fee.quantize(FOUR_DP) == Decimal("1.7692")
+    assert economic_bar_cents_per_contract(BAR_SIZE, HALF) - fee == TICK_CENTS
+    assert TICK_CENTS == Decimal("1")
+
+
+def test_the_bar_is_symmetric_across_the_price_grid() -> None:
+    tail = economic_bar_cents_per_contract(BAR_SIZE, Decimal("0.05"))
+    mirror = economic_bar_cents_per_contract(BAR_SIZE, Decimal("0.95"))
+    middle = economic_bar_cents_per_contract(BAR_SIZE, HALF)
+
+    assert tail == mirror
+    assert (middle - TICK_CENTS) / (tail - TICK_CENTS) > Decimal("5")
+
+
+def test_a_stated_zero_size_derives_a_bar_of_zero_with_no_tick() -> None:
+    assert economic_bar_cents_per_contract(Decimal("0"), Decimal("0")) == Decimal("0")
+    assert economic_bar_cents_per_contract(Decimal("0"), HALF) == Decimal("0")

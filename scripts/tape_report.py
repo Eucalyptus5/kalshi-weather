@@ -15,7 +15,11 @@ from bot.lag.run_manifest import (  # noqa: E402
     ManifestIncomplete,
     write_manifest,
 )
-from bot.lag.tape_studies import assemble_run_inputs  # noqa: E402
+from bot.lag.tape_studies import (  # noqa: E402
+    SELF_CHARGED_BAR,
+    SELF_CHARGED_BAR_SOURCE,
+    assemble_run_inputs,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -62,6 +66,9 @@ def run(args: argparse.Namespace) -> int:
             artifacts=args.artifacts,
             rtt_samples=args.rtt_samples,
             floor_source=FloorSource(args.floor_source),
+            economic_bar_size=SELF_CHARGED_BAR,
+            economic_bar_price=SELF_CHARGED_BAR,
+            economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
             bootstrap_seed=args.seed,
         )
         write_manifest(args.run_root, inputs)

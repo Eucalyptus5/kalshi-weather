@@ -1,3 +1,5 @@
+import ast
+import inspect
 import json
 import re
 import subprocess
@@ -5,12 +7,14 @@ from dataclasses import fields
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import ModuleType
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from bot.lag.fee_floor import fee_source
+from bot.lag import ladder_run, lock_convergence, taker_flow_run
+from bot.lag.fee_floor import economic_bar_cents_per_contract, fee_source
 from bot.lag.r0_universe import (
     DISAGREE,
     LOCK_CARVE_OUT,
@@ -22,14 +26,18 @@ from bot.lag.r0_universe import (
 )
 from bot.lag.read_rtt import FloorSource, ReadSample, encode_sample
 from bot.lag.run_manifest import (
+    MANIFEST_NAME,
     ManifestIncomplete,
     RunInputs,
     build_manifest,
     manifest_payload,
+    write_manifest,
 )
 from bot.lag.tape_studies import (
     KIND_SCHEMAS,
     LADDER,
+    SELF_CHARGED_BAR,
+    SELF_CHARGED_BAR_SOURCE,
     TOUCH,
     TRADES,
     EvidenceWindow,
@@ -112,6 +120,47 @@ CONSUMED = {TOUCH: 10, LADDER: 5, TRADES: 6}
 FRACTION_INVALID_MAX = Decimal("0.4")
 EXCLUSION_ROWS = 5
 EVENT_DAY_ROWS = 3
+
+SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+KNOWN_FAMILY_SCRIPTS = {
+    "tape_report.py",
+    "q1_report.py",
+    "q2_report.py",
+    "q3_report.py",
+    "q3_near_lock.py",
+    "q4_report.py",
+    "depth_report.py",
+    "depth_continuity_report.py",
+}
+
+
+def family_scripts() -> tuple[str, ...]:
+    return tuple(
+        sorted(path.name for path in SCRIPTS.glob("*.py") if "run_manifest" in path.read_text())
+    )
+
+
+FAMILY_SCRIPTS = family_scripts()
+
+STATED_BAR = ("economic_bar_size", "economic_bar_price", "economic_bar_price_source")
+DERIVED_BAR = "economic_bar_cents_per_contract"
+
+
+def argument_flags(source: str) -> set[str]:
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_argument"
+    ]
+    named = [argument for call in calls for argument in call.args]
+    named += [keyword.value for call in calls for keyword in call.keywords if keyword.arg == "dest"]
+    return {
+        item.value.lstrip("-").replace("-", "_")
+        for item in named
+        if isinstance(item, ast.Constant) and isinstance(item.value, str)
+    }
 
 
 def touch_row(row_id: int, received_at: datetime) -> dict:
@@ -420,6 +469,9 @@ def assemble(paths: dict[str, Path]) -> RunInputs:
     return assemble_run_inputs(
         run_id=RUN_ID,
         floor_source=FloorSource.SIGNED_READ,
+        economic_bar_size=SELF_CHARGED_BAR,
+        economic_bar_price=SELF_CHARGED_BAR,
+        economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
         bootstrap_seed=SEED,
         **paths,
     )
@@ -1076,3 +1128,62 @@ def test_the_universe_the_manifest_records_is_the_frozen_one(paths: dict[str, Pa
     assert inputs.universe.fraction_invalid_max == FRACTION_INVALID_MAX
     assert freeze_digest(universe_payload(inputs.universe)) == stored
     assert manifest_payload(build_manifest(inputs))["r0_universe_sha256"] == stored
+
+
+def test_the_assembler_states_no_default_bar(paths: dict[str, Path]) -> None:
+    parameters = inspect.signature(assemble_run_inputs).parameters
+
+    for name in STATED_BAR:
+        assert parameters[name].default is inspect.Parameter.empty
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+    with pytest.raises(TypeError, match="economic_bar_size"):
+        assemble_run_inputs(
+            run_id=RUN_ID, floor_source=FloorSource.SIGNED_READ, bootstrap_seed=SEED, **paths
+        )
+
+
+def test_an_ungated_study_states_a_zero_bar_and_still_writes_its_manifest(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    root = tmp_path / "tape_studies"
+
+    write_manifest(root, assemble(paths))
+
+    payload = json.loads((root / RUN_ID / MANIFEST_NAME).read_text())
+    assert payload["economic_bar_size"] == "0"
+    assert payload["economic_bar_price"] == "0"
+    assert payload["economic_bar_price_source"] == SELF_CHARGED_BAR_SOURCE
+    assert payload["economic_bar_cents_per_contract"] == "0"
+
+
+@pytest.mark.parametrize("module", [ladder_run, lock_convergence, taker_flow_run])
+def test_every_gated_family_states_the_bar_it_is_read_under(module: ModuleType) -> None:
+    bar = economic_bar_cents_per_contract(module.ECONOMIC_BAR_SIZE, module.ECONOMIC_BAR_PRICE)
+
+    assert module.ECONOMIC_BAR_SIZE == Decimal("26")
+    assert module.ECONOMIC_BAR_PRICE == Decimal("0.50")
+    assert module.ECONOMIC_BAR_PRICE_SOURCE == "preregistration"
+    assert bar.quantize(Decimal("0.0001")) == Decimal("2.7692")
+
+
+@pytest.mark.parametrize("module", [ladder_run, lock_convergence, taker_flow_run])
+def test_a_gated_family_will_not_run_without_the_bar_it_is_read_under(module: ModuleType) -> None:
+    parameters = inspect.signature(module.execute).parameters
+
+    for name in STATED_BAR:
+        assert parameters[name].default is inspect.Parameter.empty
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_every_known_family_script_is_discovered() -> None:
+    assert FAMILY_SCRIPTS, f"no scripts under {SCRIPTS} reference run_manifest"
+    assert set(FAMILY_SCRIPTS).issuperset(KNOWN_FAMILY_SCRIPTS), FAMILY_SCRIPTS
+
+
+@pytest.mark.parametrize("name", FAMILY_SCRIPTS)
+def test_no_family_script_takes_the_bar_off_the_command_line(name: str) -> None:
+    flags = argument_flags((SCRIPTS / name).read_text())
+
+    assert flags
+    assert flags.isdisjoint({*STATED_BAR, DERIVED_BAR})
+    assert [flag for flag in flags if "bar" in flag] == []

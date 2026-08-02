@@ -14,6 +14,8 @@ from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME, write_manif
 from bot.lag.taker_flow import PRIMARY_HORIZON_S
 from bot.lag.taker_flow_run import UNDERPOWERED, HorizonReadout, Sweep, readout, sweep_prints
 from bot.lag.tape_studies import (
+    SELF_CHARGED_BAR,
+    SELF_CHARGED_BAR_SOURCE,
     TRADES,
     RunScope,
     assemble_run_inputs,
@@ -162,6 +164,9 @@ def execute(
         artifacts=artifacts,
         rtt_samples=rtt_samples,
         floor_source=floor_source,
+        economic_bar_size=SELF_CHARGED_BAR,
+        economic_bar_price=SELF_CHARGED_BAR,
+        economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
         bootstrap_seed=seed,
     )
     digest = write_manifest(run_root, inputs)

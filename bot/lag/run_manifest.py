@@ -8,7 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
-from bot.lag.fee_floor import FeeSource
+from bot.lag.fee_floor import FeeSource, economic_bar_cents_per_contract
 from bot.lag.r0_universe import R0Universe, freeze_digest, universe_payload
 from bot.lag.read_rtt import (
     FloorSource,
@@ -30,6 +30,9 @@ SUPPLIED_FIELDS = (
     ("universe", "r0_fraction_invalid_max"),
     ("fee", "fee_source"),
     ("floor", "latency_floor"),
+    ("economic_bar_size", "economic_bar_size"),
+    ("economic_bar_price", "economic_bar_price"),
+    ("economic_bar_price_source", "economic_bar_price_source"),
     ("bootstrap_seed", "bootstrap_seed"),
 )
 
@@ -53,6 +56,9 @@ class RunInputs:
     universe: R0Universe | None
     fee: FeeSource | None
     floor: LatencyFloor | None
+    economic_bar_size: Decimal | None
+    economic_bar_price: Decimal | None
+    economic_bar_price_source: str | None
     bootstrap_seed: int | None
 
 
@@ -75,6 +81,10 @@ class Manifest:
     r0_universe_sha256: str
     fee: FeeSource
     floor: LatencyFloor
+    economic_bar_size: Decimal
+    economic_bar_price: Decimal
+    economic_bar_price_source: str
+    economic_bar_cents_per_contract: Decimal
     bootstrap_seed: int
 
 
@@ -142,6 +152,12 @@ def build_manifest(inputs: RunInputs) -> Manifest:
         r0_universe_sha256=freeze_digest(universe_payload(inputs.universe)),
         fee=inputs.fee,
         floor=inputs.floor,
+        economic_bar_size=inputs.economic_bar_size,
+        economic_bar_price=inputs.economic_bar_price,
+        economic_bar_price_source=inputs.economic_bar_price_source,
+        economic_bar_cents_per_contract=economic_bar_cents_per_contract(
+            inputs.economic_bar_size, inputs.economic_bar_price
+        ),
         bootstrap_seed=inputs.bootstrap_seed,
     )
 
@@ -172,6 +188,10 @@ def manifest_payload(manifest: Manifest) -> dict:
         "latency_floor_s": manifest.floor.floor_s,
         "t_persist_s": manifest.floor.t_persist_s,
         "latency_floor_samples": manifest.floor.n_usable,
+        "economic_bar_size": str(manifest.economic_bar_size),
+        "economic_bar_price": str(manifest.economic_bar_price),
+        "economic_bar_price_source": manifest.economic_bar_price_source,
+        "economic_bar_cents_per_contract": str(manifest.economic_bar_cents_per_contract),
         "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
         "bootstrap_seed": manifest.bootstrap_seed,
     }

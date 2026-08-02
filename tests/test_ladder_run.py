@@ -18,6 +18,9 @@ from bot.lag.ladder_consistency import (
 )
 from bot.lag.ladder_run import (
     CLOSED,
+    ECONOMIC_BAR_PRICE,
+    ECONOMIC_BAR_PRICE_SOURCE,
+    ECONOMIC_BAR_SIZE,
     MICROS_PER_S,
     NO_ESTIMATE,
     PASS,
@@ -727,6 +730,9 @@ def test_the_manifest_lands_before_any_statistic_is_read(tmp_path: Path) -> None
             run_id=RUN_ID,
             artifacts=disordered_artifacts(tmp_path),
             floor_source=FloorSource.SIGNED_READ,
+            economic_bar_size=ECONOMIC_BAR_SIZE,
+            economic_bar_price=ECONOMIC_BAR_PRICE,
+            economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
             seed=SEED,
             run_root=run_root,
             **paths,

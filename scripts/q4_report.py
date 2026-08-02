@@ -14,7 +14,15 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bot.lag.lock_convergence import PROVIDING, TAKING, execute, result_payload  # noqa: E402
+from bot.lag.lock_convergence import (  # noqa: E402
+    ECONOMIC_BAR_PRICE,
+    ECONOMIC_BAR_PRICE_SOURCE,
+    ECONOMIC_BAR_SIZE,
+    PROVIDING,
+    TAKING,
+    execute,
+    result_payload,
+)
 from bot.lag.read_rtt import FloorSource  # noqa: E402
 from bot.lag.run_manifest import ManifestIncomplete  # noqa: E402
 from bot.lag.taker_flow_run import RESULTS_NAME  # noqa: E402
@@ -281,6 +289,9 @@ async def run(args: argparse.Namespace) -> int:
             settles=settles,
             rtt_samples=args.rtt_samples,
             floor_source=FloorSource(args.floor_source),
+            economic_bar_size=ECONOMIC_BAR_SIZE,
+            economic_bar_price=ECONOMIC_BAR_PRICE,
+            economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
             seed=args.seed,
             run_root=args.run_root,
         )

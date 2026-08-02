@@ -317,6 +317,10 @@ def keep_mask(offered: Sequence[EvidenceWindow], kept: Sequence[EvidenceWindow])
     return mask
 
 
+SELF_CHARGED_BAR: Decimal = Decimal("0")
+SELF_CHARGED_BAR_SOURCE = "statistic_charges_its_own_fee"
+
+
 def assemble_run_inputs(
     *,
     run_id: str,
@@ -326,6 +330,9 @@ def assemble_run_inputs(
     artifacts: Path,
     rtt_samples: Path,
     floor_source: FloorSource,
+    economic_bar_size: Decimal,
+    economic_bar_price: Decimal,
+    economic_bar_price_source: str,
     bootstrap_seed: int,
 ) -> RunInputs:
     scope = load_run_scope(run_scope)
@@ -352,6 +359,9 @@ def assemble_run_inputs(
         universe=scope.universe,
         fee=fee_source(),
         floor=resolve_latency_floor(load_samples(rtt_samples), floor_source),
+        economic_bar_size=economic_bar_size,
+        economic_bar_price=economic_bar_price,
+        economic_bar_price_source=economic_bar_price_source,
         bootstrap_seed=bootstrap_seed,
     )
 

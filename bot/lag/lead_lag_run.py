@@ -35,6 +35,8 @@ from bot.lag.tape_stats import (
     wild_cluster_bootstrap,
 )
 from bot.lag.tape_studies import (
+    SELF_CHARGED_BAR,
+    SELF_CHARGED_BAR_SOURCE,
     TOUCH,
     EvidenceWindow,
     RunScope,
@@ -478,6 +480,9 @@ def execute(
         artifacts=artifacts,
         rtt_samples=rtt_samples,
         floor_source=floor_source,
+        economic_bar_size=SELF_CHARGED_BAR,
+        economic_bar_price=SELF_CHARGED_BAR,
+        economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
         bootstrap_seed=seed,
     )
     digest = write_manifest(run_root, inputs)

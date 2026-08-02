@@ -9,7 +9,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bot.lag.ladder_run import RESULTS_NAME, execute, result_payload  # noqa: E402
+from bot.lag.ladder_run import (  # noqa: E402
+    ECONOMIC_BAR_PRICE,
+    ECONOMIC_BAR_PRICE_SOURCE,
+    ECONOMIC_BAR_SIZE,
+    RESULTS_NAME,
+    execute,
+    result_payload,
+)
 from bot.lag.read_rtt import FloorSource  # noqa: E402
 from bot.lag.run_manifest import ManifestIncomplete  # noqa: E402
 
@@ -59,6 +66,9 @@ def run(args: argparse.Namespace) -> int:
             artifacts=args.artifacts,
             rtt_samples=args.rtt_samples,
             floor_source=FloorSource(args.floor_source),
+            economic_bar_size=ECONOMIC_BAR_SIZE,
+            economic_bar_price=ECONOMIC_BAR_PRICE,
+            economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
             seed=args.seed,
             run_root=args.run_root,
         )
