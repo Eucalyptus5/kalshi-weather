@@ -42,7 +42,7 @@ from bot.validation.reconcile import ACISClient  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB = REPO_ROOT / "data" / "state.db"
 R0_WINDOW_START = date(2026, 7, 18)
-R0_WINDOW_END_EXCLUSIVE = date(2026, 8, 2)
+R0_WINDOW_END_INCLUSIVE = date(2026, 8, 1)
 R0_FRACTION_INVALID_MAX = Decimal("0.5")
 R0_PASSING_SERIES: tuple[str, ...] = (
     "KXHIGHDEN",
@@ -89,8 +89,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--end",
         dest="end_date",
         type=lambda s: date.fromisoformat(s),
-        default=R0_WINDOW_END_EXCLUSIVE,
-        help="exclusive UTC upper bound (YYYY-MM-DD)",
+        default=R0_WINDOW_END_INCLUSIVE,
+        help="inclusive UTC upper bound (YYYY-MM-DD)",
     )
     parser.add_argument(
         "--end-date",
@@ -118,7 +118,7 @@ def fetch_tickers_for_series(
     db_path: Path,
     series: str,
     start: date,
-    end: date,
+    end_exclusive: date,
 ) -> list[str]:
     conn = sqlite3.connect(f"file:{db_path.absolute()}?mode=ro", uri=True)
     try:
@@ -126,7 +126,7 @@ def fetch_tickers_for_series(
             "SELECT ticker FROM markets "
             "WHERE series = ? AND event_date >= ? AND event_date < ? "
             "ORDER BY ticker",
-            (series, start.isoformat(), end.isoformat()),
+            (series, start.isoformat(), end_exclusive.isoformat()),
         ).fetchall()
     finally:
         conn.close()
@@ -344,7 +344,7 @@ async def run(args: argparse.Namespace) -> int:
         print("no series to process")
         return 0
 
-    if args.start >= args.end_date:
+    if args.start > args.end_date:
         print(f"empty window: start={args.start} end={args.end_date}")
         return 0
 
@@ -354,7 +354,9 @@ async def run(args: argparse.Namespace) -> int:
     all_events: list[LockEvent] = []
     async with httpx.AsyncClient(timeout=60.0) as http:
         for series in series_kept:
-            tickers = fetch_tickers_for_series(args.db, series, args.start, args.end_date)
+            tickers = fetch_tickers_for_series(
+                args.db, series, args.start, args.end_date + timedelta(days=1)
+            )
             if not tickers:
                 continue
             all_events.extend(await _gather_events_for_series(series, tickers, http))

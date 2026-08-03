@@ -7,12 +7,15 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
 
 from bot.main import STATIONS
+from bot.observations.basis_check import compare_basis
 from bot.storage.sqlite import Base, make_engine
+from bot.validation.reconcile import ACISClient
 from scripts.lag_report import (
     BOOK_SOURCES,
     DEFAULT_LATENCY_CURVE_S,
@@ -20,7 +23,7 @@ from scripts.lag_report import (
     GATE_STACK_S,
     R0_FRACTION_INVALID_MAX,
     R0_PASSING_SERIES,
-    R0_WINDOW_END_EXCLUSIVE,
+    R0_WINDOW_END_INCLUSIVE,
     R0_WINDOW_START,
     build_parser,
     run,
@@ -140,6 +143,18 @@ def empty_http(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("scripts.lag_report.httpx.AsyncClient", _factory)
 
 
+def _basis_transport(days: list[date]) -> httpx.MockTransport:
+    csv = "station,valid,tmpc\n" + "".join(f"KDEN,{d.isoformat()} 18:00,25.0\n" for d in days)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "mesonet.agron.iastate.edu":
+            return httpx.Response(200, text=csv)
+        sdate = parse_qs(urlparse(str(request.url)).query)["sdate"][0]
+        return httpx.Response(200, json={"meta": {}, "data": [[sdate, "77"]]})
+
+    return httpx.MockTransport(handler)
+
+
 def _namespace(db_path: Path, **overrides: object) -> argparse.Namespace:
     base: dict[str, object] = {
         "db": db_path,
@@ -172,7 +187,7 @@ def test_default_arg_values() -> None:
     args = build_parser().parse_args([])
     assert args.db == REPO_ROOT / "data" / "state.db"
     assert args.start == R0_WINDOW_START
-    assert args.end_date == R0_WINDOW_END_EXCLUSIVE
+    assert args.end_date == R0_WINDOW_END_INCLUSIVE
     assert tuple(args.series) == R0_PASSING_SERIES
     assert args.book_source == "rest"
     assert tuple(args.latency_total_s) == DEFAULT_LATENCY_CURVE_S
@@ -214,7 +229,30 @@ def test_r0_passing_series_is_a_frozen_twenty_station_subset_of_stations() -> No
 
 def test_r0_window_spans_fifteen_days() -> None:
     assert R0_WINDOW_START == date(2026, 7, 18)
-    assert (R0_WINDOW_END_EXCLUSIVE - R0_WINDOW_START).days == 15
+    assert R0_WINDOW_END_INCLUSIVE == date(2026, 8, 1)
+    assert (R0_WINDOW_END_INCLUSIVE - R0_WINDOW_START).days + 1 == 15
+
+
+async def test_default_window_buckets_fifteen_observation_days() -> None:
+    args = build_parser().parse_args([])
+    superset = [date(2026, 7, 15) + timedelta(days=i) for i in range(22)]
+
+    async with httpx.AsyncClient(transport=_basis_transport(superset)) as http:
+        rows = await compare_basis(
+            "KDEN",
+            args.start,
+            args.end_date,
+            ACISClient(http_client=http),
+            None,
+            source="iowa_asos_archive",
+            http_client=http,
+        )
+
+    days = [row.observation_day for row in rows]
+    assert days[0] == date(2026, 7, 18)
+    assert days[-1] == date(2026, 8, 1)
+    assert len(set(days)) == 15
+    assert len(days) == 15
 
 
 def test_r0_fraction_invalid_max_is_decimal() -> None:
@@ -251,6 +289,24 @@ async def test_run_empty_window_short_circuits(
 
     assert rc == 0
     assert "empty window" in capsys.readouterr().out
+
+
+async def test_single_day_window_still_covers_its_own_day(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], mock_http: None
+) -> None:
+    db_path = _make_db(tmp_path)
+    conn = sqlite3.connect(str(db_path))
+    _insert_market(conn)
+    _insert_rest_snapshots(conn)
+    conn.commit()
+    conn.close()
+
+    rc = await run(_namespace(db_path, start=EVENT_DATE, end_date=EVENT_DATE))
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "empty window" not in out
+    assert "KXHIGHDEN  n_filled=1" in out
 
 
 async def test_run_against_empty_db_prints_report(
