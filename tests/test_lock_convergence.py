@@ -45,6 +45,7 @@ from bot.lag.run_manifest import MANIFEST_NAME
 from bot.lag.tape_studies import RunScope, load_run_scope
 from bot.markets.parser import parse_ticker
 from bot.observations.metar import StationObservation
+from bot.replay.analysis_stations import HIGH
 from bot.replay.artifacts import TRADES_SCHEMA
 from bot.replay.run_scope import (
     DISCOVERY,
@@ -854,3 +855,16 @@ def test_a_scope_that_only_narrows_its_universe_still_scans(tmp_path: Path) -> N
 
     assert scan.cities == (SERIES,)
     assert len(scan.clean) == 2
+
+
+def test_a_scope_spanning_both_ladders_is_not_scanned_without_a_cohort(tmp_path: Path) -> None:
+    scope = load_run_scope(scope_dir(tmp_path))
+    paired = next(iter(scope.event_days.values()))
+    both = replace(scope, event_days={**scope.event_days, (LOW_SERIES, paired.event_date): paired})
+
+    with pytest.raises(ValueError, match="names no cohort"):
+        scan_locks(both, artifacts_dir(tmp_path, LADDER_ROWS), ARCHIVE)
+
+    scan = scan_locks(both, artifacts_dir(tmp_path, LADDER_ROWS), ARCHIVE, cohort=HIGH)
+
+    assert scan.cities == (SERIES,)

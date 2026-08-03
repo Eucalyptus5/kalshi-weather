@@ -51,6 +51,7 @@ from bot.lag.tape_studies import (
     window_dates,
 )
 from bot.markets.parser import parse_ticker
+from bot.replay.analysis_stations import in_cohort
 from bot.replay.artifacts import TOUCH_SCHEMA
 from bot.replay.run_scope import DISCOVERY, HOLDOUT
 
@@ -262,9 +263,11 @@ def read_legs(artifacts: Path, ladder: Ladder, dates: Sequence[date]) -> pa.Tabl
     return pa.concat_tables(tables)
 
 
-def sweep_ladders(scope: RunScope, artifacts: Path, *, t_persist_s: Decimal) -> Sweep:
-    swept = {series for series, _ in scope.event_days}
-    recorded = set(scope.universe.recorded)
+def sweep_ladders(
+    scope: RunScope, artifacts: Path, *, t_persist_s: Decimal, cohort: str | None = None
+) -> Sweep:
+    swept = set(in_cohort({series for series, _ in scope.event_days}, cohort))
+    recorded = set(in_cohort(scope.universe.recorded, cohort))
     if swept != recorded:
         raise ValueError(
             "the frozen event days and the recorded universe disagree on: "
@@ -341,7 +344,7 @@ def sweep_ladders(scope: RunScope, artifacts: Path, *, t_persist_s: Decimal) -> 
         admitted=tuple(admitted),
         screened=screened,
         rows=rows,
-        in_scope=len(scope.event_days),
+        in_scope=sum(1 for series, _ in scope.event_days if series in swept),
         incomplete=tuple(incomplete),
         tickers=tickers,
     )

@@ -41,6 +41,7 @@ from bot.lag.tape_studies import (
 )
 from bot.markets.parser import parse_ticker, resolve_event_kinds
 from bot.observations.metar import StationObservation
+from bot.replay.analysis_stations import in_cohort
 from bot.replay.run_scope import DISCOVERY, HOLDOUT, EventDay
 
 
@@ -219,8 +220,10 @@ def scan_locks(
     scope: RunScope,
     artifacts: Path,
     observations: Mapping[tuple[str, date], list[StationObservation]],
+    *,
+    cohort: str | None = None,
 ) -> LockScan:
-    scoped = {series for series, _ in scope.event_days}
+    scoped = set(in_cohort({series for series, _ in scope.event_days}, cohort))
     lock_dependent = set(scope.universe.lock_dependent)
     cities = sorted(scoped & lock_dependent)
     # Zero locks would otherwise read as an underpowered run rather than a freeze paired with the

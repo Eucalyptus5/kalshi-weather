@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from dataclasses import replace
 
 from bot.main import RECORDING_SERIES, STATIONS, StationConfig
@@ -40,3 +41,27 @@ LOW_STATIONS: dict[str, StationConfig] = {
 ANALYSIS_STATIONS: dict[str, StationConfig] = {**STATIONS, **LOW_STATIONS}
 
 assert len(ANALYSIS_STATIONS) == 40
+
+HIGH = "high"
+LOW = "low"
+
+
+def ladder_of(series: str) -> str:
+    return LOW if series in LOW_TO_HIGH else HIGH
+
+
+# The two ladders settle off the same stations on the same days, so a sweep handed both counts
+# every city twice and reads as twice the evidence it holds.
+def in_cohort(series: Iterable[str], cohort: str | None) -> tuple[str, ...]:
+    names = tuple(sorted(set(series)))
+    if cohort is None:
+        if len({ladder_of(name) for name in names}) > 1:
+            raise ValueError(
+                "the frozen scope spans both ladders and the run names no cohort: "
+                + ", ".join(names)
+            )
+        return names
+    kept = tuple(name for name in names if ladder_of(name) == cohort)
+    if not kept:
+        raise ValueError(f"the frozen scope holds no {cohort} series: " + ", ".join(names))
+    return kept

@@ -7,19 +7,21 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from bot.main import STATIONS
+from bot.replay.analysis_stations import ANALYSIS_STATIONS
 from bot.replay.blind_windows import BLIND_WINDOWS_SCHEMA
 from bot.replay.run_scope import (
-    D_DISC,
     D_EVAL,
-    D_HOLD,
     DISCOVERY,
     EVENT_DAYS_SCHEMA,
     EXCLUSIONS_SCHEMA,
     HOLDOUT,
+    OUTAGE_TOLERANCE_US,
     QUIET_BAND,
     RECORDED_GAP,
     RESUBSCRIBE_BLIND,
     SUBSCRIPTION_WIDE,
+    DayInventory,
     EventDay,
     Exclusion,
     apply_spans,
@@ -30,6 +32,8 @@ from bot.replay.run_scope import (
     freeze_split,
     quiet_band_exclusions,
     read_blind_windows,
+    read_coverage,
+    split_lengths,
     split_payload,
     union_overlap_us,
     write_event_days,
@@ -42,6 +46,7 @@ UTC = timezone.utc
 TICK = timedelta(microseconds=1)
 SECOND = 1_000_000
 HOUR = 3_600_000_000
+DAY_US = 86_400_000_000
 BAND_US = 2 * HOUR
 
 EAST = "KXHIGHNY"
@@ -53,12 +58,19 @@ LAST_SCOPE_DAY = date(2026, 8, 1)
 
 TAPE_FIRST = datetime(2026, 7, 16, tzinfo=UTC)
 TAPE_LAST = datetime(2026, 8, 2, 12, tzinfo=UTC)
+SCOPE_OPEN = datetime(2026, 7, 19, tzinfo=UTC)
 SCOPE_START = datetime(2026, 7, 19, 5, tzinfo=UTC)
 SCOPE_END = datetime(2026, 8, 2, 8, tzinfo=UTC)
 
+INCIDENT = datetime(2026, 7, 23, 7, 43, 55, tzinfo=UTC)
 INCIDENT_DETECTED = datetime(2026, 7, 23, 7, 43, 55, 776558, tzinfo=UTC)
 INCIDENT_START = datetime(2026, 7, 23, 7, 24, 0, tzinfo=UTC)
 INCIDENT_END = datetime(2026, 7, 23, 7, 43, 8, tzinfo=UTC)
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+FROZEN_INPUTS = REPO_ROOT / "data" / "tape_studies" / "inputs"
+FROZEN_SCOPE = REPO_ROOT / "data" / "tape_studies" / "run_scope"
+FROZEN_DIGEST = "12f7f9e25bb4c4eddb3ffa6f330f8b52156dee606ec64b5c843ff94946af4478"
 
 
 def ticker(series: str, day: date, strike: int) -> str:
@@ -88,6 +100,22 @@ def coverage_rows() -> list[dict[str, object]]:
         for day in DAYS:
             rows.extend(cov(ticker(series, day, strike), day, strike) for strike in STRIKES)
     return rows
+
+
+def spread_rows(days: list[date]) -> list[dict[str, object]]:
+    return [cov(ticker(series, day, 80), day, 80) for series in (EAST, WEST) for day in days]
+
+
+def inventory_of(rows: list[dict[str, object]], **overrides: object) -> DayInventory:
+    settings: dict[str, object] = {
+        "stations": STATIONS,
+        "exclusions": (),
+        "tape_first": TAPE_FIRST,
+        "tape_last": TAPE_LAST,
+        "scope_open": SCOPE_OPEN,
+        "d_eval": D_EVAL,
+    }
+    return event_day_inventory(rows, **(settings | overrides))
 
 
 def blind_row(
@@ -156,6 +184,19 @@ BLIND_ROWS = [
     ),
 ]
 
+HOLE_DAY = date(2026, 7, 25)
+HOLE_ROW = blind_row(
+    71,
+    datetime(2026, 7, 25, 12, tzinfo=UTC),
+    datetime(2026, 7, 25, 14, tzinfo=UTC),
+    gap_id=7,
+    reason="connection_reset",
+    detected_at=datetime(2026, 7, 25, 14, 0, 5, tzinfo=UTC),
+)
+LONG_TAPE_LAST = datetime(2026, 8, 25, tzinfo=UTC)
+LONG_DAYS = [FIRST_SCOPE_DAY + timedelta(days=offset) for offset in range(34)]
+RESTART_DAYS = [HOLE_DAY + timedelta(days=offset) for offset in range(1, D_EVAL + 1)]
+
 
 def write_blind(path: Path, rows: list[dict[str, object]]) -> Path:
     pq.write_table(pa.Table.from_pylist(rows, schema=BLIND_WINDOWS_SCHEMA), path)
@@ -176,16 +217,24 @@ def exclusion(start: datetime, end: datetime, kind: str = RECORDED_GAP) -> Exclu
 
 @pytest.fixture
 def inventory() -> list[EventDay]:
-    return event_day_inventory(coverage_rows(), tape_first=TAPE_FIRST, tape_last=TAPE_LAST)
+    return list(inventory_of(coverage_rows()).days)
 
 
 def day_of(days: list[EventDay], series: str, event_date: date) -> EventDay:
     return next(day for day in days if day.series == series and day.event_date == event_date)
 
 
-def test_the_split_is_the_forward_two_thirds_of_the_accrual() -> None:
-    assert (D_EVAL, D_DISC, D_HOLD) == (14, 9, 5)
-    assert D_DISC + D_HOLD == D_EVAL
+@pytest.mark.parametrize(("d_eval", "expected"), [(14, (9, 5)), (28, (18, 10))])
+def test_the_split_is_the_forward_two_thirds_of_the_accrual(
+    d_eval: int, expected: tuple[int, int]
+) -> None:
+    assert split_lengths(d_eval) == expected
+    assert sum(split_lengths(d_eval)) == d_eval
+
+
+def test_the_outage_tolerance_is_five_percent_of_an_event_day() -> None:
+    assert OUTAGE_TOLERANCE_US == DAY_US // 20
+    assert OUTAGE_TOLERANCE_US == 4_320_000_000
 
 
 @pytest.mark.parametrize(
@@ -216,7 +265,9 @@ def test_the_named_incident_is_widened_five_minutes_at_each_end() -> None:
     )
     rows = [BLIND_ROWS[4], same_day]
 
-    exclusions = blind_exclusions(rows, scope_start=SCOPE_START, scope_end=SCOPE_END)
+    exclusions = blind_exclusions(
+        rows, scope_start=SCOPE_START, scope_end=SCOPE_END, incident=INCIDENT
+    )
 
     incident, other = exclusions[0], exclusions[1]
     assert incident.padded is True
@@ -229,23 +280,41 @@ def test_the_named_incident_is_widened_five_minutes_at_each_end() -> None:
     assert other.duration_us == 20 * SECOND
 
 
+def test_an_unnamed_incident_is_left_at_its_recorded_width() -> None:
+    exclusions = blind_exclusions(
+        [BLIND_ROWS[4]],
+        scope_start=SCOPE_START,
+        scope_end=SCOPE_END,
+        incident=datetime(2026, 8, 6, 7, 23, 9, tzinfo=UTC),
+    )
+
+    assert [item.padded for item in exclusions] == [False]
+    assert (exclusions[0].start, exclusions[0].end) == (INCIDENT_START, INCIDENT_END)
+
+
 def test_a_boundary_only_the_padding_brings_into_scope_is_kept_and_clipped() -> None:
     scope_start = INCIDENT_END + timedelta(minutes=2)
     rows = [BLIND_ROWS[4]]
 
-    exclusions = blind_exclusions(rows, scope_start=scope_start, scope_end=SCOPE_END)
+    exclusions = blind_exclusions(
+        rows, scope_start=scope_start, scope_end=SCOPE_END, incident=INCIDENT
+    )
 
     assert len(exclusions) == 1
     assert exclusions[0].start == scope_start
     assert exclusions[0].end == INCIDENT_END + timedelta(minutes=5)
-    assert blind_exclusions(rows, scope_start=SCOPE_END, scope_end=SCOPE_END) == []
+    assert (
+        blind_exclusions(rows, scope_start=SCOPE_END, scope_end=SCOPE_END, incident=INCIDENT) == []
+    )
 
 
 def test_a_clipped_interval_never_escapes_the_scope() -> None:
     scope_start = datetime(2026, 7, 20, 10, 0, 10, tzinfo=UTC)
     scope_end = datetime(2026, 7, 20, 10, 0, 20, tzinfo=UTC)
 
-    exclusions = blind_exclusions(BLIND_ROWS, scope_start=scope_start, scope_end=scope_end)
+    exclusions = blind_exclusions(
+        BLIND_ROWS, scope_start=scope_start, scope_end=scope_end, incident=INCIDENT
+    )
 
     assert [(e.start, e.end) for e in exclusions] == [(scope_start, scope_end)]
     assert exclusions[0].exclusion_class == RECORDED_GAP
@@ -309,6 +378,19 @@ def test_the_cold_start_costs_both_coasts_the_same_two_event_days(
     assert evaluable[FIRST_SCOPE_DAY] is True
 
 
+def test_a_later_named_start_moves_the_frozen_window_forward() -> None:
+    built = inventory_of(
+        spread_rows(LONG_DAYS),
+        scope_open=datetime(2026, 7, 22, tzinfo=UTC),
+        tape_last=LONG_TAPE_LAST,
+    )
+
+    scoped = sorted({day.event_date for day in built.days if day.in_scope})
+
+    assert scoped[0] == date(2026, 7, 22)
+    assert len(scoped) == D_EVAL
+
+
 def test_an_event_day_running_past_the_tape_is_not_covered(inventory: list[EventDay]) -> None:
     tail = day_of(inventory, EAST, date(2026, 8, 2))
 
@@ -316,7 +398,9 @@ def test_an_event_day_running_past_the_tape_is_not_covered(inventory: list[Event
     assert (tail.covered, tail.evaluable, tail.in_scope) == (False, False, False)
 
 
-def test_only_parsed_kxhigh_tickers_reach_the_inventory(inventory: list[EventDay]) -> None:
+def test_only_tickers_the_injected_map_names_reach_the_inventory(
+    inventory: list[EventDay],
+) -> None:
     first = day_of(inventory, EAST, FIRST_SCOPE_DAY)
 
     assert {day.series for day in inventory} == {EAST, WEST}
@@ -326,37 +410,103 @@ def test_only_parsed_kxhigh_tickers_reach_the_inventory(inventory: list[EventDay
     assert first.last_event_at == datetime(2026, 7, 19, 10, tzinfo=UTC)
 
 
+def test_the_combined_map_builds_both_ladders_and_admits_no_rain_root() -> None:
+    rows = [cov("KXRAINNYCM-26JUL19-T0.1", FIRST_SCOPE_DAY, 5)]
+    for series in (EAST, WEST, "KXLOWTNYC", "KXLOWTSFO"):
+        rows.extend(cov(ticker(series, day, 80), day, 80) for day in DAYS)
+
+    built = inventory_of(rows, stations=ANALYSIS_STATIONS)
+
+    assert len(ANALYSIS_STATIONS) == 40
+    assert {day.series for day in built.days} == {EAST, WEST, "KXLOWTNYC", "KXLOWTSFO"}
+    assert not [day for day in built.days if day.series.startswith("KXRAIN")]
+    assert day_of(list(built.days), "KXLOWTNYC", FIRST_SCOPE_DAY).station == "KNYC"
+    assert len([day for day in built.days if day.in_scope]) == 4 * D_EVAL
+
+
+def test_the_quiet_band_alone_leaves_every_event_day_evaluable() -> None:
+    bands = quiet_band_exclusions(TAPE_FIRST, TAPE_LAST)
+
+    built = inventory_of(coverage_rows(), exclusions=bands)
+
+    assert sum(band.duration_us for band in bands) > OUTAGE_TOLERANCE_US
+    assert built.over_tolerance == 0
+    assert len([day for day in built.days if day.evaluable]) == 2 * D_EVAL
+    assert all(value == 0 for value in built.outage_us.values())
+
+
+def test_an_outage_over_tolerance_costs_the_day_it_lands_on() -> None:
+    outage = exclusion(datetime(2026, 7, 22, 12, tzinfo=UTC), datetime(2026, 7, 22, 14, tzinfo=UTC))
+
+    built = inventory_of(spread_rows(LONG_DAYS), exclusions=[outage], tape_last=LONG_TAPE_LAST)
+
+    assert built.over_tolerance == 2
+    assert built.outage_us[(EAST, date(2026, 7, 22))] == 2 * HOUR
+    assert not day_of(list(built.days), EAST, date(2026, 7, 22)).evaluable
+    assert not day_of(list(built.days), WEST, date(2026, 7, 22)).evaluable
+
+
+def test_a_hole_over_tolerance_restarts_the_count_at_the_next_evaluable_day() -> None:
+    outage = exclusion(HOLE_ROW["start"], HOLE_ROW["end"])
+
+    built = inventory_of(spread_rows(LONG_DAYS), exclusions=[outage], tape_last=LONG_TAPE_LAST)
+
+    scoped = sorted({day.event_date for day in built.days if day.in_scope})
+    assert scoped == RESTART_DAYS
+    assert scoped[0] == HOLE_DAY + timedelta(days=1)
+    assert HOLE_DAY not in scoped
+    assert len(scoped) == D_EVAL
+
+
 def test_a_series_short_of_the_accrual_cannot_be_frozen() -> None:
     days = [FIRST_SCOPE_DAY + timedelta(days=offset) for offset in range(D_EVAL - 1)]
     rows = [cov(ticker(EAST, day, 80), day, 80) for day in days]
 
-    with pytest.raises(ValueError, match=EAST):
-        event_day_inventory(rows, tape_first=TAPE_FIRST, tape_last=datetime(2026, 8, 5, tzinfo=UTC))
+    with pytest.raises(ValueError, match="2026-07-31") as raised:
+        inventory_of(rows, tape_last=datetime(2026, 8, 5, tzinfo=UTC))
+
+    assert str(D_EVAL) in str(raised.value)
 
 
-def test_a_hole_in_the_evaluable_run_cannot_be_frozen() -> None:
-    days = [FIRST_SCOPE_DAY + timedelta(days=offset) for offset in range(16)]
-    days.remove(date(2026, 7, 26))
-    rows = [cov(ticker(EAST, day, 80), day, 80) for day in days]
+def test_a_run_that_never_reaches_the_accrual_reports_its_day_sequence() -> None:
+    days = [FIRST_SCOPE_DAY + timedelta(days=offset) for offset in range(6)]
+    days += [date(2026, 7, 27) + timedelta(days=offset) for offset in range(10)]
 
-    with pytest.raises(ValueError, match="2026-07-26"):
-        event_day_inventory(rows, tape_first=TAPE_FIRST, tape_last=datetime(2026, 8, 5, tzinfo=UTC))
+    with pytest.raises(ValueError) as raised:
+        inventory_of(spread_rows(days), tape_last=LONG_TAPE_LAST)
+
+    reported = str(raised.value)
+    assert all(day.isoformat() in reported for day in days)
+    assert "2026-07-25" not in reported
 
 
 def test_the_frozen_split_runs_nine_days_then_five(inventory: list[EventDay]) -> None:
-    split = freeze_split(inventory)
+    split = freeze_split(inventory, d_eval=D_EVAL)
+    d_disc, d_hold = split_lengths(D_EVAL)
 
     assert split.cities == (EAST, WEST)
-    assert len(split.discovery_days) == D_DISC
-    assert len(split.holdout_days) == D_HOLD
+    assert len(split.discovery_days) == d_disc
+    assert len(split.holdout_days) == d_hold
     assert split.discovery_days[0] == FIRST_SCOPE_DAY
     assert split.holdout_days[-1] == LAST_SCOPE_DAY
-    assert split.boundary_event_day == FIRST_SCOPE_DAY + timedelta(days=D_DISC)
+    assert split.boundary_event_day == FIRST_SCOPE_DAY + timedelta(days=d_disc)
     assert split.boundary_event_day == split.holdout_days[0]
     assert (split.scope_start, split.scope_end) == (SCOPE_START, SCOPE_END)
-    assert [day.split for day in inventory if day.in_scope].count(DISCOVERY) == 2 * D_DISC
-    assert [day.split for day in inventory if day.in_scope].count(HOLDOUT) == 2 * D_HOLD
+    assert [day.split for day in inventory if day.in_scope].count(DISCOVERY) == 2 * d_disc
+    assert [day.split for day in inventory if day.in_scope].count(HOLDOUT) == 2 * d_hold
     assert all(day.split == "" and day.day_index == 0 for day in inventory if not day.in_scope)
+
+
+def test_a_longer_accrual_splits_eighteen_days_then_ten() -> None:
+    built = inventory_of(spread_rows(LONG_DAYS), d_eval=28, tape_last=LONG_TAPE_LAST)
+
+    split = freeze_split(built.days, d_eval=28)
+
+    assert (len(split.discovery_days), len(split.holdout_days)) == (18, 10)
+    assert split.discovery_days[0] == FIRST_SCOPE_DAY
+    assert split.boundary_event_day == FIRST_SCOPE_DAY + timedelta(days=18)
+    payload = split_payload(split)
+    assert (payload["d_eval"], payload["d_disc"], payload["d_hold"]) == (28, 18, 10)
 
 
 def test_two_cities_that_disagree_on_their_days_cannot_be_frozen(
@@ -370,11 +520,11 @@ def test_two_cities_that_disagree_on_their_days_cannot_be_frozen(
     ]
 
     with pytest.raises(ValueError, match="cities"):
-        freeze_split(shifted)
+        freeze_split(shifted, d_eval=D_EVAL)
 
 
 def test_the_digest_is_stable_and_moves_with_a_single_day(inventory: list[EventDay]) -> None:
-    payload = split_payload(freeze_split(inventory))
+    payload = split_payload(freeze_split(inventory, d_eval=D_EVAL))
     moved = dict(payload)
     moved["holdout_days"] = [*payload["holdout_days"][:-1], "2026-09-09"]
 
@@ -384,11 +534,10 @@ def test_the_digest_is_stable_and_moves_with_a_single_day(inventory: list[EventD
 
 
 def test_the_payload_names_the_frozen_boundary(inventory: list[EventDay]) -> None:
-    payload = split_payload(freeze_split(inventory))
+    payload = split_payload(freeze_split(inventory, d_eval=D_EVAL))
 
     assert payload["d_eval"] == D_EVAL
-    assert payload["d_disc"] == D_DISC
-    assert payload["d_hold"] == D_HOLD
+    assert (payload["d_disc"], payload["d_hold"]) == split_lengths(D_EVAL)
     assert payload["cities"] == [EAST, WEST]
     assert payload["first_evaluable_event_day"] == FIRST_SCOPE_DAY.isoformat()
     assert payload["last_evaluable_event_day"] == LAST_SCOPE_DAY.isoformat()
@@ -398,7 +547,7 @@ def test_the_payload_names_the_frozen_boundary(inventory: list[EventDay]) -> Non
 
 
 def test_a_clean_event_day_measures_twenty_two_hours(inventory: list[EventDay]) -> None:
-    split = freeze_split(inventory)
+    split = freeze_split(inventory, d_eval=D_EVAL)
     bands = quiet_band_exclusions(split.scope_start, split.scope_end)
 
     spanned = apply_spans(inventory, bands)
@@ -411,7 +560,7 @@ def test_a_clean_event_day_measures_twenty_two_hours(inventory: list[EventDay]) 
 
 
 def test_a_pacific_day_pays_the_band_at_both_of_its_ends(inventory: list[EventDay]) -> None:
-    split = freeze_split(inventory)
+    split = freeze_split(inventory, d_eval=D_EVAL)
     bands = quiet_band_exclusions(split.scope_start, split.scope_end)
     pacific = day_of(apply_spans(inventory, bands), WEST, FIRST_SCOPE_DAY)
 
@@ -474,7 +623,7 @@ def test_the_exclusions_table_round_trips(tmp_path: Path) -> None:
 
 def test_the_event_day_table_round_trips(tmp_path: Path, inventory: list[EventDay]) -> None:
     path = tmp_path / "event_days.parquet"
-    split = freeze_split(inventory)
+    split = freeze_split(inventory, d_eval=D_EVAL)
     spanned = apply_spans(inventory, quiet_band_exclusions(split.scope_start, split.scope_end))
 
     write_event_days(path, spanned)
@@ -498,9 +647,50 @@ def test_the_event_day_table_round_trips(tmp_path: Path, inventory: list[EventDa
         write_event_days(path, spanned)
 
 
+def test_the_frozen_tables_still_carry_the_columns_every_reader_expects() -> None:
+    assert EXCLUSIONS_SCHEMA.equals(
+        pa.schema(
+            [
+                ("exclusion_id", pa.int64()),
+                ("exclusion_class", pa.string()),
+                ("start", pa.timestamp("us", tz="UTC")),
+                ("end", pa.timestamp("us", tz="UTC")),
+                ("duration_us", pa.int64()),
+                ("boundary_id", pa.int64()),
+                ("gap_id", pa.int64()),
+                ("gap_reason", pa.string()),
+                ("padded", pa.bool_()),
+            ]
+        )
+    )
+    assert EVENT_DAYS_SCHEMA.equals(
+        pa.schema(
+            [
+                ("series", pa.string()),
+                ("station", pa.string()),
+                ("timezone", pa.string()),
+                ("event_date", pa.date32()),
+                ("window_start", pa.timestamp("us", tz="UTC")),
+                ("window_end", pa.timestamp("us", tz="UTC")),
+                ("tickers", pa.int64()),
+                ("ladder_rows", pa.int64()),
+                ("first_event_at", pa.timestamp("us", tz="UTC")),
+                ("last_event_at", pa.timestamp("us", tz="UTC")),
+                ("covered", pa.bool_()),
+                ("evaluable", pa.bool_()),
+                ("in_scope", pa.bool_()),
+                ("day_index", pa.int64()),
+                ("split", pa.string()),
+                ("excluded_us", pa.int64()),
+                ("span_us", pa.int64()),
+            ]
+        )
+    )
+
+
 def test_the_split_file_carries_its_own_digest(tmp_path: Path, inventory: list[EventDay]) -> None:
     path = tmp_path / "split.json"
-    split = freeze_split(inventory)
+    split = freeze_split(inventory, d_eval=D_EVAL)
 
     digest = write_split(path, split)
 
@@ -521,3 +711,54 @@ def test_the_blind_windows_are_read_back_in_start_order(tmp_path: Path) -> None:
     assert [row["boundary_id"] for row in rows] == [11, 21, 31, 41, 51]
     assert rows[0]["gap_reason"] == "connection_reset"
     assert rows[3]["has_gap_row"] is False
+
+
+@pytest.mark.skipif(not FROZEN_SCOPE.exists(), reason="the recorded tape is not on this host")
+def test_the_spent_window_rebuilds_off_the_recorded_tape() -> None:
+    blind = read_blind_windows(FROZEN_INPUTS / "blind_windows-b000000.parquet")
+    coverage = read_coverage(FROZEN_INPUTS / "coverage-b000000.parquet")
+    tape_first = min(row["first_received_at"] for row in coverage)
+    tape_last = max(row["last_received_at"] for row in coverage)
+    outages = blind_exclusions(
+        blind, scope_start=tape_first, scope_end=tape_last, incident=INCIDENT
+    )
+
+    built = event_day_inventory(
+        coverage,
+        stations=STATIONS,
+        exclusions=outages,
+        tape_first=tape_first,
+        tape_last=tape_last,
+        scope_open=SCOPE_OPEN,
+        d_eval=D_EVAL,
+    )
+    split = freeze_split(built.days, d_eval=D_EVAL)
+    payload = split_payload(split)
+    stored = json.loads((FROZEN_SCOPE / "split.json").read_text())
+
+    assert payload == {name: value for name, value in stored.items() if name != "sha256"}
+    assert freeze_digest(payload) == FROZEN_DIGEST
+    assert stored["sha256"] == FROZEN_DIGEST
+    assert len(split.cities) == 20
+    assert split.discovery_days[0] == date(2026, 7, 19)
+    assert split.holdout_days[-1] == date(2026, 8, 1)
+    assert split.boundary_event_day == date(2026, 7, 28)
+
+    scoped = [day for day in built.days if day.in_scope]
+    assert len(scoped) == 280
+    assert built.over_tolerance == 0
+
+    worst: dict[date, int] = {}
+    for day in scoped:
+        outage = built.outage_us[(day.series, day.event_date)]
+        worst[day.event_date] = max(worst.get(day.event_date, 0), outage)
+    assert max(worst.values()) <= OUTAGE_TOLERANCE_US
+    assert worst[date(2026, 7, 30)] / DAY_US * 100 == pytest.approx(4.996, abs=0.001)
+    assert worst[date(2026, 7, 23)] / DAY_US * 100 == pytest.approx(3.41, abs=0.001)
+
+    bands = quiet_band_exclusions(split.scope_start, split.scope_end)
+    folded = list(outages) + bands
+    assert all(
+        union_overlap_us(folded, day.window_start, day.window_end) > OUTAGE_TOLERANCE_US
+        for day in scoped
+    )

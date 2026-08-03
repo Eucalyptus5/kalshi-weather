@@ -9,7 +9,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from bot.main import STATIONS
+from bot.main import StationConfig
 from bot.markets.observation_window import observation_window
 from bot.markets.parser import parse_ticker
 
@@ -17,20 +17,10 @@ from bot.markets.parser import parse_ticker
 logger = logging.getLogger(__name__)
 
 D_EVAL = 14
-D_DISC = 9
-D_HOLD = 5
 
-assert D_DISC + D_HOLD == D_EVAL
-
-COLD_START_OPEN = datetime(2026, 7, 17, 8, 3, 38, tzinfo=timezone.utc)
-COLD_START_CLOSE = datetime(2026, 7, 19, tzinfo=timezone.utc)
 QUIET_BAND_OPEN_HOUR = 7
 QUIET_BAND_CLOSE_HOUR = 9
-# Concurrent with venue-wide REST 503s, so the recorded bracket understates how long the venue
-# was unreadable; the pad is a per-incident judgment, not a standing rule.
-PADDED_INCIDENT = datetime(2026, 7, 23, 7, 43, 55, tzinfo=timezone.utc)
 INCIDENT_PAD = timedelta(minutes=5)
-SERIES_PREFIX = "KXHIGH"
 
 RECORDED_GAP = "recorded_gap"
 SUBSCRIPTION_WIDE = "subscription_wide"
@@ -39,13 +29,19 @@ QUIET_BAND = "quiet_band"
 SUBSCRIPTION_WIDE_REASONS = frozenset(
     {"seq_skip", "terminal_error_10", "terminal_error_17", "terminal_error_25"}
 )
+# The quiet band is a standing decision to ignore the small hours, not a hole in the tape, so it
+# never counts against an event day's evaluability.
+OUTAGE_CLASSES = frozenset({RECORDED_GAP, SUBSCRIPTION_WIDE, RESUBSCRIBE_BLIND})
 
 DISCOVERY = "discovery"
 HOLDOUT = "holdout"
 
 _MICROSECOND = timedelta(microseconds=1)
 _DAY_US = 86_400_000_000
+_ONE_DAY = timedelta(days=1)
 _ZERO = timedelta(0)
+
+OUTAGE_TOLERANCE_US = _DAY_US * 5 // 100
 
 EXCLUSIONS_SCHEMA = pa.schema(
     [
@@ -123,6 +119,13 @@ class EventDay:
 
 
 @dataclass(frozen=True, slots=True)
+class DayInventory:
+    days: tuple[EventDay, ...]
+    outage_us: Mapping[tuple[str, date], int]
+    over_tolerance: int
+
+
+@dataclass(frozen=True, slots=True)
 class Split:
     cities: tuple[str, ...]
     discovery_days: tuple[date, ...]
@@ -130,6 +133,11 @@ class Split:
     boundary_event_day: date
     scope_start: datetime
     scope_end: datetime
+
+
+def split_lengths(d_eval: int) -> tuple[int, int]:
+    discovery = 2 * d_eval // 3
+    return discovery, d_eval - discovery
 
 
 def classify_window(has_gap_row: bool, gap_reason: str | None) -> str:
@@ -150,12 +158,16 @@ def read_coverage(path: Path) -> list[dict]:
 
 
 def blind_exclusions(
-    rows: Sequence[Mapping[str, object]], *, scope_start: datetime, scope_end: datetime
+    rows: Sequence[Mapping[str, object]],
+    *,
+    scope_start: datetime,
+    scope_end: datetime,
+    incident: datetime,
 ) -> list[Exclusion]:
     out = []
     for row in rows:
         detected = row["gap_detected_at"]
-        padded = detected is not None and detected.replace(microsecond=0) == PADDED_INCIDENT
+        padded = detected is not None and detected.replace(microsecond=0) == incident
         start = row["start"] - INCIDENT_PAD if padded else row["start"]
         end = row["end"] + INCIDENT_PAD if padded else row["end"]
         if end < scope_start or start > scope_end:
@@ -210,12 +222,19 @@ def union_overlap_us(exclusions: Sequence[Exclusion], start: datetime, end: date
 
 
 def event_day_inventory(
-    coverage: Sequence[Mapping[str, object]], *, tape_first: datetime, tape_last: datetime
-) -> list[EventDay]:
+    coverage: Sequence[Mapping[str, object]],
+    *,
+    stations: Mapping[str, StationConfig],
+    exclusions: Sequence[Exclusion],
+    tape_first: datetime,
+    tape_last: datetime,
+    scope_open: datetime,
+    d_eval: int,
+) -> DayInventory:
     grouped: dict[tuple[str, date], list[Mapping[str, object]]] = {}
     for row in coverage:
         ticker = row["ticker"]
-        if not ticker.split("-")[0].startswith(SERIES_PREFIX):
+        if ticker.split("-")[0] not in stations:
             continue
         try:
             parsed = parse_ticker(ticker)
@@ -223,12 +242,18 @@ def event_day_inventory(
             continue
         grouped.setdefault((parsed.series, parsed.event_date), []).append(row)
 
+    outages = [item for item in exclusions if item.exclusion_class in OUTAGE_CLASSES]
     days = []
+    outage_us: dict[tuple[str, date], int] = {}
+    over_tolerance = 0
     for (series, event_date), rows in grouped.items():
-        cfg = STATIONS[series]
+        cfg = stations[series]
         window_start, window_end = observation_window(cfg.timezone, event_date)
+        outage = union_overlap_us(outages, window_start, window_end)
+        outage_us[(series, event_date)] = outage
         covered = tape_first <= window_start and window_end <= tape_last
-        cold = window_start < COLD_START_CLOSE and COLD_START_OPEN < window_end
+        candidate = covered and scope_open <= window_start
+        over_tolerance += int(candidate and outage > OUTAGE_TOLERANCE_US)
         days.append(
             EventDay(
                 series=series,
@@ -242,7 +267,7 @@ def event_day_inventory(
                 first_event_at=min(row["first_received_at"] for row in rows),
                 last_event_at=max(row["last_received_at"] for row in rows),
                 covered=covered,
-                evaluable=covered and not cold,
+                evaluable=candidate and outage <= OUTAGE_TOLERANCE_US,
                 in_scope=False,
                 day_index=0,
                 split="",
@@ -252,38 +277,52 @@ def event_day_inventory(
         )
 
     days.sort(key=lambda day: (day.series, day.event_date))
-    scoped = {}
-    for series in sorted({day.series for day in days}):
-        evaluable = [day for day in days if day.series == series and day.evaluable]
-        if len(evaluable) < D_EVAL:
-            raise ValueError(f"{series} holds {len(evaluable)} evaluable event-days, need {D_EVAL}")
-        prefix = evaluable[:D_EVAL]
-        for index, day in enumerate(prefix):
-            expected = prefix[0].event_date + timedelta(days=index)
-            if day.event_date != expected:
-                raise ValueError(
-                    f"{series} evaluable event-days break at {expected.isoformat()}: "
-                    f"the run restarts the counter and cannot be frozen"
-                )
-            scoped[(series, day.event_date)] = index + 1
+    cities = {day.series for day in days}
+    ready: dict[date, set[str]] = {}
+    for day in days:
+        if day.evaluable:
+            ready.setdefault(day.event_date, set()).add(day.series)
+    shared = sorted(event_date for event_date, seen in ready.items() if seen == cities)
+
+    run: list[date] = []
+    for event_date in shared:
+        if run and event_date - run[-1] != _ONE_DAY:
+            run = []
+        run.append(event_date)
+        if len(run) == d_eval:
+            break
+    else:
+        raise ValueError(
+            f"no {d_eval} contiguous event-days are evaluable in every city, only "
+            + ", ".join(event_date.isoformat() for event_date in shared)
+        )
+
+    d_disc, _ = split_lengths(d_eval)
+    index_of = {event_date: position + 1 for position, event_date in enumerate(run)}
     logger.info(
-        "run_scope event_days=%d covered=%d evaluable=%d in_scope=%d",
+        "run_scope event_days=%d covered=%d evaluable=%d over_tolerance=%d first=%s last=%s",
         len(days),
         sum(1 for day in days if day.covered),
         sum(1 for day in days if day.evaluable),
-        len(scoped),
+        over_tolerance,
+        run[0].isoformat(),
+        run[-1].isoformat(),
     )
-    return [
-        replace(
-            day,
-            in_scope=True,
-            day_index=scoped[(day.series, day.event_date)],
-            split=DISCOVERY if scoped[(day.series, day.event_date)] <= D_DISC else HOLDOUT,
-        )
-        if (day.series, day.event_date) in scoped
-        else day
-        for day in days
-    ]
+    return DayInventory(
+        days=tuple(
+            replace(
+                day,
+                in_scope=True,
+                day_index=index_of[day.event_date],
+                split=DISCOVERY if index_of[day.event_date] <= d_disc else HOLDOUT,
+            )
+            if day.event_date in index_of
+            else day
+            for day in days
+        ),
+        outage_us=outage_us,
+        over_tolerance=over_tolerance,
+    )
 
 
 def apply_spans(days: Sequence[EventDay], exclusions: Sequence[Exclusion]) -> list[EventDay]:
@@ -297,13 +336,13 @@ def apply_spans(days: Sequence[EventDay], exclusions: Sequence[Exclusion]) -> li
     return out
 
 
-def freeze_split(days: Sequence[EventDay]) -> Split:
+def freeze_split(days: Sequence[EventDay], *, d_eval: int) -> Split:
     scoped = [day for day in days if day.in_scope]
     per_city = {}
     for day in scoped:
         per_city.setdefault(day.series, set()).add(day.event_date)
     distinct = {tuple(sorted(dates)) for dates in per_city.values()}
-    if len(distinct) != 1 or len(next(iter(distinct))) != D_EVAL:
+    if len(distinct) != 1 or len(next(iter(distinct))) != d_eval:
         raise ValueError(
             "cities disagree on the frozen event-days: "
             + ", ".join(f"{city}={len(dates)}" for city, dates in sorted(per_city.items()))
@@ -322,9 +361,9 @@ def freeze_split(days: Sequence[EventDay]) -> Split:
 
 def split_payload(split: Split) -> dict:
     return {
-        "d_eval": D_EVAL,
-        "d_disc": D_DISC,
-        "d_hold": D_HOLD,
+        "d_eval": len(split.discovery_days) + len(split.holdout_days),
+        "d_disc": len(split.discovery_days),
+        "d_hold": len(split.holdout_days),
         "cities": list(split.cities),
         "first_evaluable_event_day": split.discovery_days[0].isoformat(),
         "last_evaluable_event_day": split.holdout_days[-1].isoformat(),

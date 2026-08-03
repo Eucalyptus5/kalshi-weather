@@ -58,6 +58,7 @@ from bot.lag.tape_studies import (
     window_dates,
 )
 from bot.markets.parser import parse_ticker
+from bot.replay.analysis_stations import in_cohort
 from bot.replay.artifacts import TOUCH_SCHEMA
 from bot.replay.run_scope import DISCOVERY, HOLDOUT
 
@@ -196,6 +197,7 @@ def sweep_prints(
     artifacts: Path,
     *,
     lock_windows: Mapping[str, tuple[datetime, datetime]] | None = None,
+    cohort: str | None = None,
 ) -> Sweep:
     tallies = {(split, horizon_s): Tally() for split in SPLITS for horizon_s in HORIZONS_S}
     hygiene = FlowCounts()
@@ -210,7 +212,7 @@ def sweep_prints(
     days = window_dates(scope.scope_start, scope.scope_end)
     lock_dependent = set(scope.universe.lock_dependent)
 
-    for series_root in sorted({series for series, _ in scope.event_days}):
+    for series_root in in_cohort({series for series, _ in scope.event_days}, cohort):
         started = time.monotonic()
         outside_universe = lock_windows is not None and series_root not in lock_dependent
         hygienic = screen_prints(

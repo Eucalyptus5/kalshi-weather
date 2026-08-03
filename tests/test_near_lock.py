@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -21,12 +22,14 @@ from bot.lag.r0_universe import Coverage, freeze_universe, write_universe
 from bot.lag.taker_flow import HORIZONS_S, PRIMARY_HORIZON_S
 from bot.lag.taker_flow_run import UNDERPOWERED, readout, sweep_prints
 from bot.lag.tape_studies import RunScope, load_run_scope
+from bot.replay.analysis_stations import HIGH
 from bot.replay.artifacts import TRADES_SCHEMA
 from bot.replay.run_scope import DISCOVERY, EVENT_DAYS_SCHEMA, HOLDOUT, Split, write_split
 from tests.test_taker_flow_run import (
     DAY_TICKER,
     DISCOVERY_DAY,
     HOLDOUT_DAY,
+    LOW_SERIES,
     NEXT_TICKER,
     OPENS,
     SCOPE_END,
@@ -434,3 +437,22 @@ def test_a_reading_at_the_stratum_minimum_carries_its_estimate_and_interval() ->
     assert Decimal(payload["mean_net_cents"]) == Decimal("2")
     assert payload["ci_low"] is not None
     assert payload["p_value"] is not None
+
+
+def test_a_scope_spanning_both_ladders_is_not_scanned_without_a_cohort(
+    tmp_path: Path, scope: RunScope
+) -> None:
+    paired = next(iter(scope.event_days.values()))
+    both = replace(
+        scope,
+        event_days={**scope.event_days, (LOW_SERIES, paired.event_date): paired},
+        universe=replace(scope.universe, lock_dependent=(SERIES, LOW_SERIES)),
+    )
+    recorded = read_observations(crossing_observations(tmp_path))
+
+    with pytest.raises(ValueError, match="names no cohort"):
+        scan_locks(both, artifacts_dir(tmp_path), recorded)
+
+    found = scan_locks(both, artifacts_dir(tmp_path), recorded, cohort=HIGH)
+
+    assert found.cities == (SERIES,)

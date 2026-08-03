@@ -24,6 +24,7 @@ from bot.lag.tape_studies import (
 )
 from bot.markets.parser import parse_ticker
 from bot.observations.metar import StationObservation
+from bot.replay.analysis_stations import in_cohort
 from bot.replay.run_scope import DISCOVERY, HOLDOUT
 
 
@@ -86,15 +87,20 @@ def read_observations(path: Path) -> dict[str, list[StationObservation]]:
 
 
 def scan_locks(
-    scope: RunScope, artifacts: Path, observations: Mapping[str, list[StationObservation]]
+    scope: RunScope,
+    artifacts: Path,
+    observations: Mapping[str, list[StationObservation]],
+    *,
+    cohort: str | None = None,
 ) -> LockScan:
+    scoped = set(in_cohort({series for series, _ in scope.event_days}, cohort))
+    lock_dependent = set(scope.universe.lock_dependent)
+    cities = sorted(scoped & lock_dependent)
     windows: dict[str, tuple[datetime, datetime]] = {}
     markets = 0
     ambiguous = 0
     no_lock = 0
     no_observations = 0
-    lock_dependent = set(scope.universe.lock_dependent)
-    cities = sorted({series for series, _ in scope.event_days} & lock_dependent)
 
     for series_root in cities:
         table = read_window(artifacts, TRADES, series_root, scope.scope_start, scope.scope_end)

@@ -1,4 +1,5 @@
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -42,6 +43,7 @@ from bot.lag.r0_universe import Coverage, freeze_universe, write_universe
 from bot.lag.read_rtt import FloorSource
 from bot.lag.run_manifest import MANIFEST_NAME
 from bot.lag.tape_studies import RunScope, load_run_scope
+from bot.replay.analysis_stations import HIGH
 from bot.replay.artifacts import TOUCH_SCHEMA
 from bot.replay.run_scope import (
     DISCOVERY,
@@ -69,6 +71,7 @@ MICROSECOND = timedelta(microseconds=1)
 OPENS = timedelta(hours=6)
 
 SERIES = "KXHIGHDEN"
+LOW_SERIES = "KXLOWTDEN"
 DISCOVERY_DAY = date(2026, 7, 18)
 HOLDOUT_DAY = date(2026, 7, 19)
 LATE_DAY = date(2026, 7, 20)
@@ -753,3 +756,22 @@ def test_a_touch_partition_carrying_another_schema_is_refused(
         sweep_ladders(scope, root, t_persist_s=T_PERSIST)
 
     assert TOUCH_SCHEMA.names != ["id", "ticker"]
+
+
+def test_a_scope_spanning_both_ladders_is_not_swept_without_a_cohort(
+    tmp_path: Path, scope: RunScope
+) -> None:
+    paired = next(iter(scope.event_days.values()))
+    both = replace(
+        scope,
+        event_days={**scope.event_days, (LOW_SERIES, paired.event_date): paired},
+        universe=replace(scope.universe, recorded=(*scope.universe.recorded, LOW_SERIES)),
+    )
+
+    with pytest.raises(ValueError, match="names no cohort"):
+        sweep_ladders(both, artifacts_dir(tmp_path), t_persist_s=T_PERSIST)
+
+    swept = sweep_ladders(both, artifacts_dir(tmp_path), t_persist_s=T_PERSIST, cohort=HIGH)
+
+    assert swept.in_scope == len(scope.event_days)
+    assert LOW_SERIES not in {series for series, _ in swept.tickers}

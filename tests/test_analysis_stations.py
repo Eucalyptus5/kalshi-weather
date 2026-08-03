@@ -1,7 +1,15 @@
 import pytest
 
 from bot.main import RECORDING_SERIES, STATIONS
-from bot.replay.analysis_stations import ANALYSIS_STATIONS, LOW_STATIONS, LOW_TO_HIGH
+from bot.replay.analysis_stations import (
+    ANALYSIS_STATIONS,
+    HIGH,
+    LOW,
+    LOW_STATIONS,
+    LOW_TO_HIGH,
+    in_cohort,
+    ladder_of,
+)
 
 
 # Read off rules_primary on each open low market, one root at a time. The CLI suffix is a locally
@@ -71,3 +79,33 @@ def test_the_analysis_map_is_forty_roots_and_carries_no_rain() -> None:
 def test_the_live_bots_map_is_left_alone() -> None:
     assert all(ANALYSIS_STATIONS[root] is config for root, config in STATIONS.items())
     assert not [root for root in STATIONS if root.startswith("KXLOW")]
+
+
+def test_every_analysis_root_lands_on_one_of_the_two_ladders() -> None:
+    assert {ladder_of(root) for root in STATIONS} == {HIGH}
+    assert {ladder_of(root) for root in LOW_STATIONS} == {LOW}
+
+
+def test_a_single_ladder_set_needs_no_cohort() -> None:
+    assert in_cohort(["KXHIGHNY", "KXHIGHDEN"], None) == ("KXHIGHDEN", "KXHIGHNY")
+    assert in_cohort(["KXLOWTNYC"], None) == ("KXLOWTNYC",)
+
+
+def test_a_two_ladder_set_without_a_cohort_is_refused() -> None:
+    with pytest.raises(ValueError, match="names no cohort") as refused:
+        in_cohort(["KXHIGHNY", "KXLOWTNYC"], None)
+
+    assert "KXHIGHNY" in str(refused.value)
+    assert "KXLOWTNYC" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    ("cohort", "expected"), [(HIGH, ("KXHIGHDEN", "KXHIGHNY")), (LOW, ("KXLOWTNYC",))]
+)
+def test_a_named_cohort_keeps_only_its_own_ladder(cohort: str, expected: tuple[str, ...]) -> None:
+    assert in_cohort(["KXHIGHNY", "KXLOWTNYC", "KXHIGHDEN"], cohort) == expected
+
+
+def test_a_cohort_with_nothing_to_sweep_is_refused() -> None:
+    with pytest.raises(ValueError, match=LOW):
+        in_cohort(["KXHIGHNY"], LOW)

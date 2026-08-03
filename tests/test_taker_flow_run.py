@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -37,6 +38,7 @@ from bot.lag.taker_flow_run import (
 )
 from bot.lag.tape_stats import ClusterAggregate, evaluate_holdout
 from bot.lag.tape_studies import RunScope, load_run_scope
+from bot.replay.analysis_stations import HIGH
 from bot.replay.artifacts import TOUCH_SCHEMA, TRADES_SCHEMA
 from bot.replay.run_scope import (
     DISCOVERY,
@@ -56,6 +58,7 @@ MICROSECOND = timedelta(microseconds=1)
 OPENS = timedelta(hours=6)
 
 SERIES = "KXHIGHDEN"
+LOW_SERIES = "KXLOWTDEN"
 DISCOVERY_DAY = date(2026, 7, 18)
 HOLDOUT_DAY = date(2026, 7, 19)
 LATE_DAY = date(2026, 7, 20)
@@ -823,3 +826,18 @@ def test_a_discovery_estimate_of_exactly_zero_closes_without_a_replication() -> 
             n_unit=TICKERS,
             undecidable=False,
         )
+
+
+def test_a_scope_spanning_both_ladders_is_not_swept_without_a_cohort(
+    tmp_path: Path, scope: RunScope
+) -> None:
+    paired = next(iter(scope.event_days.values()))
+    both = replace(scope, event_days={**scope.event_days, (LOW_SERIES, paired.event_date): paired})
+
+    with pytest.raises(ValueError, match="names no cohort"):
+        sweep_prints(both, artifacts_dir(tmp_path))
+
+    swept = sweep_prints(both, artifacts_dir(tmp_path), cohort=HIGH)
+
+    assert swept.in_scope == {DISCOVERY: 4, HOLDOUT: 2}
+    assert LOW_SERIES not in {series for series, _ in swept.tickers}
