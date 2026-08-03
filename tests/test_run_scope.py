@@ -480,6 +480,33 @@ def test_a_run_that_never_reaches_the_accrual_reports_its_day_sequence() -> None
     assert "2026-07-25" not in reported
 
 
+def test_a_city_with_no_evaluable_day_is_named_in_the_refusal() -> None:
+    rows = spread_rows(DAYS)
+    rows += [cov(ticker("KXLOWTDEN", day, 60), day, 60) for day in DAYS[:2]]
+
+    with pytest.raises(ValueError) as raised:
+        inventory_of(rows, stations=ANALYSIS_STATIONS)
+
+    reported = str(raised.value)
+    assert "KXLOWTDEN=0" in reported
+    assert f"{EAST}={D_EVAL}" in reported
+    assert f"{WEST}={D_EVAL}" in reported
+    assert "none" in reported
+    assert reported == reported.rstrip(" ,:;")
+
+
+def test_a_short_shared_run_reports_the_days_and_the_city_counts() -> None:
+    days = [FIRST_SCOPE_DAY + timedelta(days=offset) for offset in range(D_EVAL - 1)]
+
+    with pytest.raises(ValueError) as raised:
+        inventory_of(spread_rows(days), tape_last=datetime(2026, 8, 5, tzinfo=UTC))
+
+    reported = str(raised.value)
+    assert all(day.isoformat() in reported for day in days)
+    assert f"{EAST}={D_EVAL - 1}" in reported
+    assert f"{WEST}={D_EVAL - 1}" in reported
+
+
 def test_the_frozen_split_runs_nine_days_then_five(inventory: list[EventDay]) -> None:
     split = freeze_split(inventory, d_eval=D_EVAL)
     d_disc, d_hold = split_lengths(D_EVAL)

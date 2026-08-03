@@ -292,9 +292,14 @@ def event_day_inventory(
         if len(run) == d_eval:
             break
     else:
+        evaluable = dict.fromkeys(sorted(cities), 0)
+        for day in days:
+            evaluable[day.series] += int(day.evaluable)
         raise ValueError(
             f"no {d_eval} contiguous event-days are evaluable in every city, only "
-            + ", ".join(event_date.isoformat() for event_date in shared)
+            + (", ".join(event_date.isoformat() for event_date in shared) or "none")
+            + "; evaluable days per city: "
+            + ", ".join(f"{city}={count}" for city, count in evaluable.items())
         )
 
     d_disc, _ = split_lengths(d_eval)
