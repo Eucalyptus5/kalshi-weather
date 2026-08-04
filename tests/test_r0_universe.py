@@ -1,4 +1,5 @@
 import json
+from collections.abc import Sequence
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -21,6 +22,7 @@ from bot.lag.r0_universe import (
     write_universe,
 )
 from bot.lag.tape_studies import load_run_scope
+from bot.replay.analysis_stations import HIGH, LOW, ladder_of
 from bot.replay.run_scope import EVENT_DAYS_SCHEMA
 from scripts.freeze_r0_universe import R0_LOW_SERIES, R0_UNION_SERIES, build_parser, run
 from scripts.lag_report import R0_FRACTION_INVALID_MAX, R0_PASSING_SERIES
@@ -32,7 +34,22 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 FROZEN_RUN_SCOPE = REPO_ROOT / "data" / "tape_studies" / "run_scope"
 
 THRESHOLD = Decimal("0.5")
-HIGH_CARVE_OUT, LOW_CARVE_OUT = LOCK_CARVE_OUT
+
+
+def carve_out_on(ladder: str, carve_out: Sequence[str] = LOCK_CARVE_OUT) -> str:
+    for series in carve_out:
+        if ladder_of(series) == ladder:
+            return series
+    raise ValueError(f"the carve-out holds no {ladder} series: " + ", ".join(carve_out))
+
+
+def normalized_carve_out(stored: str | list[str]) -> tuple[str, ...]:
+    return (stored,) if isinstance(stored, str) else tuple(stored)
+
+
+HIGH_CARVE_OUT = carve_out_on(HIGH)
+LOW_CARVE_OUT = carve_out_on(LOW)
+ACCEPTED_CARVE_OUT_ENCODINGS = ((HIGH_CARVE_OUT,), tuple(LOCK_CARVE_OUT))
 PASSING = ("KXHIGHDEN", "KXHIGHCHI", HIGH_CARVE_OUT, "KXHIGHNY")
 LOW_PASSING = ("KXLOWTDEN", "KXLOWTCHI", LOW_CARVE_OUT, "KXLOWTNYC")
 LADDER = 6
@@ -104,6 +121,37 @@ def test_miami_is_carved_off_the_low_ladder_for_the_same_basis_offset() -> None:
     assert lock_dependent_series(PASSING + LOW_PASSING) == tuple(
         sorted(set(PASSING + LOW_PASSING) - set(LOCK_CARVE_OUT))
     )
+
+
+def test_the_carve_out_names_are_derived_by_ladder_not_by_position() -> None:
+    third_city = ("KXHIGHMIA", "KXLOWTMIA", "KXHIGHCHI")
+
+    assert carve_out_on(HIGH, third_city) == "KXHIGHMIA"
+    assert carve_out_on(LOW, third_city) == "KXLOWTMIA"
+    assert carve_out_on(LOW, ("KXLOWTMIA", "KXHIGHMIA")) == "KXLOWTMIA"
+    assert (carve_out_on(HIGH), carve_out_on(LOW)) == (HIGH_CARVE_OUT, LOW_CARVE_OUT)
+
+    with pytest.raises(ValueError, match="no low series"):
+        carve_out_on(LOW, ("KXHIGHMIA",))
+    with pytest.raises(ValueError, match="no high series"):
+        carve_out_on(HIGH, ("KXLOWTMIA",))
+
+
+@pytest.mark.parametrize(
+    ("stored", "accepted"),
+    [
+        (HIGH_CARVE_OUT, True),
+        (list(LOCK_CARVE_OUT), True),
+        (LOW_CARVE_OUT, False),
+        ("KXHIGHDEN", False),
+        (list(reversed(LOCK_CARVE_OUT)), False),
+        (list(LOCK_CARVE_OUT) + ["KXHIGHDEN"], False),
+    ],
+)
+def test_the_frozen_carve_out_reads_as_the_legacy_scalar_or_the_current_list(
+    stored: str | list[str], accepted: bool
+) -> None:
+    assert (normalized_carve_out(stored) in ACCEPTED_CARVE_OUT_ENCODINGS) is accepted
 
 
 def test_the_carve_out_never_reaches_the_unconditional_universe() -> None:
@@ -301,6 +349,6 @@ def test_the_frozen_run_scope_still_validates_against_its_own_digest() -> None:
     scope = load_run_scope(FROZEN_RUN_SCOPE)
 
     stored = json.loads((FROZEN_RUN_SCOPE / "r0_universe.json").read_text())
-    assert stored["lock_carve_out"] == HIGH_CARVE_OUT
+    assert normalized_carve_out(stored["lock_carve_out"]) in ACCEPTED_CARVE_OUT_ENCODINGS
     assert scope.universe.lock_dependent
     assert HIGH_CARVE_OUT not in scope.universe.lock_dependent
