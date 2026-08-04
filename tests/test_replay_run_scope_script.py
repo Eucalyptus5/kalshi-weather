@@ -149,6 +149,17 @@ def test_a_window_clear_of_the_incident_is_not_asked_to_find_it(tmp_path: Path) 
     assert summary["in_scope_days"] == 2 * D_EVAL
 
 
+def test_a_partial_accrual_is_refused_before_anything_is_written(
+    inputs: tuple[Path, Path, Path],
+) -> None:
+    blind, coverage, out = inputs
+
+    with pytest.raises(ValueError, match="whole multiple"):
+        run(args_for(blind, coverage, out, "--d-eval", "1"))
+
+    assert not out.exists()
+
+
 def test_a_longer_accrual_splits_by_the_same_two_thirds(tmp_path: Path) -> None:
     blind = write_blind(tmp_path / "blind.parquet", BLIND_ROWS)
     coverage = write_coverage(tmp_path / "coverage.parquet", long_coverage())

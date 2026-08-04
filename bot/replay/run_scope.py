@@ -283,6 +283,13 @@ def event_day_inventory(
         if day.evaluable:
             ready.setdefault(day.event_date, set()).add(day.series)
     shared = sorted(event_date for event_date, seen in ready.items() if seen == cities)
+    sequence = ", ".join(event_date.isoformat() for event_date in shared) or "none"
+
+    if d_eval <= 0 or d_eval % D_EVAL:
+        raise ValueError(
+            f"an accrual of {d_eval} event-days is not a whole multiple of {D_EVAL}, "
+            f"evaluable in every city: {sequence}"
+        )
 
     run: list[date] = []
     for event_date in shared:
@@ -296,8 +303,7 @@ def event_day_inventory(
         for day in days:
             evaluable[day.series] += int(day.evaluable)
         raise ValueError(
-            f"no {d_eval} contiguous event-days are evaluable in every city, only "
-            + (", ".join(event_date.isoformat() for event_date in shared) or "none")
+            f"no {d_eval} contiguous event-days are evaluable in every city, only {sequence}"
             + "; evaluable days per city: "
             + ", ".join(f"{city}={count}" for city, count in evaluable.items())
         )

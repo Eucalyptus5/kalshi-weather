@@ -507,6 +507,29 @@ def test_a_short_shared_run_reports_the_days_and_the_city_counts() -> None:
     assert f"{WEST}={D_EVAL - 1}" in reported
 
 
+@pytest.mark.parametrize("d_eval", [0, 1, 19, 22, -D_EVAL])
+def test_an_accrual_that_is_not_a_whole_window_is_refused(d_eval: int) -> None:
+    with pytest.raises(ValueError) as raised:
+        inventory_of(coverage_rows(), d_eval=d_eval)
+
+    reported = str(raised.value)
+    assert f"{d_eval} event-days" in reported
+    assert f"multiple of {D_EVAL}" in reported
+    assert FIRST_SCOPE_DAY.isoformat() in reported
+    assert LAST_SCOPE_DAY.isoformat() in reported
+    assert "contiguous" not in reported
+
+
+@pytest.mark.parametrize("d_eval", [D_EVAL, 2 * D_EVAL])
+def test_a_whole_multiple_of_the_base_accrual_still_freezes(d_eval: int) -> None:
+    built = inventory_of(spread_rows(LONG_DAYS), d_eval=d_eval, tape_last=LONG_TAPE_LAST)
+
+    scoped = sorted({day.event_date for day in built.days if day.in_scope})
+
+    assert len(scoped) == d_eval
+    assert scoped[0] == FIRST_SCOPE_DAY
+
+
 def test_the_frozen_split_runs_nine_days_then_five(inventory: list[EventDay]) -> None:
     split = freeze_split(inventory, d_eval=D_EVAL)
     d_disc, d_hold = split_lengths(D_EVAL)
