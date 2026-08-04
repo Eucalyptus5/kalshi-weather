@@ -24,8 +24,9 @@ IEM_1MIN_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos1min.py"
 class BasisCompareRow:
     station: str
     observation_day: date
-    metar_max_f: Decimal
-    acis_high_f: Decimal
+    extreme: Literal["max", "min"]
+    observed_f: Decimal
+    acis_f: Decimal
     delta_f: Decimal
     basis_valid: bool
 
@@ -47,6 +48,7 @@ async def compare_basis(
     acis_client: ACISClient,
     metar_client: MetarClient | None,
     *,
+    extreme: Literal["max", "min"] = "max",
     source: Literal[
         "live_metar", "iowa_asos_archive", "iem_1min_asos_archive"
     ] = "iem_1min_asos_archive",
@@ -90,27 +92,33 @@ async def compare_basis(
     rows: list[BasisCompareRow] = []
     for day in sorted(by_day):
         bucket = by_day[day]
-        metar_max_f = max(o.temp_f for o in bucket)
-        acis_high_f = await acis_client.fetch_daily_high(acis_sid, day)
-        if acis_high_f is None:
+        if extreme == "max":
+            observed_f = max(o.temp_f for o in bucket)
+            acis_f = await acis_client.fetch_daily_high(acis_sid, day)
+        else:
+            observed_f = min(o.temp_f for o in bucket)
+            acis_f = await acis_client.fetch_daily_low(acis_sid, day)
+        if acis_f is None:
             continue
-        delta_f = metar_max_f - acis_high_f
+        delta_f = observed_f - acis_f
         rows.append(
             BasisCompareRow(
                 station=station,
                 observation_day=day,
-                metar_max_f=metar_max_f,
-                acis_high_f=acis_high_f,
+                extreme=extreme,
+                observed_f=observed_f,
+                acis_f=acis_f,
                 delta_f=delta_f,
-                basis_valid=_integer_tolerant_basis_valid(metar_max_f, acis_high_f),
+                basis_valid=_integer_tolerant_basis_valid(observed_f, acis_f),
             )
         )
 
     logger.info(
-        "basis_compare station=%s start=%s end=%s source=%s rows=%d",
+        "basis_compare station=%s start=%s end=%s extreme=%s source=%s rows=%d",
         station,
         start_date.isoformat(),
         end_date.isoformat(),
+        extreme,
         source,
         len(rows),
     )
@@ -143,10 +151,10 @@ def summarize_basis(rows: list[BasisCompareRow]) -> list[BasisSummary]:
     return out
 
 
-def _integer_tolerant_basis_valid(metar_max_f: Decimal, acis_high_f: Decimal) -> bool:
-    metar_int = int(metar_max_f.to_integral_value(rounding=ROUND_HALF_EVEN))
-    acis_int = int(acis_high_f.to_integral_value(rounding=ROUND_HALF_EVEN))
-    return abs(metar_int - acis_int) <= 1
+def _integer_tolerant_basis_valid(observed_f: Decimal, acis_f: Decimal) -> bool:
+    observed_int = int(observed_f.to_integral_value(rounding=ROUND_HALF_EVEN))
+    acis_int = int(acis_f.to_integral_value(rounding=ROUND_HALF_EVEN))
+    return abs(observed_int - acis_int) <= 1
 
 
 def _quantile(sorted_values: list[Decimal], q: Decimal) -> Decimal:

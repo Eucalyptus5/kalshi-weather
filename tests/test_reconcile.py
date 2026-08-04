@@ -137,6 +137,56 @@ async def test_acis_negative_integer() -> None:
     assert result == Decimal("-12")
 
 
+async def test_acis_daily_low_requests_mint() -> None:
+    captured: dict[str, httpx.Request] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["req"] = request
+        return httpx.Response(200, json=_resp("41"))
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = ACISClient(http_client=http)
+        result = await client.fetch_daily_low("KDEN", date(2026, 4, 28))
+
+    assert result == Decimal("41")
+    parsed = urlparse(str(captured["req"].url))
+    assert parsed.netloc == "data.rcc-acis.org"
+    assert parsed.path == "/StnData"
+    qs = parse_qs(parsed.query)
+    assert qs["elems"] == ["mint"]
+    assert qs["sid"] == ["KDEN"]
+    assert qs["sdate"] == ["2026-04-28"]
+    assert qs["edate"] == ["2026-04-28"]
+    assert qs["output"] == ["json"]
+    assert captured["req"].headers.get("User-Agent")
+
+
+async def test_acis_daily_low_missing_data_sentinel() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_resp("M"))
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = ACISClient(http_client=http)
+        result = await client.fetch_daily_low("KDEN", date(2026, 4, 28))
+
+    assert result is None
+
+
+async def test_acis_daily_low_negative_integer() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_resp("-4"))
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = ACISClient(http_client=http)
+        result = await client.fetch_daily_low("KMSP", date(2026, 4, 28))
+
+    assert result == Decimal("-4")
+    assert type(result) is Decimal
+
+
 async def test_acis_raises_on_non_200() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="server error")

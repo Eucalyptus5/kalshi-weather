@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from typing import Literal
 
 import httpx
 
@@ -41,11 +42,22 @@ class ACISClient:
         self._user_agent = user_agent
 
     async def fetch_daily_high(self, station: str, settled_date: date) -> Decimal | None:
+        return await self._fetch_daily_element(station, settled_date, "maxt")
+
+    async def fetch_daily_low(self, station: str, settled_date: date) -> Decimal | None:
+        return await self._fetch_daily_element(station, settled_date, "mint")
+
+    async def _fetch_daily_element(
+        self,
+        station: str,
+        settled_date: date,
+        element: Literal["maxt", "mint"],
+    ) -> Decimal | None:
         params = {
             "sid": station,
             "sdate": settled_date.isoformat(),
             "edate": settled_date.isoformat(),
-            "elems": "maxt",
+            "elems": element,
             "output": "json",
         }
         headers = {"User-Agent": self._user_agent} if not self._owns_http else None

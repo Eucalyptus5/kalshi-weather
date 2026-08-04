@@ -84,8 +84,8 @@ async def test_iowa_archive_agree_golden() -> None:
     row = rows[0]
     assert row.station == "KDEN"
     assert row.observation_day == date(2026, 1, 15)
-    assert row.metar_max_f == Decimal("77")
-    assert row.acis_high_f == Decimal("77")
+    assert row.observed_f == Decimal("77")
+    assert row.acis_f == Decimal("77")
     assert row.delta_f == Decimal("0")
     assert row.basis_valid is True
 
@@ -113,8 +113,8 @@ async def test_iowa_archive_miss_by_2_4f() -> None:
 
     assert len(rows) == 1
     row = rows[0]
-    assert row.metar_max_f == Decimal("73.4")
-    assert row.acis_high_f == Decimal("71")
+    assert row.observed_f == Decimal("73.4")
+    assert row.acis_f == Decimal("71")
     assert row.delta_f == Decimal("2.4")
     assert row.basis_valid is False
 
@@ -207,10 +207,10 @@ async def test_day_grouping_dst_boundary_kden() -> None:
 
     by_day = {r.observation_day: r for r in rows}
     assert set(by_day.keys()) == {date(2026, 1, 14), date(2026, 1, 15)}
-    assert by_day[date(2026, 1, 14)].metar_max_f == Decimal("1.0") * Decimal("9") / Decimal(
+    assert by_day[date(2026, 1, 14)].observed_f == Decimal("1.0") * Decimal("9") / Decimal(
         "5"
     ) + Decimal("32")
-    assert by_day[date(2026, 1, 15)].metar_max_f == Decimal("3.0") * Decimal("9") / Decimal(
+    assert by_day[date(2026, 1, 15)].observed_f == Decimal("3.0") * Decimal("9") / Decimal(
         "5"
     ) + Decimal("32")
 
@@ -304,9 +304,9 @@ async def test_live_metar_path() -> None:
     row = rows[0]
     assert row.station == "KDEN"
     assert row.observation_day == date(2026, 7, 15)
-    assert row.metar_max_f == Decimal("33") * Decimal("9") / Decimal("5") + Decimal("32")
-    assert row.acis_high_f == Decimal("90")
-    assert row.delta_f == row.metar_max_f - Decimal("90")
+    assert row.observed_f == Decimal("33") * Decimal("9") / Decimal("5") + Decimal("32")
+    assert row.acis_f == Decimal("90")
+    assert row.delta_f == row.observed_f - Decimal("90")
 
 
 def test_summarize_basis_aggregates() -> None:
@@ -327,8 +327,9 @@ def test_summarize_basis_aggregates() -> None:
         BasisCompareRow(
             station="KDEN",
             observation_day=date(2026, 1, 15) + timedelta(days=i),
-            metar_max_f=Decimal("70") + d,
-            acis_high_f=Decimal("70"),
+            extreme="max",
+            observed_f=Decimal("70") + d,
+            acis_f=Decimal("70"),
             delta_f=d,
             basis_valid=_integer_tolerant_basis_valid(Decimal("70") + d, Decimal("70")),
         )
@@ -356,16 +357,18 @@ def test_summarize_groups_by_station() -> None:
         BasisCompareRow(
             station="KDEN",
             observation_day=date(2026, 1, 15),
-            metar_max_f=Decimal("70"),
-            acis_high_f=Decimal("70"),
+            extreme="max",
+            observed_f=Decimal("70"),
+            acis_f=Decimal("70"),
             delta_f=Decimal("0"),
             basis_valid=True,
         ),
         BasisCompareRow(
             station="KAUS",
             observation_day=date(2026, 1, 15),
-            metar_max_f=Decimal("85"),
-            acis_high_f=Decimal("82"),
+            extreme="max",
+            observed_f=Decimal("85"),
+            acis_f=Decimal("82"),
             delta_f=Decimal("3"),
             basis_valid=False,
         ),
@@ -433,8 +436,8 @@ async def test_delta_f_is_decimal_end_to_end() -> None:
 
     assert len(rows) == 1
     assert type(rows[0].delta_f) is Decimal
-    assert type(rows[0].metar_max_f) is Decimal
-    assert type(rows[0].acis_high_f) is Decimal
+    assert type(rows[0].observed_f) is Decimal
+    assert type(rows[0].acis_f) is Decimal
 
 
 def _iem_1min_csv(rows: list[tuple[str, str, str, str]]) -> str:
@@ -528,6 +531,7 @@ def _iem_route_transport(
     iem_payload: str,
     acis_by_date: dict[date, object],
     iem_capture: list[httpx.Request] | None = None,
+    acis_capture: list[httpx.Request] | None = None,
 ) -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
         host = request.url.host
@@ -536,6 +540,8 @@ def _iem_route_transport(
                 iem_capture.append(request)
             return httpx.Response(200, text=iem_payload)
         if host == "data.rcc-acis.org":
+            if acis_capture is not None:
+                acis_capture.append(request)
             qs = parse_qs(urlparse(str(request.url)).query)
             sdate = date.fromisoformat(qs["sdate"][0])
             value = acis_by_date.get(sdate)
@@ -569,8 +575,8 @@ async def test_iem_1min_integer_tolerant_equal() -> None:
 
     assert len(rows) == 1
     row = rows[0]
-    assert row.metar_max_f == Decimal("80.0")
-    assert row.acis_high_f == Decimal("80")
+    assert row.observed_f == Decimal("80.0")
+    assert row.acis_f == Decimal("80")
     assert row.delta_f == Decimal("0.0")
     assert row.basis_valid is True
 
@@ -597,8 +603,8 @@ async def test_iem_1min_integer_tolerant_floor_accepts() -> None:
 
     assert len(rows) == 1
     row = rows[0]
-    assert row.metar_max_f == Decimal("81.0")
-    assert row.acis_high_f == Decimal("80")
+    assert row.observed_f == Decimal("81.0")
+    assert row.acis_f == Decimal("80")
     assert row.delta_f == Decimal("1.0")
     assert row.basis_valid is True
 
@@ -625,8 +631,8 @@ async def test_iem_1min_integer_tolerant_rejects_above_floor() -> None:
 
     assert len(rows) == 1
     row = rows[0]
-    assert row.metar_max_f == Decimal("82.0")
-    assert row.acis_high_f == Decimal("80")
+    assert row.observed_f == Decimal("82.0")
+    assert row.acis_f == Decimal("80")
     assert row.delta_f == Decimal("2.0")
     assert row.basis_valid is False
 
@@ -664,3 +670,164 @@ async def test_compare_basis_default_source_is_iem_1min() -> None:
 
     assert len(rows) == 1
     assert any(urlparse(str(req.url)).path == "/cgi-bin/request/asos1min.py" for req in captured)
+
+
+async def test_compare_basis_min_takes_bucket_minimum_and_fetches_mint() -> None:
+    csv = _iem_1min_csv(
+        [
+            ("DEN", "DENVER INTL", "2026-05-18 18:00", "58.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 20:00", "71.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 22:00", "80.0"),
+        ]
+    )
+    captured: list[httpx.Request] = []
+    transport = _iem_route_transport(
+        csv,
+        {date(2026, 5, 18): "58"},
+        acis_capture=captured,
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        rows = await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            acis_client,
+            None,
+            extreme="min",
+            http_client=http,
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.extreme == "min"
+    assert row.observed_f == Decimal("58.0")
+    assert row.acis_f == Decimal("58")
+    assert row.delta_f == Decimal("0.0")
+    assert row.basis_valid is True
+    assert len(captured) == 1
+    assert parse_qs(urlparse(str(captured[0].url)).query)["elems"] == ["mint"]
+
+
+async def test_compare_basis_default_takes_max_and_fetches_maxt() -> None:
+    csv = _iem_1min_csv(
+        [
+            ("DEN", "DENVER INTL", "2026-05-18 18:00", "58.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 20:00", "71.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 22:00", "80.0"),
+        ]
+    )
+    captured: list[httpx.Request] = []
+    transport = _iem_route_transport(
+        csv,
+        {date(2026, 5, 18): "80"},
+        acis_capture=captured,
+    )
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        rows = await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            acis_client,
+            None,
+            http_client=http,
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.extreme == "max"
+    assert row.observed_f == Decimal("80.0")
+    assert row.acis_f == Decimal("80")
+    assert row.delta_f == Decimal("0.0")
+    assert len(captured) == 1
+    assert parse_qs(urlparse(str(captured[0].url)).query)["elems"] == ["maxt"]
+
+
+async def test_compare_basis_min_integer_tolerant_accepts_one_degree() -> None:
+    csv = _iem_1min_csv(
+        [
+            ("DEN", "DENVER INTL", "2026-05-18 18:00", "39.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 22:00", "70.0"),
+        ]
+    )
+    transport = _iem_route_transport(csv, {date(2026, 5, 18): "40"})
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        rows = await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            acis_client,
+            None,
+            extreme="min",
+            http_client=http,
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.observed_f == Decimal("39.0")
+    assert row.acis_f == Decimal("40")
+    assert row.delta_f == Decimal("-1.0")
+    assert row.basis_valid is True
+
+
+async def test_compare_basis_min_integer_tolerant_rejects_two_degrees() -> None:
+    csv = _iem_1min_csv(
+        [
+            ("DEN", "DENVER INTL", "2026-05-18 18:00", "38.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 22:00", "70.0"),
+        ]
+    )
+    transport = _iem_route_transport(csv, {date(2026, 5, 18): "40"})
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        rows = await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            acis_client,
+            None,
+            extreme="min",
+            http_client=http,
+        )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.observed_f == Decimal("38.0")
+    assert row.acis_f == Decimal("40")
+    assert row.delta_f == Decimal("-2.0")
+    assert row.basis_valid is False
+
+
+async def test_compare_basis_single_observation_day_rows_under_both_extremes() -> None:
+    csv = _iem_1min_csv([("DEN", "DENVER INTL", "2026-05-18 20:00", "65.0")])
+    transport = _iem_route_transport(csv, {date(2026, 5, 18): "65"})
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        max_rows = await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            acis_client,
+            None,
+            http_client=http,
+        )
+        min_rows = await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            acis_client,
+            None,
+            extreme="min",
+            http_client=http,
+        )
+
+    assert len(max_rows) == 1
+    assert len(min_rows) == 1
+    assert max_rows[0].observed_f == Decimal("65.0")
+    assert min_rows[0].observed_f == Decimal("65.0")
+    assert max_rows[0].extreme == "max"
+    assert min_rows[0].extreme == "min"
+    assert max_rows[0].basis_valid is True
+    assert min_rows[0].basis_valid is True
