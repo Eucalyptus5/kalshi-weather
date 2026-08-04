@@ -13,15 +13,24 @@ from bot.lag.near_lock import (
     PRINT_MIN_STRATUM,
     REPORTED,
     NearLockRun,
+    execute,
     read_observations,
     reading_payload,
     result_payload,
     scan_locks,
 )
-from bot.lag.r0_universe import Coverage, freeze_universe, write_universe
+from bot.lag.r0_universe import Coverage, freeze_digest, freeze_universe, write_universe
+from bot.lag.read_rtt import FloorSource
+from bot.lag.run_manifest import MANIFEST_NAME, build_manifest, manifest_payload
 from bot.lag.taker_flow import HORIZONS_S, PRIMARY_HORIZON_S
 from bot.lag.taker_flow_run import UNDERPOWERED, readout, sweep_prints
-from bot.lag.tape_studies import RunScope, load_run_scope
+from bot.lag.tape_studies import (
+    SELF_CHARGED_BAR,
+    SELF_CHARGED_BAR_SOURCE,
+    RunScope,
+    assemble_run_inputs,
+    load_run_scope,
+)
 from bot.replay.analysis_stations import HIGH
 from bot.replay.artifacts import TRADES_SCHEMA
 from bot.replay.run_scope import DISCOVERY, EVENT_DAYS_SCHEMA, HOLDOUT, Split, write_split
@@ -46,9 +55,17 @@ from tests.test_taker_flow_run import (
     trade,
     when,
 )
-from tests.test_tape_studies import event_day_row, write_partition
+from tests.test_tape_studies import (
+    ADEQUATE_SAMPLES,
+    event_day_row,
+    seeded_repo,
+    write_partition,
+    write_preregistration,
+    write_rtt_samples,
+)
 
 
+RUN_ID = "2026-08-17-near-lock"
 STATION = "KDEN"
 MIA = "KXHIGHMIA"
 LAX = "KXHIGHLAX"
@@ -494,3 +511,109 @@ def test_a_scope_that_only_narrows_its_universe_still_scans(
 
     assert found.cities == (SERIES,)
     assert found.locked == 2
+
+
+def mispaired_scope_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "mispaired"
+    directory.mkdir()
+    pq.write_table(exclusion_table(), directory / "exclusions.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                day_row(SERIES, STATION, "America/Denver", event_date, split, index)
+                for index, (event_date, split) in enumerate(
+                    ((DISCOVERY_DAY, DISCOVERY), (HOLDOUT_DAY, HOLDOUT)), start=1
+                )
+            ],
+            schema=EVENT_DAYS_SCHEMA,
+        ),
+        directory / "event_days.parquet",
+    )
+    write_split(
+        directory / "split.json",
+        Split(
+            cities=(SERIES,),
+            discovery_days=(DISCOVERY_DAY,),
+            holdout_days=(HOLDOUT_DAY,),
+            boundary_event_day=HOLDOUT_DAY,
+            scope_start=SCOPE_START,
+            scope_end=SCOPE_END,
+        ),
+    )
+    write_universe(
+        directory / "r0_universe.json",
+        freeze_universe(
+            fraction_invalid_max=Decimal("0.4"),
+            passing=(MIA,),
+            coverage=Coverage(cities=(MIA,), ladder_widths=(6,), in_scope_city_days=2),
+        ),
+    )
+    return directory
+
+
+def run_paths(tmp_path: Path) -> dict[str, Path]:
+    return {
+        "preregistration": write_preregistration(tmp_path / "preregistration.md"),
+        "repo": seeded_repo(tmp_path / "tree"),
+        "rtt_samples": write_rtt_samples(tmp_path / "samples.jsonl", ADEQUATE_SAMPLES),
+    }
+
+
+def test_a_run_paired_with_the_wrong_ladder_writes_no_manifest(tmp_path: Path) -> None:
+    run_root = tmp_path / "tape_studies"
+
+    with pytest.raises(ValueError, match="share nothing"):
+        execute(
+            run_id=RUN_ID,
+            run_scope=mispaired_scope_dir(tmp_path),
+            artifacts=artifacts_dir(tmp_path),
+            observations=crossing_observations(tmp_path),
+            floor_source=FloorSource.SIGNED_READ,
+            seed=SEED,
+            run_root=run_root,
+            **run_paths(tmp_path),
+        )
+
+    assert not (run_root / RUN_ID / MANIFEST_NAME).exists()
+    assert not run_root.exists()
+
+
+def test_a_full_run_writes_the_manifest_whose_digest_it_returns(tmp_path: Path) -> None:
+    paths = run_paths(tmp_path)
+    scope_root = scope_dir(tmp_path)
+    artifacts = artifacts_dir(tmp_path)
+    run_root = tmp_path / "tape_studies"
+
+    run = execute(
+        run_id=RUN_ID,
+        run_scope=scope_root,
+        artifacts=artifacts,
+        observations=crossing_observations(tmp_path),
+        floor_source=FloorSource.SIGNED_READ,
+        seed=SEED,
+        run_root=run_root,
+        **paths,
+    )
+
+    manifest = run_root / RUN_ID / MANIFEST_NAME
+    expected = freeze_digest(
+        manifest_payload(
+            build_manifest(
+                assemble_run_inputs(
+                    run_id=RUN_ID,
+                    run_scope=scope_root,
+                    artifacts=artifacts,
+                    floor_source=FloorSource.SIGNED_READ,
+                    economic_bar_size=SELF_CHARGED_BAR,
+                    economic_bar_price=SELF_CHARGED_BAR,
+                    economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
+                    bootstrap_seed=SEED,
+                    **paths,
+                )
+            )
+        )
+    )
+
+    assert run.manifest == manifest
+    assert run.manifest_sha256 == expected
+    assert json.loads(manifest.read_text())["sha256"] == expected

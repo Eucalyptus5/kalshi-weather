@@ -182,11 +182,12 @@ def execute(
         economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
         bootstrap_seed=seed,
     )
-    digest = write_manifest(run_root, inputs)
-
     scope = load_run_scope(run_scope)
     locks = scan_locks(scope, artifacts, read_observations(observations))
     swept = sweep_prints(scope, artifacts, lock_windows=locks.windows)
+    # Every refusal above this line leaves the run root untouched, so a mis-paired freeze writes no
+    # manifest for a run that never happened.
+    digest = write_manifest(run_root, inputs)
     run = NearLockRun(
         run_id=run_id,
         manifest=run_root / run_id / MANIFEST_NAME,
