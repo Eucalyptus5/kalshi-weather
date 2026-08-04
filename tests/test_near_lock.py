@@ -456,3 +456,41 @@ def test_a_scope_spanning_both_ladders_is_not_scanned_without_a_cohort(
     found = scan_locks(both, artifacts_dir(tmp_path), recorded, cohort=HIGH)
 
     assert found.cities == (SERIES,)
+
+
+def test_a_scope_disjoint_from_its_universe_is_refused_before_the_tape_is_read(
+    tmp_path: Path, scope: RunScope
+) -> None:
+    mispaired = replace(scope, universe=replace(scope.universe, lock_dependent=(LOW_SERIES,)))
+    recorded = read_observations(crossing_observations(tmp_path))
+    root = tmp_path / "foreign"
+    unreadable = write_partition(
+        root,
+        DISCOVERY_DAY,
+        1,
+        [],
+        kind="trades",
+        schema=pa.schema([("id", pa.int64()), ("ticker", pa.string())]),
+    )
+
+    with pytest.raises(ValueError) as refused:
+        scan_locks(mispaired, root, recorded)
+
+    assert SERIES in str(refused.value)
+    assert LOW_SERIES in str(refused.value)
+    assert unreadable.name not in str(refused.value)
+
+
+def test_a_scope_that_only_narrows_its_universe_still_scans(
+    tmp_path: Path, scope: RunScope
+) -> None:
+    narrowed = replace(
+        scope, universe=replace(scope.universe, lock_dependent=(SERIES, "KXHIGHTSEA"))
+    )
+
+    found = scan_locks(
+        narrowed, artifacts_dir(tmp_path), read_observations(crossing_observations(tmp_path))
+    )
+
+    assert found.cities == (SERIES,)
+    assert found.locked == 2

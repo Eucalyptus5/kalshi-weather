@@ -96,6 +96,13 @@ def scan_locks(
     scoped = set(in_cohort({series for series, _ in scope.event_days}, cohort))
     lock_dependent = set(scope.universe.lock_dependent)
     cities = sorted(scoped & lock_dependent)
+    # Zero locks would otherwise read as an underpowered run rather than a freeze paired with the
+    # wrong ladder.
+    if not cities:
+        raise ValueError(
+            f"the scope's series {sorted(scoped)} share nothing with the universe's "
+            f"lock-dependent series {sorted(lock_dependent)}"
+        )
     windows: dict[str, tuple[datetime, datetime]] = {}
     markets = 0
     ambiguous = 0
