@@ -293,7 +293,13 @@ def _percentile(widths: list[int], percent: int) -> int:
     return widths[-(-percent * len(widths) // 100) - 1]
 
 
-def write_blind_windows(path: Path, windows: Sequence[BlindWindow]) -> None:
+def write_blind_windows(
+    path: Path,
+    windows: Sequence[BlindWindow],
+    *,
+    frozen_start: datetime = FROZEN_START,
+    frozen_end: datetime = FROZEN_END,
+) -> None:
     if path.exists():
         raise FileExistsError(f"refusing to overwrite {path}")
     rows = [
@@ -312,7 +318,7 @@ def write_blind_windows(path: Path, windows: Sequence[BlindWindow]) -> None:
             "gap_id": window.gap_id,
             "gap_reason": window.gap_reason,
             "gap_detected_at": window.gap_detected_at,
-            "in_frozen_window": FROZEN_START <= window.start < FROZEN_END,
+            "in_frozen_window": frozen_start <= window.start < frozen_end,
         }
         for window in windows
     ]

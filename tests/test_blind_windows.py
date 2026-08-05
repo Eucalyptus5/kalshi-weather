@@ -774,3 +774,35 @@ def test_no_coverage_already_written_is_overwritten(tmp_path: Path) -> None:
         write_coverage(path, [coverage(1, 0, 0)])
 
     assert path.read_bytes() == b"PAR1"
+
+
+def test_an_injected_frozen_window_decides_the_column(tmp_path: Path) -> None:
+    path = tmp_path / "blind.parquet"
+    start = at(2 * SECOND)
+    end = at(5 * SECOND)
+    windows = [
+        window(1, 0, start - TICK, start),
+        window(2, 1, start, start + TICK),
+        window(3, 2, end - TICK, end),
+        window(4, 3, end, end + TICK),
+    ]
+
+    write_blind_windows(path, windows, frozen_start=start, frozen_end=end)
+
+    rows = pq.read_table(path).to_pylist()
+    assert [row["in_frozen_window"] for row in rows] == [False, True, True, False]
+
+
+def test_the_module_window_is_what_the_defaults_write(tmp_path: Path) -> None:
+    path = tmp_path / "blind.parquet"
+    windows = [
+        window(1, 0, FROZEN_START - TICK, FROZEN_START),
+        window(2, 1, FROZEN_START, FROZEN_START + TICK),
+        window(3, 2, FROZEN_END - TICK, FROZEN_END),
+        window(4, 3, FROZEN_END, FROZEN_END + TICK),
+    ]
+
+    write_blind_windows(path, windows)
+
+    rows = pq.read_table(path).to_pylist()
+    assert [row["in_frozen_window"] for row in rows] == [False, True, True, False]

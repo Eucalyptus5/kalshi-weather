@@ -10,7 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from bot.replay.artifacts import COVERAGE_SCHEMA
-from bot.replay.blind_windows import BLIND_WINDOWS_SCHEMA
+from bot.replay.blind_windows import BLIND_WINDOWS_SCHEMA, FROZEN_END, FROZEN_START
 from scripts.replay_blind_windows import build_parser, run
 from tests.test_blind_windows import NY, SECOND, TICKER, at, book, build_db, gap
 from tests.test_raw_tape import frame, write_tape
@@ -82,7 +82,17 @@ def test_help_smoke() -> None:
     )
 
     assert result.returncode == 0
-    flags = ("--db", "--out", "--max-id", "--summary", "--raw-dir", "--validate-day", "--coverage")
+    flags = (
+        "--db",
+        "--out",
+        "--max-id",
+        "--summary",
+        "--raw-dir",
+        "--validate-day",
+        "--coverage",
+        "--frozen-start",
+        "--frozen-end",
+    )
     for flag in flags:
         assert flag in result.stdout
 
@@ -95,6 +105,7 @@ def test_the_parser_defaults(tmp_path: Path) -> None:
     assert args.raw_dir is None
     assert args.validate_day == []
     assert args.coverage is None
+    assert (args.frozen_start, args.frozen_end) == (FROZEN_START, FROZEN_END)
 
 
 def test_validate_day_is_repeatable_and_parsed_as_a_date(tmp_path: Path) -> None:
@@ -318,3 +329,49 @@ def test_no_coverage_table_is_written_unless_it_is_asked_for(
     assert summary["coverage"] is None
     assert (summary["coverage_tickers"], summary["coverage_rows"]) == (2, 5)
     assert "coverage_tickers=2" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "frozen"),
+    [
+        ("2026-07-30T00:00:00", "2026-07-31T00:00:00", True),
+        ("2026-07-29T00:00:00", "2026-07-30T00:00:00", False),
+    ],
+)
+def test_an_injected_frozen_window_reaches_the_column_and_the_summary(
+    db_path: Path, tmp_path: Path, start: str, end: str, frozen: bool
+) -> None:
+    out = tmp_path / "blind.parquet"
+    summary_path = tmp_path / "summary.json"
+
+    rc = run(
+        args_for(
+            db_path,
+            out,
+            "--summary",
+            str(summary_path),
+            "--frozen-start",
+            start,
+            "--frozen-end",
+            end,
+        )
+    )
+
+    assert rc == 0
+    assert [row["in_frozen_window"] for row in pq.read_table(out).to_pylist()] == [frozen]
+    summary = json.loads(summary_path.read_text())
+    assert (summary["frozen_start"], summary["frozen_end"]) == (f"{start}+00:00", f"{end}+00:00")
+    assert summary["frozen_windows"] == int(frozen)
+
+
+def test_an_offset_on_the_frozen_bound_is_carried_to_utc(tmp_path: Path) -> None:
+    args = args_for(
+        tmp_path / "state.db",
+        tmp_path / "blind.parquet",
+        "--frozen-start",
+        "2026-07-18T02:00:00+02:00",
+        "--frozen-end",
+        "2026-08-02",
+    )
+
+    assert (args.frozen_start, args.frozen_end) == (FROZEN_START, FROZEN_END)

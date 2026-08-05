@@ -7,12 +7,14 @@ import sys
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from bot.replay.blind_windows import (  # noqa: E402
+    FROZEN_END,
+    FROZEN_START,
     BlindWindow,
     attach_gap_rows,
     build_summary,
@@ -22,6 +24,13 @@ from bot.replay.blind_windows import (  # noqa: E402
 )
 from bot.replay.inventory import read_gap_rows  # noqa: E402
 from bot.replay.raw_tape import check_tape_counts, count_frames_in_windows  # noqa: E402
+
+
+def utc_stamp(text: str) -> datetime:
+    stamp = datetime.fromisoformat(text)
+    if stamp.tzinfo is None:
+        return stamp.replace(tzinfo=timezone.utc)
+    return stamp.astimezone(timezone.utc)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -34,6 +43,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary", type=Path, default=None, help="write the summary as json")
     parser.add_argument(
         "--coverage", type=Path, default=None, help="write the per-ticker coverage as parquet"
+    )
+    parser.add_argument(
+        "--frozen-start",
+        type=utc_stamp,
+        default=FROZEN_START,
+        help="the first instant a window may start in to count as frozen",
+    )
+    parser.add_argument(
+        "--frozen-end",
+        type=utc_stamp,
+        default=FROZEN_END,
+        help="the instant the frozen span closes, exclusive",
     )
     parser.add_argument("--raw-dir", type=Path, default=None, help="directory of gzipped days")
     parser.add_argument(
@@ -55,7 +76,9 @@ def run(args: argparse.Namespace) -> int:
     windows, unmatched = attach_gap_rows(
         scan.windows, read_gap_rows(args.db), scanned_through=scan.last_received_at
     )
-    write_blind_windows(args.out, windows)
+    write_blind_windows(
+        args.out, windows, frozen_start=args.frozen_start, frozen_end=args.frozen_end
+    )
     if args.coverage is not None:
         write_coverage(args.coverage, scan.coverage)
     payload: dict[str, object] = {
@@ -68,7 +91,9 @@ def run(args: argparse.Namespace) -> int:
         "coverage_rows": sum(row.rows for row in scan.coverage),
         **{
             name: value.isoformat() if isinstance(value, datetime) else value
-            for name, value in asdict(build_summary(windows)).items()
+            for name, value in asdict(
+                build_summary(windows, frozen_start=args.frozen_start, frozen_end=args.frozen_end)
+            ).items()
         },
         "unmatched_gap_rows": len(unmatched),
     }
