@@ -9,9 +9,10 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
+from bot.replay.artifacts import COVERAGE_SCHEMA
 from bot.replay.blind_windows import BLIND_WINDOWS_SCHEMA
 from scripts.replay_blind_windows import build_parser, run
-from tests.test_blind_windows import SECOND, at, book, build_db, gap
+from tests.test_blind_windows import NY, SECOND, TICKER, at, book, build_db, gap
 from tests.test_raw_tape import frame, write_tape
 
 
@@ -25,6 +26,14 @@ BOOK_ROWS = [
     book(4, 3 * SECOND, 2),
 ]
 GAP_ROWS = [gap(1, 2 * SECOND + 500_000)]
+
+COVERAGE_ROWS = [
+    book(1, 0, 1),
+    book(2, SECOND, 2, ticker=NY),
+    book(3, 2 * SECOND, 3),
+    book(4, 3 * SECOND, 4, ticker=NY),
+    book(5, 4 * SECOND, 5, ticker=NY),
+]
 
 CEILING_ROWS = [
     book(1, 0, 1),
@@ -73,7 +82,8 @@ def test_help_smoke() -> None:
     )
 
     assert result.returncode == 0
-    for flag in ("--db", "--out", "--max-id", "--summary", "--raw-dir", "--validate-day"):
+    flags = ("--db", "--out", "--max-id", "--summary", "--raw-dir", "--validate-day", "--coverage")
+    for flag in flags:
         assert flag in result.stdout
 
 
@@ -84,6 +94,7 @@ def test_the_parser_defaults(tmp_path: Path) -> None:
     assert args.summary is None
     assert args.raw_dir is None
     assert args.validate_day == []
+    assert args.coverage is None
 
 
 def test_validate_day_is_repeatable_and_parsed_as_a_date(tmp_path: Path) -> None:
@@ -261,3 +272,49 @@ def test_validation_without_a_raw_directory_is_refused(db_path: Path, tmp_path: 
         run(args_for(db_path, out, "--validate-day", DAY))
 
     assert not out.exists()
+
+
+def test_the_coverage_table_is_written_where_it_is_asked_for(tmp_path: Path) -> None:
+    db = build_db(tmp_path / "state.db", COVERAGE_ROWS)
+    out = tmp_path / "blind.parquet"
+    coverage = tmp_path / "coverage.parquet"
+    summary_path = tmp_path / "summary.json"
+
+    assert run(args_for(db, out, "--coverage", str(coverage), "--summary", str(summary_path))) == 0
+
+    table = pq.read_table(coverage)
+    assert table.schema.equals(COVERAGE_SCHEMA)
+    assert table.to_pylist() == [
+        {
+            "ticker": TICKER,
+            "rows": 2,
+            "first_received_at": at(0),
+            "last_received_at": at(2 * SECOND),
+        },
+        {
+            "ticker": NY,
+            "rows": 3,
+            "first_received_at": at(SECOND),
+            "last_received_at": at(4 * SECOND),
+        },
+    ]
+    summary = json.loads(summary_path.read_text())
+    assert summary["coverage"] == str(coverage)
+    assert summary["coverage_tickers"] == table.num_rows
+    assert summary["coverage_rows"] == sum(row["rows"] for row in table.to_pylist())
+    assert summary["coverage_rows"] == summary["rows_scanned"]
+
+
+def test_no_coverage_table_is_written_unless_it_is_asked_for(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db = build_db(tmp_path / "state.db", COVERAGE_ROWS)
+    summary_path = tmp_path / "summary.json"
+
+    assert run(args_for(db, tmp_path / "blind.parquet", "--summary", str(summary_path))) == 0
+
+    assert list(tmp_path.glob("coverage*.parquet")) == []
+    summary = json.loads(summary_path.read_text())
+    assert summary["coverage"] is None
+    assert (summary["coverage_tickers"], summary["coverage_rows"]) == (2, 5)
+    assert "coverage_tickers=2" in capsys.readouterr().out

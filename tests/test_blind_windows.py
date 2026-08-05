@@ -8,6 +8,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
+from bot.replay.artifacts import COVERAGE_SCHEMA
 from bot.replay.blind_windows import (
     BLIND_WINDOWS_SCHEMA,
     FROZEN_END,
@@ -19,9 +20,10 @@ from bot.replay.blind_windows import (
     build_summary,
     scan_blind_windows,
     write_blind_windows,
+    write_coverage,
 )
 from bot.replay.forward_pass import SourceRow
-from bot.replay.inventory import GapRow, SeqBoundaryDetector
+from bot.replay.inventory import GapRow, SeqBoundaryDetector, TickerCoverage
 
 
 UTC = timezone.utc
@@ -29,11 +31,14 @@ T0 = datetime(2026, 7, 30, 3, 1, 0, tzinfo=UTC)
 DB_TS = "%Y-%m-%d %H:%M:%S.%f"
 SECOND = 1_000_000
 TICK = timedelta(microseconds=1)
+TICKER = "KXHIGHDEN-26JUL30-B85"
+NY = "KXHIGHNY-26JUL30-B70"
+CHI = "KXHIGHCHI-26JUL30-B90"
 
 BOOK_SCHEMA = """
 CREATE TABLE ws_book_events (
-    id INTEGER NOT NULL, received_at DATETIME NOT NULL, seq INTEGER NOT NULL,
-    is_snapshot BOOLEAN NOT NULL, PRIMARY KEY (id))
+    id INTEGER NOT NULL, ticker VARCHAR(64) NOT NULL, received_at DATETIME NOT NULL,
+    seq INTEGER NOT NULL, is_snapshot BOOLEAN NOT NULL, PRIMARY KEY (id))
 """
 GAP_SCHEMA = """
 CREATE TABLE ws_gaps (
@@ -46,8 +51,10 @@ def at(offset_us: int = 0) -> datetime:
     return T0 + timedelta(microseconds=offset_us)
 
 
-def book(row_id: int, offset_us: int, seq: int, is_snapshot: bool = False) -> tuple[object, ...]:
-    return (row_id, at(offset_us).strftime(DB_TS), seq, is_snapshot)
+def book(
+    row_id: int, offset_us: int, seq: int, is_snapshot: bool = False, ticker: str = TICKER
+) -> tuple[object, ...]:
+    return (row_id, ticker, at(offset_us).strftime(DB_TS), seq, is_snapshot)
 
 
 def gap(row_id: int, offset_us: int, reason: str = "connection_reset") -> tuple[object, ...]:
@@ -60,7 +67,7 @@ def build_db(
     conn = sqlite3.connect(path)
     conn.execute(BOOK_SCHEMA)
     conn.execute(GAP_SCHEMA)
-    conn.executemany("INSERT INTO ws_book_events VALUES (?, ?, ?, ?)", list(rows))
+    conn.executemany("INSERT INTO ws_book_events VALUES (?, ?, ?, ?, ?)", list(rows))
     conn.executemany("INSERT INTO ws_gaps VALUES (?, ?, ?, ?, ?)", list(gaps))
     conn.commit()
     conn.close()
@@ -93,6 +100,12 @@ def window(
     )
 
 
+def coverage(rows: int, first_us: int, last_us: int, ticker: str = TICKER) -> TickerCoverage:
+    return TickerCoverage(
+        ticker=ticker, rows=rows, first_received_at=at(first_us), last_received_at=at(last_us)
+    )
+
+
 def gap_row(row_id: int, detected_at: datetime, reason: str = "connection_reset") -> GapRow:
     return GapRow(id=row_id, ticker="", detected_at=detected_at, last_seq=0, reason=reason)
 
@@ -100,7 +113,7 @@ def gap_row(row_id: int, detected_at: datetime, reason: str = "connection_reset"
 def source_row(row_id: int, offset_us: int, seq: int) -> SourceRow:
     return SourceRow(
         id=row_id,
-        ticker="KXHIGHDEN-26JUL30-B85",
+        ticker=TICKER,
         received_at=at(offset_us),
         seq=seq,
         side="yes",
@@ -136,13 +149,24 @@ BURST_ROWS = [
     book(8, 21 * SECOND, 2, True),
 ]
 
+INTERLEAVED_ROWS = [
+    book(1, 0, 1),
+    book(2, SECOND, 2, ticker=NY),
+    book(3, 2 * SECOND, 3),
+    book(4, 3 * SECOND, 4, ticker=CHI),
+    book(5, 4 * SECOND, 5, ticker=NY),
+    book(6, 5 * SECOND, 6),
+]
+
 
 def test_a_monotone_stream_holds_no_boundary(tmp_path: Path) -> None:
     db_path = build_db(
         tmp_path / "state.db", [book(1, 0, 1), book(2, SECOND, 2), book(3, 2 * SECOND, 3)]
     )
 
-    assert scan_blind_windows(db_path) == BlindScan((), 3, at(2 * SECOND))
+    assert scan_blind_windows(db_path) == BlindScan(
+        (), 3, at(2 * SECOND), (coverage(3, 0, 2 * SECOND),)
+    )
 
 
 def test_a_backwards_seq_is_one_window_bounded_by_the_messages_either_side(
@@ -313,7 +337,9 @@ def test_a_forward_seq_skip_is_not_a_boundary(tmp_path: Path) -> None:
     rows = [book(1, 0, 1), book(2, SECOND, 2), book(3, 2 * SECOND, 9), book(4, 3 * SECOND, 10)]
     db_path = build_db(tmp_path / "state.db", rows)
 
-    assert scan_blind_windows(db_path) == BlindScan((), 4, at(3 * SECOND))
+    assert scan_blind_windows(db_path) == BlindScan(
+        (), 4, at(3 * SECOND), (coverage(4, 0, 3 * SECOND),)
+    )
 
 
 def test_the_detector_needs_no_database() -> None:
@@ -378,7 +404,7 @@ def test_the_scan_reports_the_received_at_of_the_last_row_it_read(tmp_path: Path
 def test_a_scan_that_reads_nothing_has_no_last_row(tmp_path: Path) -> None:
     db_path = build_db(tmp_path / "state.db", [])
 
-    assert scan_blind_windows(db_path) == BlindScan((), 0, None)
+    assert scan_blind_windows(db_path) == BlindScan((), 0, None, ())
 
 
 def test_each_read_is_its_own_statement_and_the_source_is_read_only(
@@ -402,7 +428,7 @@ def test_each_read_is_its_own_statement_and_the_source_is_read_only(
     selects = [line for line in statements if "ws_book_events" in line]
     assert len(selects) == -(-len(MIXED_ROWS) // 2) + 1
     assert all("id > " in line for line in selects)
-    assert all("SELECT id, received_at, seq, is_snapshot FROM" in line for line in selects)
+    assert all("SELECT id, ticker, received_at, seq, is_snapshot FROM" in line for line in selects)
     assert "PRAGMA query_only=ON" in statements
     assert hashlib.sha256(db_path.read_bytes()).hexdigest() == before
     assert not (tmp_path / "state.db-wal").exists()
@@ -661,5 +687,90 @@ def test_nothing_already_written_is_overwritten(tmp_path: Path) -> None:
 
     with pytest.raises(FileExistsError, match=str(path)):
         write_blind_windows(path, [window(3, 2, at(SECOND), at(4 * SECOND))])
+
+    assert path.read_bytes() == b"PAR1"
+
+
+def test_coverage_follows_each_ticker_across_the_rows_that_interleave_it(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", INTERLEAVED_ROWS)
+
+    scan = scan_blind_windows(db_path)
+
+    assert scan.coverage == (
+        coverage(1, 3 * SECOND, 3 * SECOND, ticker=CHI),
+        coverage(3, 0, 5 * SECOND),
+        coverage(2, SECOND, 4 * SECOND, ticker=NY),
+    )
+    assert [row.ticker for row in scan.coverage] == sorted(row.ticker for row in scan.coverage)
+
+
+def test_batching_does_not_change_the_coverage_the_scan_accumulates(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", INTERLEAVED_ROWS)
+
+    assert scan_blind_windows(db_path, batch_rows=1) == scan_blind_windows(
+        db_path, batch_rows=10_000
+    )
+
+
+def test_the_rows_of_a_repeated_message_are_each_counted(tmp_path: Path) -> None:
+    rows = [book(1, 0, 1), book(2, SECOND, 2), book(3, SECOND, 2), book(4, SECOND, 2)]
+    db_path = build_db(tmp_path / "state.db", rows)
+
+    scan = scan_blind_windows(db_path)
+
+    assert scan.coverage == (coverage(4, 0, SECOND),)
+    assert scan.windows == ()
+
+
+def test_the_coverage_counts_add_up_to_the_rows_the_scan_read(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", MIXED_ROWS)
+
+    scan = scan_blind_windows(db_path)
+
+    assert sum(row.rows for row in scan.coverage) == scan.rows == len(MIXED_ROWS)
+
+
+def test_a_ceiling_bounds_the_coverage_too(tmp_path: Path) -> None:
+    db_path = build_db(tmp_path / "state.db", INTERLEAVED_ROWS)
+
+    scan = scan_blind_windows(db_path, max_id=4)
+
+    assert scan.coverage == (
+        coverage(1, 3 * SECOND, 3 * SECOND, ticker=CHI),
+        coverage(2, 0, 2 * SECOND),
+        coverage(1, SECOND, SECOND, ticker=NY),
+    )
+
+
+def test_the_coverage_parquet_round_trips_every_column(tmp_path: Path) -> None:
+    path = tmp_path / "coverage.parquet"
+    rows = [coverage(3, 0, 5 * SECOND), coverage(2, SECOND, 4 * SECOND, ticker=NY)]
+
+    write_coverage(path, rows)
+    table = pq.read_table(path)
+
+    assert table.schema.equals(COVERAGE_SCHEMA)
+    assert table.to_pylist() == [
+        {
+            "ticker": TICKER,
+            "rows": 3,
+            "first_received_at": at(0),
+            "last_received_at": at(5 * SECOND),
+        },
+        {
+            "ticker": NY,
+            "rows": 2,
+            "first_received_at": at(SECOND),
+            "last_received_at": at(4 * SECOND),
+        },
+    ]
+
+
+def test_no_coverage_already_written_is_overwritten(tmp_path: Path) -> None:
+    path = tmp_path / "coverage.parquet"
+    path.write_bytes(b"PAR1")
+
+    with pytest.raises(FileExistsError, match=str(path)):
+        write_coverage(path, [coverage(1, 0, 0)])
 
     assert path.read_bytes() == b"PAR1"

@@ -10,8 +10,9 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from bot.replay.artifacts import COVERAGE_SCHEMA
 from bot.replay.forward_pass import _decode_ts
-from bot.replay.inventory import GapRow
+from bot.replay.inventory import GapRow, TickerCoverage
 
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,7 @@ FROZEN_START = datetime(2026, 7, 18, tzinfo=timezone.utc)
 FROZEN_END = datetime(2026, 8, 2, tzinfo=timezone.utc)
 
 _MICROSECOND = timedelta(microseconds=1)
-_COLUMNS = "id, received_at, seq, is_snapshot"
+_COLUMNS = "id, ticker, received_at, seq, is_snapshot"
 _SELECT = f"SELECT {_COLUMNS} FROM ws_book_events WHERE id > ? ORDER BY id LIMIT ?"
 _SELECT_BOUNDED = (
     f"SELECT {_COLUMNS} FROM ws_book_events WHERE id > ? AND id <= ? ORDER BY id LIMIT ?"
@@ -132,6 +133,7 @@ class BlindScan:
     windows: tuple[BlindWindow, ...]
     rows: int
     last_received_at: datetime | None
+    coverage: tuple[TickerCoverage, ...]
 
 
 def scan_blind_windows(
@@ -149,6 +151,9 @@ def scan_blind_windows(
     since_log = 0
     last_id = 0
     last_received_at: datetime | None = None
+    counts: dict[str, int] = {}
+    first_seen: dict[str, str] = {}
+    last_seen: dict[str, str] = {}
     conn = sqlite3.connect(f"file:{db_path.resolve()}?mode=ro", uri=True)
     conn.execute("PRAGMA query_only=ON")
     try:
@@ -158,10 +163,15 @@ def scan_blind_windows(
             batch = conn.execute(select, (last_id, *bound, batch_rows)).fetchall()
             if not batch:
                 break
-            for row_id, received_at, seq, is_snapshot in batch:
+            for row_id, ticker, received_at, seq, is_snapshot in batch:
+                seen = counts.get(ticker, 0)
+                counts[ticker] = seen + 1
+                if seen == 0:
+                    first_seen[ticker] = received_at
+                last_seen[ticker] = received_at
                 detector.observe(row_id, received_at, seq, bool(is_snapshot))
             last_id = batch[-1][0]
-            last_received_at = _decode_ts(batch[-1][1])
+            last_received_at = _decode_ts(batch[-1][2])
             rows += len(batch)
             since_log += len(batch)
             if since_log >= progress_rows:
@@ -170,7 +180,16 @@ def scan_blind_windows(
     finally:
         conn.close()
     _log_progress(rows, last_id, len(detector.windows()), started)
-    return BlindScan(tuple(detector.windows()), rows, last_received_at)
+    coverage = tuple(
+        TickerCoverage(
+            ticker=ticker,
+            rows=counts[ticker],
+            first_received_at=_decode_ts(first_seen[ticker]),
+            last_received_at=_decode_ts(last_seen[ticker]),
+        )
+        for ticker in sorted(counts)
+    )
+    return BlindScan(tuple(detector.windows()), rows, last_received_at, coverage)
 
 
 def _log_progress(rows: int, last_id: int, windows: int, started: float) -> None:
@@ -298,3 +317,18 @@ def write_blind_windows(path: Path, windows: Sequence[BlindWindow]) -> None:
         for window in windows
     ]
     pq.write_table(pa.Table.from_pylist(rows, schema=BLIND_WINDOWS_SCHEMA), path)
+
+
+def write_coverage(path: Path, coverage: Sequence[TickerCoverage]) -> None:
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite {path}")
+    rows = [
+        {
+            "ticker": row.ticker,
+            "rows": row.rows,
+            "first_received_at": row.first_received_at,
+            "last_received_at": row.last_received_at,
+        }
+        for row in coverage
+    ]
+    pq.write_table(pa.Table.from_pylist(rows, schema=COVERAGE_SCHEMA), path)

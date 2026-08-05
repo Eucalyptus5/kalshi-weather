@@ -18,6 +18,7 @@ from bot.replay.blind_windows import (  # noqa: E402
     build_summary,
     scan_blind_windows,
     write_blind_windows,
+    write_coverage,
 )
 from bot.replay.inventory import read_gap_rows  # noqa: E402
 from bot.replay.raw_tape import check_tape_counts, count_frames_in_windows  # noqa: E402
@@ -31,6 +32,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=Path, required=True, help="parquet table to write")
     parser.add_argument("--max-id", type=int, default=None, help="bound the last id scanned")
     parser.add_argument("--summary", type=Path, default=None, help="write the summary as json")
+    parser.add_argument(
+        "--coverage", type=Path, default=None, help="write the per-ticker coverage as parquet"
+    )
     parser.add_argument("--raw-dir", type=Path, default=None, help="directory of gzipped days")
     parser.add_argument(
         "--validate-day",
@@ -52,11 +56,16 @@ def run(args: argparse.Namespace) -> int:
         scan.windows, read_gap_rows(args.db), scanned_through=scan.last_received_at
     )
     write_blind_windows(args.out, windows)
+    if args.coverage is not None:
+        write_coverage(args.coverage, scan.coverage)
     payload: dict[str, object] = {
         "db": str(args.db),
         "out": str(args.out),
+        "coverage": None if args.coverage is None else str(args.coverage),
         "max_id": args.max_id,
         "rows_scanned": scan.rows,
+        "coverage_tickers": len(scan.coverage),
+        "coverage_rows": sum(row.rows for row in scan.coverage),
         **{
             name: value.isoformat() if isinstance(value, datetime) else value
             for name, value in asdict(build_summary(windows)).items()
