@@ -66,6 +66,28 @@ R0_PASSING_SERIES: tuple[str, ...] = (
     "KXHIGHLAX",
     "KXHIGHMIA",
 )
+R0_LOW_PASSING_SERIES: tuple[str, ...] = (
+    "KXLOWTATL",
+    "KXLOWTAUS",
+    "KXLOWTBOS",
+    "KXLOWTCHI",
+    "KXLOWTDAL",
+    "KXLOWTDC",
+    "KXLOWTDEN",
+    "KXLOWTHOU",
+    "KXLOWTLAX",
+    "KXLOWTLV",
+    "KXLOWTMIA",
+    "KXLOWTMIN",
+    "KXLOWTNOLA",
+    "KXLOWTNYC",
+    "KXLOWTOKC",
+    "KXLOWTPHIL",
+    "KXLOWTPHX",
+    "KXLOWTSATX",
+    "KXLOWTSEA",
+    "KXLOWTSFO",
+)
 BOOK_SOURCES: tuple[str, ...] = ("rest", "ws")
 DEFAULT_LATENCY_CURVE_S: tuple[int, ...] = (30, 60, 90, 120)
 GATE_STACK_S = 90

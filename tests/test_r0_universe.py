@@ -22,10 +22,14 @@ from bot.lag.r0_universe import (
     write_universe,
 )
 from bot.lag.tape_studies import load_run_scope
-from bot.replay.analysis_stations import HIGH, LOW, ladder_of
+from bot.replay.analysis_stations import HIGH, LOW, LOW_TO_HIGH, ladder_of
 from bot.replay.run_scope import EVENT_DAYS_SCHEMA
 from scripts.freeze_r0_universe import R0_LOW_SERIES, R0_UNION_SERIES, build_parser, run
-from scripts.lag_report import R0_FRACTION_INVALID_MAX, R0_PASSING_SERIES
+from scripts.lag_report import (
+    R0_FRACTION_INVALID_MAX,
+    R0_LOW_PASSING_SERIES,
+    R0_PASSING_SERIES,
+)
 
 
 UTC = timezone.utc
@@ -332,6 +336,18 @@ def test_the_script_freezes_the_passing_set_the_operator_selected(
     assert code == 0
     assert payload["passing"] == sorted(expected)
     assert payload["reconciliation"] == AGREE
+
+
+def test_the_low_passing_set_is_exactly_the_recorded_low_roots() -> None:
+    assert len(R0_LOW_PASSING_SERIES) == 20
+    assert R0_LOW_PASSING_SERIES == tuple(sorted(R0_LOW_PASSING_SERIES))
+    assert set(R0_LOW_PASSING_SERIES) == set(LOW_TO_HIGH)
+    assert R0_LOW_SERIES == R0_LOW_PASSING_SERIES
+
+
+def test_the_two_passing_ladders_pair_up_and_never_overlap() -> None:
+    assert {LOW_TO_HIGH[series] for series in R0_LOW_PASSING_SERIES} == set(R0_PASSING_SERIES)
+    assert not set(R0_PASSING_SERIES) & set(R0_LOW_PASSING_SERIES)
 
 
 def test_the_default_passing_set_is_still_the_high_twenty() -> None:

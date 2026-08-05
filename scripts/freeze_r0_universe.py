@@ -14,15 +14,17 @@ from bot.lag.r0_universe import (  # noqa: E402
     read_recorded_coverage,
     write_universe,
 )
-from bot.replay.analysis_stations import LOW_TO_HIGH  # noqa: E402
-from scripts.lag_report import R0_FRACTION_INVALID_MAX, R0_PASSING_SERIES  # noqa: E402
+from scripts.lag_report import (  # noqa: E402
+    R0_FRACTION_INVALID_MAX,
+    R0_LOW_PASSING_SERIES,
+    R0_PASSING_SERIES,
+)
 
 
-R0_LOW_SERIES: tuple[str, ...] = tuple(sorted(LOW_TO_HIGH))
+R0_LOW_SERIES: tuple[str, ...] = R0_LOW_PASSING_SERIES
 R0_UNION_SERIES: tuple[str, ...] = tuple(sorted(R0_PASSING_SERIES + R0_LOW_SERIES))
 
-# Only the high twenty have been through an R0 basis check, so the low and union sets are claims
-# about what was recorded, not about basis quality, and neither is the default.
+# High stays the default because the run scope frozen on disk was cut against the high twenty.
 PASSING_SETS: dict[str, tuple[str, ...]] = {
     "high": R0_PASSING_SERIES,
     "low": R0_LOW_SERIES,
