@@ -16,6 +16,7 @@ from bot.lag.r0_universe import R0Universe
 from bot.lag.r0_universe import freeze_digest as universe_digest
 from bot.lag.read_rtt import FloorSource, load_samples
 from bot.lag.run_manifest import RunInputs, resolve_latency_floor
+from bot.replay.analysis_stations import in_cohort
 from bot.replay.artifacts import (
     BOUNDARIES_SCHEMA,
     COVERAGE_SCHEMA,
@@ -334,11 +335,16 @@ def assemble_run_inputs(
     economic_bar_price: Decimal,
     economic_bar_price_source: str,
     bootstrap_seed: int,
+    cohort: str | None = None,
 ) -> RunInputs:
     scope = load_run_scope(run_scope)
+    swept = set(in_cohort({series for series, _ in scope.event_days}, cohort))
     arrivals: dict[str, set[date]] = {}
     for (series, _), day in scope.event_days.items():
-        arrivals.setdefault(series, set()).update(window_dates(day.window_start, day.window_end))
+        if series in swept:
+            arrivals.setdefault(series, set()).update(
+                window_dates(day.window_start, day.window_end)
+            )
 
     row_counts = {
         kind: sum(
@@ -363,6 +369,7 @@ def assemble_run_inputs(
         economic_bar_price=economic_bar_price,
         economic_bar_price_source=economic_bar_price_source,
         bootstrap_seed=bootstrap_seed,
+        cohort=cohort,
     )
 
 

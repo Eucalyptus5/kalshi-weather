@@ -15,6 +15,7 @@ from bot.lag.near_lock import execute, result_payload  # noqa: E402
 from bot.lag.read_rtt import FloorSource  # noqa: E402
 from bot.lag.run_manifest import ManifestIncomplete  # noqa: E402
 from bot.lag.taker_flow_run import RESULTS_NAME  # noqa: E402
+from bot.replay.analysis_stations import HIGH, LOW  # noqa: E402
 
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--seed", type=int, required=True, help="the bootstrap seed every resample runs under"
+    )
+    parser.add_argument(
+        "--cohort",
+        choices=(HIGH, LOW),
+        default=None,
+        help="which ladder of the frozen scope the run reads",
     )
     parser.add_argument("--run-root", type=Path, default=DEFAULT_RUN_ROOT)
     parser.add_argument("--repo", type=Path, default=REPO_ROOT)
@@ -113,6 +120,7 @@ def run(args: argparse.Namespace) -> int:
             floor_source=FloorSource(args.floor_source),
             seed=args.seed,
             run_root=args.run_root,
+            cohort=args.cohort,
         )
     except ManifestIncomplete as exc:
         print(exc, file=sys.stderr)

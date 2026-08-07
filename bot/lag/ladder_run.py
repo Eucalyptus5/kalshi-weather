@@ -440,6 +440,7 @@ def execute(
     economic_bar_price_source: str,
     seed: int,
     run_root: Path,
+    cohort: str | None = None,
 ) -> LadderRun:
     inputs = assemble_run_inputs(
         run_id=run_id,
@@ -453,16 +454,19 @@ def execute(
         economic_bar_price=economic_bar_price,
         economic_bar_price_source=economic_bar_price_source,
         bootstrap_seed=seed,
+        cohort=cohort,
     )
     digest = write_manifest(run_root, inputs)
 
     scope = load_run_scope(run_scope)
     t_persist_s = Decimal(str(inputs.floor.t_persist_s))
-    swept = sweep_ladders(scope, artifacts, t_persist_s=t_persist_s)
+    swept = sweep_ladders(scope, artifacts, t_persist_s=t_persist_s, cohort=cohort)
 
+    cities = set(in_cohort({series for series, _ in scope.event_days}, cohort))
     population = dict.fromkeys(SPLITS, 0)
     for series, event_date in scope.event_days:
-        population[split_of(scope, series, event_date)] += 1
+        if series in cities:
+            population[split_of(scope, series, event_date)] += 1
 
     discovery = readout(
         swept.values[DISCOVERY], split=DISCOVERY, population=population[DISCOVERY], seed=seed
@@ -477,7 +481,7 @@ def execute(
         seed=seed,
         floor=inputs.floor,
         t_persist_s=t_persist_s,
-        universe=scope.universe.recorded,
+        universe=in_cohort(scope.universe.recorded, cohort),
         sweep=swept,
         discovery=discovery,
         holdout=holdout,

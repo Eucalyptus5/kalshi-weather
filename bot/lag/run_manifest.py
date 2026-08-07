@@ -82,6 +82,7 @@ class RunInputs:
     economic_bar_price: Decimal | None
     economic_bar_price_source: str | None
     bootstrap_seed: int | None
+    cohort: str | None = None
     exemptions: tuple[Exemption, ...] = ()
 
 
@@ -109,6 +110,7 @@ class Manifest:
     economic_bar_price_source: str
     economic_bar_cents_per_contract: Decimal
     bootstrap_seed: int
+    cohort: str | None
     exemptions: tuple[Exemption, ...]
 
 
@@ -189,6 +191,7 @@ def build_manifest(inputs: RunInputs) -> Manifest:
             inputs.economic_bar_size, inputs.economic_bar_price
         ),
         bootstrap_seed=inputs.bootstrap_seed,
+        cohort=inputs.cohort,
         exemptions=tuple(sorted(inputs.exemptions, key=lambda exemption: exemption.field)),
     )
 
@@ -240,6 +243,10 @@ def manifest_payload(manifest: Manifest) -> dict:
         "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
         "bootstrap_seed": manifest.bootstrap_seed,
     }
+    # A single-ladder run names no cohort, and a null key would move every digest frozen before
+    # both ladders were in scope.
+    if manifest.cohort is not None:
+        payload["cohort"] = manifest.cohort
     # An empty list is still a key, and would move every digest frozen before the channel existed.
     if manifest.exemptions:
         payload["exemptions"] = [

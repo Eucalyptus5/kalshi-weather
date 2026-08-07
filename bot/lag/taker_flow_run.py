@@ -435,6 +435,7 @@ def execute(
     economic_bar_price_source: str,
     seed: int,
     run_root: Path,
+    cohort: str | None = None,
 ) -> TakerFlowRun:
     inputs = assemble_run_inputs(
         run_id=run_id,
@@ -448,11 +449,12 @@ def execute(
         economic_bar_price=economic_bar_price,
         economic_bar_price_source=economic_bar_price_source,
         bootstrap_seed=seed,
+        cohort=cohort,
     )
     digest = write_manifest(run_root, inputs)
 
     scope = load_run_scope(run_scope)
-    swept = sweep_prints(scope, artifacts)
+    swept = sweep_prints(scope, artifacts, cohort=cohort)
     discovery = tuple(
         readout(
             swept.tallies[(DISCOVERY, horizon_s)],

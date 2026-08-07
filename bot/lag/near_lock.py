@@ -168,6 +168,7 @@ def execute(
     floor_source: FloorSource,
     seed: int,
     run_root: Path,
+    cohort: str | None = None,
 ) -> NearLockRun:
     inputs = assemble_run_inputs(
         run_id=run_id,
@@ -181,10 +182,11 @@ def execute(
         economic_bar_price=SELF_CHARGED_BAR,
         economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
         bootstrap_seed=seed,
+        cohort=cohort,
     )
     scope = load_run_scope(run_scope)
-    locks = scan_locks(scope, artifacts, read_observations(observations))
-    swept = sweep_prints(scope, artifacts, lock_windows=locks.windows)
+    locks = scan_locks(scope, artifacts, read_observations(observations), cohort=cohort)
+    swept = sweep_prints(scope, artifacts, lock_windows=locks.windows, cohort=cohort)
     # Every refusal above this line leaves the run root untouched, so a mis-paired freeze writes no
     # manifest for a run that never happened.
     digest = write_manifest(run_root, inputs)

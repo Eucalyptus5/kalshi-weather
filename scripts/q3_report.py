@@ -19,6 +19,7 @@ from bot.lag.taker_flow_run import (  # noqa: E402
     execute,
     result_payload,
 )
+from bot.replay.analysis_stations import HIGH, LOW  # noqa: E402
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -50,6 +51,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--seed", type=int, required=True, help="the bootstrap seed every resample runs under"
     )
+    parser.add_argument(
+        "--cohort",
+        choices=(HIGH, LOW),
+        default=None,
+        help="which ladder of the frozen scope the run reads",
+    )
     parser.add_argument("--run-root", type=Path, default=DEFAULT_RUN_ROOT)
     parser.add_argument("--repo", type=Path, default=REPO_ROOT)
     return parser
@@ -71,6 +78,7 @@ def run(args: argparse.Namespace) -> int:
             economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
             seed=args.seed,
             run_root=args.run_root,
+            cohort=args.cohort,
         )
     except ManifestIncomplete as exc:
         print(exc, file=sys.stderr)

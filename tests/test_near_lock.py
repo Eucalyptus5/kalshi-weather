@@ -48,6 +48,7 @@ from tests.test_taker_flow_run import (
     TOUCH_DISCOVERY_DAY,
     TRADES_DISCOVERY_DAY,
     artifacts_dir,
+    both_ladder_scope_dir,
     clusters_of,
     exclusion_table,
     readout_of,
@@ -617,3 +618,44 @@ def test_a_full_run_writes_the_manifest_whose_digest_it_returns(tmp_path: Path) 
     assert run.manifest == manifest
     assert run.manifest_sha256 == expected
     assert json.loads(manifest.read_text())["sha256"] == expected
+
+
+def test_a_two_ladder_run_naming_no_cohort_writes_no_manifest(tmp_path: Path) -> None:
+    run_root = tmp_path / "tape_studies"
+
+    with pytest.raises(ValueError, match="names no cohort"):
+        execute(
+            run_id=RUN_ID,
+            run_scope=both_ladder_scope_dir(tmp_path),
+            artifacts=artifacts_dir(tmp_path),
+            observations=crossing_observations(tmp_path),
+            floor_source=FloorSource.SIGNED_READ,
+            seed=SEED,
+            run_root=run_root,
+            **run_paths(tmp_path),
+        )
+
+    assert not (run_root / RUN_ID / MANIFEST_NAME).exists()
+    assert not run_root.exists()
+
+
+def test_a_two_ladder_run_scans_only_the_cohort_it_names(tmp_path: Path) -> None:
+    scope_root = both_ladder_scope_dir(tmp_path)
+
+    run = execute(
+        run_id=RUN_ID,
+        run_scope=scope_root,
+        artifacts=artifacts_dir(tmp_path),
+        observations=crossing_observations(tmp_path),
+        floor_source=FloorSource.SIGNED_READ,
+        seed=SEED,
+        run_root=tmp_path / "tape_studies",
+        cohort=HIGH,
+        **run_paths(tmp_path),
+    )
+
+    payload = result_payload(run)
+    assert len(load_run_scope(scope_root).event_days) == 4
+    assert run.locks.cities == (SERIES,)
+    assert payload["cities"] == [SERIES]
+    assert LOW_SERIES not in json.dumps(payload)

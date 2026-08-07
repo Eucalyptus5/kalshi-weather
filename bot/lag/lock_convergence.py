@@ -420,8 +420,9 @@ def sweep_convergence(
     observations: Mapping[tuple[str, date], list[StationObservation]],
     arrivals: Mapping[str, list[StationObservation]],
     settles: Mapping[tuple[str, date], Decimal],
+    cohort: str | None = None,
 ) -> Sweep:
-    scan = scan_locks(scope, artifacts, observations)
+    scan = scan_locks(scope, artifacts, observations, cohort=cohort)
     grouped: dict[tuple[str, date], list[LockEvent]] = {}
     for event, day in scan.clean:
         grouped.setdefault((day.series, day.event_date), []).append(event)
@@ -623,6 +624,7 @@ def execute(
     economic_bar_price_source: str,
     seed: int,
     run_root: Path,
+    cohort: str | None = None,
 ) -> LockConvergenceRun:
     inputs = assemble_run_inputs(
         run_id=run_id,
@@ -636,12 +638,18 @@ def execute(
         economic_bar_price=economic_bar_price,
         economic_bar_price_source=economic_bar_price_source,
         bootstrap_seed=seed,
+        cohort=cohort,
     )
     digest = write_manifest(run_root, inputs)
 
     scope = load_run_scope(run_scope)
     swept = sweep_convergence(
-        scope, artifacts, observations=observations, arrivals=arrivals, settles=settles
+        scope,
+        artifacts,
+        observations=observations,
+        arrivals=arrivals,
+        settles=settles,
+        cohort=cohort,
     )
     powered = len(swept.values[DISCOVERY]) >= STATION_DAY_MIN
     discovery = readout(swept.values[DISCOVERY], split=DISCOVERY, seed=seed, powered=powered)

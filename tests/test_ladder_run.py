@@ -1,3 +1,4 @@
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -26,6 +27,7 @@ from bot.lag.ladder_run import (
     NO_ESTIMATE,
     PASS,
     QUANTILES,
+    RECORDED,
     TICKS_PER_CENT,
     UNDECIDABLE,
     ZERO_ESTIMATE,
@@ -36,6 +38,7 @@ from bot.lag.ladder_run import (
     decide,
     execute,
     readout,
+    result_payload,
     summarise,
     sweep_ladders,
 )
@@ -257,6 +260,54 @@ def scope_dir(tmp_path: Path, *, cities: tuple[str, ...] = (SERIES,)) -> Path:
             fraction_invalid_max=Decimal("0.4"),
             passing=(SERIES,),
             coverage=Coverage(cities=cities, ladder_widths=(6,), in_scope_city_days=2),
+        ),
+    )
+    return directory
+
+
+def both_ladder_scope_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "both_scope"
+    directory.mkdir()
+    pq.write_table(exclusion_table(), directory / "exclusions.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                event_day_row(
+                    event_date,
+                    in_scope=True,
+                    split=split,
+                    day_index=index,
+                    opens=OPENS,
+                    series=series,
+                )
+                for series in (SERIES, LOW_SERIES)
+                for index, (event_date, split) in enumerate(
+                    ((DISCOVERY_DAY, DISCOVERY), (HOLDOUT_DAY, HOLDOUT)), start=1
+                )
+            ],
+            schema=EVENT_DAYS_SCHEMA,
+        ),
+        directory / "event_days.parquet",
+    )
+    write_split(
+        directory / "split.json",
+        Split(
+            cities=(SERIES, LOW_SERIES),
+            discovery_days=(DISCOVERY_DAY,),
+            holdout_days=(HOLDOUT_DAY,),
+            boundary_event_day=HOLDOUT_DAY,
+            scope_start=SCOPE_START,
+            scope_end=SCOPE_END,
+        ),
+    )
+    write_universe(
+        directory / "r0_universe.json",
+        freeze_universe(
+            fraction_invalid_max=Decimal("0.4"),
+            passing=(SERIES, LOW_SERIES),
+            coverage=Coverage(
+                cities=(SERIES, LOW_SERIES), ladder_widths=(6,), in_scope_city_days=4
+            ),
         ),
     )
     return directory
@@ -775,3 +826,81 @@ def test_a_scope_spanning_both_ladders_is_not_swept_without_a_cohort(
 
     assert swept.in_scope == len(scope.event_days)
     assert LOW_SERIES not in {series for series, _ in swept.tickers}
+
+
+def test_a_two_ladder_run_naming_no_cohort_writes_no_manifest(tmp_path: Path) -> None:
+    paths = run_paths(tmp_path) | {"run_scope": both_ladder_scope_dir(tmp_path)}
+    run_root = tmp_path / "tape_studies"
+
+    with pytest.raises(ValueError, match="names no cohort"):
+        execute(
+            run_id=RUN_ID,
+            artifacts=artifacts_dir(tmp_path),
+            floor_source=FloorSource.SIGNED_READ,
+            economic_bar_size=ECONOMIC_BAR_SIZE,
+            economic_bar_price=ECONOMIC_BAR_PRICE,
+            economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
+            seed=SEED,
+            run_root=run_root,
+            **paths,
+        )
+
+    assert not (run_root / RUN_ID / MANIFEST_NAME).exists()
+    assert not run_root.exists()
+
+
+def test_a_two_ladder_run_counts_its_cohort_once(tmp_path: Path) -> None:
+    paths = run_paths(tmp_path) | {"run_scope": both_ladder_scope_dir(tmp_path)}
+
+    run = execute(
+        run_id=RUN_ID,
+        artifacts=artifacts_dir(tmp_path),
+        floor_source=FloorSource.SIGNED_READ,
+        economic_bar_size=ECONOMIC_BAR_SIZE,
+        economic_bar_price=ECONOMIC_BAR_PRICE,
+        economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
+        seed=SEED,
+        run_root=tmp_path / "tape_studies",
+        cohort=HIGH,
+        **paths,
+    )
+
+    payload = result_payload(run)
+    scope = load_run_scope(paths["run_scope"])
+    assert len(scope.event_days) == 4
+    assert run.universe == (SERIES,)
+    assert payload["universe"] == {"read": RECORDED, "series": [SERIES]}
+    assert run.discovery.population == 1
+    assert run.holdout.population == 1
+    assert run.sweep.in_scope == 2
+    assert payload["cities"] == [SERIES]
+    assert LOW_SERIES not in json.dumps(payload)
+
+
+def test_a_single_ladder_run_naming_no_cohort_reads_what_it_read_before(tmp_path: Path) -> None:
+    run = execute(
+        run_id=RUN_ID,
+        artifacts=artifacts_dir(tmp_path),
+        floor_source=FloorSource.SIGNED_READ,
+        economic_bar_size=ECONOMIC_BAR_SIZE,
+        economic_bar_price=ECONOMIC_BAR_PRICE,
+        economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
+        seed=SEED,
+        run_root=tmp_path / "tape_studies",
+        **run_paths(tmp_path),
+    )
+
+    payload = result_payload(run)
+    assert payload["verdict"] == UNDECIDABLE
+    assert payload["universe"] == {"read": RECORDED, "series": [SERIES]}
+    assert Decimal(payload["discovery"]["median_excess_cents"]) == EXCESS
+    assert payload["discovery"]["population"] == 1
+    assert payload["holdout"]["population"] == 1
+    assert payload["ladders"] == {
+        "in_scope": 2,
+        "complete": 2,
+        "incomplete": 0,
+        "incomplete_keys": [],
+    }
+    assert payload["rows"] == 16
+    assert payload["cities"] == [SERIES]

@@ -19,6 +19,7 @@ from bot.lag.lock_convergence import (
 from bot.lag.run_manifest import MANIFEST_NAME
 from bot.lag.taker_flow_run import RESULTS_NAME
 from bot.lag.tape_studies import RunScope, load_run_scope
+from bot.replay.analysis_stations import HIGH, LOW
 from bot.replay.run_scope import DISCOVERY, HOLDOUT
 from scripts.q4_report import (
     ARRIVALS_QUERY,
@@ -42,8 +43,10 @@ from tests.test_lock_convergence import (
     SCOPE_END,
     SCOPE_START,
     SEED,
+    SERIES,
     STATION,
     artifacts_dir,
+    both_ladder_scope_dir,
     flat,
     scope_dir,
     spread,
@@ -491,3 +494,30 @@ def test_the_run_root_and_repo_default_to_the_tree_the_script_ships_in(
     assert args.run_root == DEFAULT_RUN_ROOT
     assert args.repo == REPO_ROOT
     assert FLOOR_SOURCES == ("L", "RTT_read")
+
+
+def test_the_cohort_is_optional_and_never_names_both(
+    paths: dict[str, Path], run_root: Path
+) -> None:
+    argv = argv_for(paths, run_root)
+
+    assert build_parser().parse_args(argv).cohort is None
+    assert build_parser().parse_args([*argv, "--cohort", HIGH]).cohort == HIGH
+    assert build_parser().parse_args([*argv, "--cohort", LOW]).cohort == LOW
+    with pytest.raises(SystemExit) as excinfo:
+        build_parser().parse_args([*argv, "--cohort", "both"])
+    assert excinfo.value.code != 0
+
+
+async def test_a_two_ladder_scope_is_read_under_the_cohort_the_run_names(
+    paths: dict[str, Path], run_root: Path, tmp_path: Path, mock_http: list[httpx.Request]
+) -> None:
+    paths["run_scope"] = both_ladder_scope_dir(tmp_path)
+
+    with pytest.raises(ValueError, match="names no cohort"):
+        await run(args_for(paths, run_root))
+
+    named = build_parser().parse_args([*argv_for(paths, run_root), "--cohort", HIGH])
+
+    assert await run(named) == 0
+    assert results_of(run_root)["locks"]["cities"] == [SERIES]

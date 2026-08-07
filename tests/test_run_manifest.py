@@ -41,6 +41,7 @@ from bot.lag.run_manifest import (
     write_manifest,
 )
 from bot.lag.tape_studies import SELF_CHARGED_BAR, SELF_CHARGED_BAR_SOURCE
+from bot.replay.analysis_stations import HIGH
 
 
 UTC = timezone.utc
@@ -891,3 +892,20 @@ def test_a_run_declaring_no_exemption_writes_the_payload_it_wrote_before(
     assert "exemptions" not in declared
     assert declared == undeclared
     assert freeze_digest(declared) == freeze_digest(undeclared)
+
+
+def test_a_run_naming_no_cohort_writes_the_payload_it_wrote_before(complete: RunInputs) -> None:
+    payload = manifest_payload(build_manifest(complete))
+
+    assert complete.cohort is None
+    assert "cohort" not in payload
+    assert set(payload) == FIELDS
+    assert freeze_digest(payload) == freeze_digest({name: payload[name] for name in FIELDS})
+
+
+def test_a_run_naming_a_cohort_records_it_and_moves_the_digest(complete: RunInputs) -> None:
+    named = manifest_payload(build_manifest(replace(complete, cohort=HIGH)))
+
+    assert named["cohort"] == HIGH
+    assert set(named) == FIELDS | {"cohort"}
+    assert freeze_digest(named) != freeze_digest(manifest_payload(build_manifest(complete)))

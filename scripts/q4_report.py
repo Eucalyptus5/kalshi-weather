@@ -30,6 +30,7 @@ from bot.lag.tape_studies import RunScope, load_run_scope  # noqa: E402
 from bot.markets.observation_window import observation_window  # noqa: E402
 from bot.observations.basis_check import fetch_iem_1min_asos_archive  # noqa: E402
 from bot.observations.metar import StationObservation  # noqa: E402
+from bot.replay.analysis_stations import HIGH, LOW  # noqa: E402
 from bot.validation.reconcile import ACISClient  # noqa: E402
 
 
@@ -80,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--seed", type=int, required=True, help="the bootstrap seed every resample runs under"
+    )
+    parser.add_argument(
+        "--cohort",
+        choices=(HIGH, LOW),
+        default=None,
+        help="which ladder of the frozen scope the run reads",
     )
     parser.add_argument("--run-root", type=Path, default=DEFAULT_RUN_ROOT)
     parser.add_argument("--repo", type=Path, default=REPO_ROOT)
@@ -294,6 +301,7 @@ async def run(args: argparse.Namespace) -> int:
             economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
             seed=args.seed,
             run_root=args.run_root,
+            cohort=args.cohort,
         )
     except ManifestIncomplete as exc:
         print(exc, file=sys.stderr)

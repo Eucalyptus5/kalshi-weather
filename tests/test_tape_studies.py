@@ -55,6 +55,7 @@ from bot.lag.tape_studies import (
     window_dates,
     within_event_day,
 )
+from bot.replay.analysis_stations import HIGH, LOW
 from bot.replay.artifacts import (
     BOUNDARIES_SCHEMA,
     COVERAGE_SCHEMA,
@@ -81,6 +82,7 @@ UTC = timezone.utc
 MICROSECOND = timedelta(microseconds=1)
 
 SERIES = "KXHIGHDEN"
+LOW_SERIES = "KXLOWTDEN"
 TICKER = "KXHIGHDEN-26JUL18-B70"
 UNCOVERED_DAY = date(2026, 7, 17)
 DISCOVERY_DAY = date(2026, 7, 18)
@@ -117,6 +119,12 @@ ARTIFACT_PARTITIONS = (
     (TRADES, HOLDOUT_DAY, 6),
 )
 CONSUMED = {TOUCH: 10, LADDER: 5, TRADES: 6}
+LOW_PARTITIONS = (
+    (TOUCH, DISCOVERY_DAY, 4),
+    (LADDER, HOLDOUT_DAY, 2),
+    (TRADES, LATE_ARRIVAL, 1),
+)
+LOW_CONSUMED = {TOUCH: 4, LADDER: 2, TRADES: 1}
 FRACTION_INVALID_MAX = Decimal("0.4")
 CARVED_OUT = LOCK_CARVE_OUT[0]
 EXCLUSION_ROWS = 5
@@ -289,10 +297,11 @@ def event_day_row(
     split: str,
     day_index: int = 0,
     opens: timedelta = timedelta(),
+    series: str = SERIES,
 ) -> dict:
     midnight = datetime(event_date.year, event_date.month, event_date.day, tzinfo=UTC)
     return {
-        "series": SERIES,
+        "series": series,
         "station": "KDEN",
         "timezone": "America/Denver",
         "event_date": event_date,
@@ -466,7 +475,7 @@ def run_input_paths(tmp_path: Path) -> dict[str, Path]:
     }
 
 
-def assemble(paths: dict[str, Path]) -> RunInputs:
+def assemble(paths: dict[str, Path], cohort: str | None = None) -> RunInputs:
     return assemble_run_inputs(
         run_id=RUN_ID,
         floor_source=FloorSource.SIGNED_READ,
@@ -474,8 +483,49 @@ def assemble(paths: dict[str, Path]) -> RunInputs:
         economic_bar_price=SELF_CHARGED_BAR,
         economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
         bootstrap_seed=SEED,
+        cohort=cohort,
         **paths,
     )
+
+
+def both_ladder_day_table() -> pa.Table:
+    rows = [
+        event_day_row(
+            day,
+            in_scope=True,
+            split=split,
+            day_index=index,
+            opens=STANDARD_OFFSET,
+            series=series,
+        )
+        for series in (SERIES, LOW_SERIES)
+        for index, (day, split) in enumerate(
+            ((DISCOVERY_DAY, DISCOVERY), (HOLDOUT_DAY, HOLDOUT)), start=1
+        )
+    ]
+    return pa.Table.from_pylist(rows, schema=EVENT_DAYS_SCHEMA)
+
+
+def both_ladder_paths(tmp_path: Path) -> dict[str, Path]:
+    root = artifact_root(tmp_path)
+    builders = {TOUCH: touch_row, LADDER: ladder_row, TRADES: trade_row}
+    for kind, day, rows in LOW_PARTITIONS:
+        write_partition(
+            root,
+            day,
+            1,
+            [builders[kind](index, NOON) for index in range(rows)],
+            kind=kind,
+            schema=KIND_SCHEMAS[kind],
+            series=LOW_SERIES,
+        )
+    return {
+        "preregistration": write_preregistration(tmp_path / "preregistration.md"),
+        "repo": seeded_repo(tmp_path / "tree"),
+        "run_scope": scope_dir(tmp_path, days=both_ladder_day_table()),
+        "artifacts": root,
+        "rtt_samples": write_rtt_samples(tmp_path / "samples.jsonl", ADEQUATE_SAMPLES),
+    }
 
 
 @pytest.fixture
@@ -1037,7 +1087,9 @@ def test_the_split_of_a_day_outside_the_scope_raises(scope: RunScope) -> None:
 def test_the_assembled_inputs_carry_every_field_the_manifest_names(paths: dict[str, Path]) -> None:
     inputs = assemble(paths)
 
-    assert [field.name for field in fields(RunInputs) if getattr(inputs, field.name) is None] == []
+    assert [field.name for field in fields(RunInputs) if getattr(inputs, field.name) is None] == [
+        "cohort"
+    ]
     manifest = build_manifest(inputs)
     assert manifest.run_id == RUN_ID
     assert manifest.preregistration == paths["preregistration"]
@@ -1097,6 +1149,25 @@ def test_a_partition_before_the_first_in_scope_event_day_is_not_counted(
 
     assert partition_rows(paths["artifacts"], TOUCH, SERIES, [UNCOVERED_DAY]) == 7
     assert inputs.row_counts[TOUCH] == CONSUMED[TOUCH]
+
+
+def test_the_row_counts_hold_only_the_ladder_the_run_names(tmp_path: Path) -> None:
+    paths = both_ladder_paths(tmp_path)
+
+    high = assemble(paths, HIGH)
+    low = assemble(paths, LOW)
+
+    assert high.cohort == HIGH
+    assert {kind: high.row_counts[kind] for kind in KIND_SCHEMAS} == CONSUMED
+    assert {kind: low.row_counts[kind] for kind in KIND_SCHEMAS} == LOW_CONSUMED
+    assert all(high.row_counts[kind] < CONSUMED[kind] + LOW_CONSUMED[kind] for kind in KIND_SCHEMAS)
+
+
+def test_a_two_ladder_scope_counts_no_rows_until_the_run_names_a_ladder(tmp_path: Path) -> None:
+    paths = both_ladder_paths(tmp_path)
+
+    with pytest.raises(ValueError, match="names no cohort"):
+        assemble(paths)
 
 
 def test_a_partition_outside_the_scopes_city_set_is_not_counted(paths: dict[str, Path]) -> None:

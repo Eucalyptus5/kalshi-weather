@@ -262,6 +262,54 @@ def scope_dir(tmp_path: Path, *, bites: bool = False) -> Path:
     return directory
 
 
+def both_ladder_scope_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "both_scope"
+    directory.mkdir()
+    pq.write_table(exclusion_table(), directory / "exclusions.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                event_day_row(
+                    event_date,
+                    in_scope=True,
+                    split=split,
+                    day_index=index,
+                    opens=OPENS,
+                    series=series,
+                )
+                for series in (SERIES, LOW_SERIES)
+                for index, (event_date, split) in enumerate(
+                    ((DISCOVERY_DAY, DISCOVERY), (HOLDOUT_DAY, HOLDOUT)), start=1
+                )
+            ],
+            schema=EVENT_DAYS_SCHEMA,
+        ),
+        directory / "event_days.parquet",
+    )
+    write_split(
+        directory / "split.json",
+        Split(
+            cities=(SERIES, LOW_SERIES),
+            discovery_days=(DISCOVERY_DAY,),
+            holdout_days=(HOLDOUT_DAY,),
+            boundary_event_day=HOLDOUT_DAY,
+            scope_start=SCOPE_START,
+            scope_end=SCOPE_END,
+        ),
+    )
+    write_universe(
+        directory / "r0_universe.json",
+        freeze_universe(
+            fraction_invalid_max=Decimal("0.4"),
+            passing=(SERIES, LOW_SERIES),
+            coverage=Coverage(
+                cities=(SERIES, LOW_SERIES), ladder_widths=(6,), in_scope_city_days=4
+            ),
+        ),
+    )
+    return directory
+
+
 def artifacts_dir(
     tmp_path: Path,
     rows: Sequence[dict],
@@ -868,3 +916,53 @@ def test_a_scope_spanning_both_ladders_is_not_scanned_without_a_cohort(tmp_path:
     scan = scan_locks(both, artifacts_dir(tmp_path, LADDER_ROWS), ARCHIVE, cohort=HIGH)
 
     assert scan.cities == (SERIES,)
+
+
+def test_a_two_ladder_run_naming_no_cohort_writes_no_manifest(tmp_path: Path) -> None:
+    paths = run_paths(tmp_path) | {"run_scope": both_ladder_scope_dir(tmp_path)}
+    run_root = tmp_path / "tape_studies"
+
+    with pytest.raises(ValueError, match="names no cohort"):
+        execute(
+            run_id=RUN_ID,
+            artifacts=artifacts_dir(tmp_path, LADDER_ROWS),
+            observations=ARCHIVE,
+            arrivals={},
+            settles=SETTLES,
+            floor_source=FloorSource.SIGNED_READ,
+            economic_bar_size=ECONOMIC_BAR_SIZE,
+            economic_bar_price=ECONOMIC_BAR_PRICE,
+            economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
+            seed=SEED,
+            run_root=run_root,
+            **paths,
+        )
+
+    assert not (run_root / RUN_ID / MANIFEST_NAME).exists()
+    assert not run_root.exists()
+
+
+def test_a_two_ladder_run_scans_only_the_cohort_it_names(tmp_path: Path) -> None:
+    paths = run_paths(tmp_path) | {"run_scope": both_ladder_scope_dir(tmp_path)}
+
+    run = execute(
+        run_id=RUN_ID,
+        artifacts=artifacts_dir(tmp_path, LADDER_ROWS),
+        observations=ARCHIVE,
+        arrivals={},
+        settles=SETTLES,
+        floor_source=FloorSource.SIGNED_READ,
+        economic_bar_size=ECONOMIC_BAR_SIZE,
+        economic_bar_price=ECONOMIC_BAR_PRICE,
+        economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
+        seed=SEED,
+        run_root=tmp_path / "tape_studies",
+        cohort=HIGH,
+        **paths,
+    )
+
+    payload = result_payload(run)
+    assert len(load_run_scope(paths["run_scope"]).event_days) == 4
+    assert run.sweep.scan.cities == (SERIES,)
+    assert payload["locks"]["cities"] == [SERIES]
+    assert LOW_SERIES not in json.dumps(payload)

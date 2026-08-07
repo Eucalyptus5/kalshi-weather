@@ -8,6 +8,8 @@ import pyarrow.parquet as pq
 import pytest
 
 from bot.lag.r0_universe import Coverage, freeze_universe, write_universe
+from bot.lag.read_rtt import FloorSource
+from bot.lag.run_manifest import MANIFEST_NAME
 from bot.lag.taker_flow import (
     CENT_BAR,
     HORIZONS_S,
@@ -18,6 +20,9 @@ from bot.lag.taker_flow import (
 )
 from bot.lag.taker_flow_run import (
     CLOSED,
+    ECONOMIC_BAR_PRICE,
+    ECONOMIC_BAR_PRICE_SOURCE,
+    ECONOMIC_BAR_SIZE,
     NO_ESTIMATE,
     PASS,
     PRINT_MIN_HOLDOUT,
@@ -32,8 +37,10 @@ from bot.lag.taker_flow_run import (
     Tally,
     bootstrap_of,
     decide,
+    execute,
     read_touch,
     readout,
+    result_payload,
     sweep_prints,
 )
 from bot.lag.tape_stats import ClusterAggregate, evaluate_holdout
@@ -50,7 +57,15 @@ from bot.replay.run_scope import (
     Split,
     write_split,
 )
-from tests.test_tape_studies import event_day_row, exclusion_row, write_partition
+from tests.test_tape_studies import (
+    ADEQUATE_SAMPLES,
+    event_day_row,
+    exclusion_row,
+    seeded_repo,
+    write_partition,
+    write_preregistration,
+    write_rtt_samples,
+)
 
 
 UTC = timezone.utc
@@ -75,6 +90,7 @@ QUIET_END = datetime(2026, 7, 18, 9, tzinfo=UTC)
 BLINK = datetime(2026, 7, 18, 12, tzinfo=UTC)
 
 SEED = 20260812
+RUN_ID = "2026-08-17-q3"
 POWERED = PRINT_MIN_DISCOVERY + 1_000
 HOLDOUT_POWERED = 3_000
 TICKER_MIN_HOLDOUT = (TICKER_MIN_DISCOVERY + 1) // 2
@@ -250,6 +266,62 @@ def scope_dir(tmp_path: Path) -> Path:
         ),
     )
     return directory
+
+
+def both_ladder_scope_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "both_scope"
+    directory.mkdir()
+    pq.write_table(exclusion_table(), directory / "exclusions.parquet")
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                event_day_row(
+                    event_date,
+                    in_scope=True,
+                    split=split,
+                    day_index=index,
+                    opens=OPENS,
+                    series=series,
+                )
+                for series in (SERIES, LOW_SERIES)
+                for index, (event_date, split) in enumerate(
+                    ((DISCOVERY_DAY, DISCOVERY), (HOLDOUT_DAY, HOLDOUT)), start=1
+                )
+            ],
+            schema=EVENT_DAYS_SCHEMA,
+        ),
+        directory / "event_days.parquet",
+    )
+    write_split(
+        directory / "split.json",
+        Split(
+            cities=(SERIES, LOW_SERIES),
+            discovery_days=(DISCOVERY_DAY,),
+            holdout_days=(HOLDOUT_DAY,),
+            boundary_event_day=HOLDOUT_DAY,
+            scope_start=SCOPE_START,
+            scope_end=SCOPE_END,
+        ),
+    )
+    write_universe(
+        directory / "r0_universe.json",
+        freeze_universe(
+            fraction_invalid_max=Decimal("0.4"),
+            passing=(SERIES, LOW_SERIES),
+            coverage=Coverage(
+                cities=(SERIES, LOW_SERIES), ladder_widths=(6,), in_scope_city_days=4
+            ),
+        ),
+    )
+    return directory
+
+
+def run_paths(tmp_path: Path) -> dict[str, Path]:
+    return {
+        "preregistration": write_preregistration(tmp_path / "preregistration.md"),
+        "repo": seeded_repo(tmp_path / "tree"),
+        "rtt_samples": write_rtt_samples(tmp_path / "samples.jsonl", ADEQUATE_SAMPLES),
+    }
 
 
 def artifacts_dir(tmp_path: Path) -> Path:
@@ -841,3 +913,48 @@ def test_a_scope_spanning_both_ladders_is_not_swept_without_a_cohort(
 
     assert swept.in_scope == {DISCOVERY: 4, HOLDOUT: 2}
     assert LOW_SERIES not in {series for series, _ in swept.tickers}
+
+
+def test_a_two_ladder_run_naming_no_cohort_writes_no_manifest(tmp_path: Path) -> None:
+    run_root = tmp_path / "tape_studies"
+
+    with pytest.raises(ValueError, match="names no cohort"):
+        execute(
+            run_id=RUN_ID,
+            run_scope=both_ladder_scope_dir(tmp_path),
+            artifacts=artifacts_dir(tmp_path),
+            floor_source=FloorSource.SIGNED_READ,
+            economic_bar_size=ECONOMIC_BAR_SIZE,
+            economic_bar_price=ECONOMIC_BAR_PRICE,
+            economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
+            seed=SEED,
+            run_root=run_root,
+            **run_paths(tmp_path),
+        )
+
+    assert not (run_root / RUN_ID / MANIFEST_NAME).exists()
+    assert not run_root.exists()
+
+
+def test_a_two_ladder_run_reads_only_the_cohort_it_names(tmp_path: Path) -> None:
+    scope_root = both_ladder_scope_dir(tmp_path)
+
+    run = execute(
+        run_id=RUN_ID,
+        run_scope=scope_root,
+        artifacts=artifacts_dir(tmp_path),
+        floor_source=FloorSource.SIGNED_READ,
+        economic_bar_size=ECONOMIC_BAR_SIZE,
+        economic_bar_price=ECONOMIC_BAR_PRICE,
+        economic_bar_price_source=ECONOMIC_BAR_PRICE_SOURCE,
+        seed=SEED,
+        run_root=tmp_path / "tape_studies",
+        cohort=HIGH,
+        **run_paths(tmp_path),
+    )
+
+    payload = result_payload(run)
+    assert len(load_run_scope(scope_root).event_days) == 4
+    assert payload["cities"] == [SERIES]
+    assert LOW_SERIES not in {series for series, _ in run.sweep.tickers}
+    assert run.sweep.in_scope == {DISCOVERY: 4, HOLDOUT: 2}
