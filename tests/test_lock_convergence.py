@@ -965,4 +965,6 @@ def test_a_two_ladder_run_scans_only_the_cohort_it_names(tmp_path: Path) -> None
     assert len(load_run_scope(paths["run_scope"]).event_days) == 4
     assert run.sweep.scan.cities == (SERIES,)
     assert payload["locks"]["cities"] == [SERIES]
+    assert payload["locks"]["population_ceiling"] == 1
+    assert payload["settles"]["usable_event_days"] == 1
     assert LOW_SERIES not in json.dumps(payload)

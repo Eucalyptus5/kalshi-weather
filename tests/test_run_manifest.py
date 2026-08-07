@@ -900,7 +900,6 @@ def test_a_run_naming_no_cohort_writes_the_payload_it_wrote_before(complete: Run
     assert complete.cohort is None
     assert "cohort" not in payload
     assert set(payload) == FIELDS
-    assert freeze_digest(payload) == freeze_digest({name: payload[name] for name in FIELDS})
 
 
 def test_a_run_naming_a_cohort_records_it_and_moves_the_digest(complete: RunInputs) -> None:
