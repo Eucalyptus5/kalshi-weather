@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from typing import Literal
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -339,6 +340,7 @@ def test_summarize_basis_aggregates() -> None:
     assert len(summaries) == 1
     s = summaries[0]
     assert s.station == "KDEN"
+    assert s.extreme == "max"
     assert s.n_days == 11
     assert s.median_delta_f == Decimal("0.2")
     assert s.p10_delta_f == Decimal("-1.5")
@@ -378,6 +380,76 @@ def test_summarize_groups_by_station() -> None:
     assert set(by_station) == {"KDEN", "KAUS"}
     assert by_station["KDEN"].fraction_invalid == Decimal("0")
     assert by_station["KAUS"].fraction_invalid == Decimal("1")
+
+
+def _basis_row(
+    station: str,
+    extreme: Literal["max", "min"],
+    delta_f: Decimal,
+    day_offset: int,
+) -> BasisCompareRow:
+    observed_f = Decimal("70") + delta_f
+    return BasisCompareRow(
+        station=station,
+        observation_day=date(2026, 1, 15) + timedelta(days=day_offset),
+        extreme=extreme,
+        observed_f=observed_f,
+        acis_f=Decimal("70"),
+        delta_f=delta_f,
+        basis_valid=_integer_tolerant_basis_valid(observed_f, Decimal("70")),
+    )
+
+
+def _same_station_both_extremes() -> list[BasisCompareRow]:
+    max_deltas = [Decimal("0.3"), Decimal("0.0"), Decimal("0.4"), Decimal("0.1"), Decimal("0.2")]
+    min_deltas = [Decimal("11.0"), Decimal("10.0"), Decimal("10.5")]
+    rows: list[BasisCompareRow] = []
+    for i, delta_f in enumerate(max_deltas):
+        rows.append(_basis_row("KDEN", "max", delta_f, i))
+        if i < len(min_deltas):
+            rows.append(_basis_row("KDEN", "min", min_deltas[i], i))
+    return rows
+
+
+def test_summarize_splits_the_two_extremes_of_one_station() -> None:
+    summaries = summarize_basis(_same_station_both_extremes())
+
+    assert len(summaries) == 2
+    assert {s.station for s in summaries} == {"KDEN"}
+    by_extreme = {s.extreme: s for s in summaries}
+    assert set(by_extreme) == {"max", "min"}
+    assert by_extreme["max"].n_days == 5
+    assert by_extreme["min"].n_days == 3
+    assert by_extreme["max"].fraction_invalid == Decimal("0")
+    assert by_extreme["min"].fraction_invalid == Decimal("1")
+
+
+def test_summarize_quantiles_do_not_mix_extremes() -> None:
+    by_extreme = {s.extreme: s for s in summarize_basis(_same_station_both_extremes())}
+
+    assert by_extreme["max"].median_delta_f == Decimal("0.2")
+    assert by_extreme["max"].p10_delta_f == Decimal("0.0")
+    assert by_extreme["max"].p90_delta_f == Decimal("0.4")
+    assert by_extreme["min"].median_delta_f == Decimal("10.5")
+    assert by_extreme["min"].p10_delta_f == Decimal("10.0")
+    assert by_extreme["min"].p90_delta_f == Decimal("11.0")
+
+
+def test_summarize_orders_by_station_then_extreme() -> None:
+    rows = [
+        _basis_row("KDEN", "min", Decimal("1.0"), 0),
+        _basis_row("KAUS", "max", Decimal("0.5"), 0),
+        _basis_row("KDEN", "max", Decimal("0.5"), 1),
+        _basis_row("KAUS", "min", Decimal("1.0"), 1),
+    ]
+    summaries = summarize_basis(rows)
+
+    assert [(s.station, s.extreme) for s in summaries] == [
+        ("KAUS", "max"),
+        ("KAUS", "min"),
+        ("KDEN", "max"),
+        ("KDEN", "min"),
+    ]
 
 
 async def test_compare_basis_resolves_ksea_timezone() -> None:

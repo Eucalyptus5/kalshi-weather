@@ -34,6 +34,7 @@ class BasisCompareRow:
 @dataclass(frozen=True, slots=True)
 class BasisSummary:
     station: str
+    extreme: Literal["max", "min"]
     n_days: int
     median_delta_f: Decimal
     p10_delta_f: Decimal
@@ -128,19 +129,20 @@ async def compare_basis(
 def summarize_basis(rows: list[BasisCompareRow]) -> list[BasisSummary]:
     if not rows:
         return []
-    by_station: dict[str, list[BasisCompareRow]] = {}
+    by_group: dict[tuple[str, Literal["max", "min"]], list[BasisCompareRow]] = {}
     for row in rows:
-        by_station.setdefault(row.station, []).append(row)
+        by_group.setdefault((row.station, row.extreme), []).append(row)
 
     out: list[BasisSummary] = []
-    for station in sorted(by_station):
-        group = by_station[station]
+    for station, extreme in sorted(by_group):
+        group = by_group[(station, extreme)]
         deltas = sorted(r.delta_f for r in group)
         n = len(group)
         invalid_count = sum(1 for r in group if not r.basis_valid)
         out.append(
             BasisSummary(
                 station=station,
+                extreme=extreme,
                 n_days=n,
                 median_delta_f=_quantile(deltas, Decimal("0.5")),
                 p10_delta_f=_quantile(deltas, Decimal("0.1")),
