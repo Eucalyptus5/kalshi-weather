@@ -40,7 +40,6 @@ from bot.lag.run_manifest import (
     resolve_latency_floor,
     write_manifest,
 )
-from bot.lag.tape_studies import SELF_CHARGED_BAR, SELF_CHARGED_BAR_SOURCE
 from bot.replay.analysis_stations import HIGH
 
 
@@ -48,6 +47,7 @@ UTC = timezone.utc
 RUN_ID = "2026-08-12-q1"
 TICKER = "KXHIGHDEN-26AUG11-T95"
 THRESHOLD = Decimal("0.5")
+CHARGED_SOURCE = "statistic_charges_its_own_fee"
 PASSING = ("KXHIGHCHI", "KXHIGHDEN", "KXHIGHMIA", "KXHIGHNY")
 ACCRUAL_START = datetime(2026, 7, 18, tzinfo=UTC)
 ACCRUAL_END = datetime(2026, 8, 1, tzinfo=UTC)
@@ -394,9 +394,9 @@ def test_a_stated_zero_bar_is_a_bar_not_a_missing_field(
     root = tmp_path / "tape_studies"
     charged = replace(
         complete,
-        economic_bar_size=SELF_CHARGED_BAR,
-        economic_bar_price=SELF_CHARGED_BAR,
-        economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
+        economic_bar_size=Decimal("0"),
+        economic_bar_price=Decimal("0"),
+        economic_bar_price_source=CHARGED_SOURCE,
     )
 
     write_manifest(root, charged)
@@ -406,7 +406,7 @@ def test_a_stated_zero_bar_is_a_bar_not_a_missing_field(
     assert Decimal(payload["economic_bar_size"]) == 0
     assert Decimal(payload["economic_bar_price"]) == 0
     assert Decimal(payload["economic_bar_cents_per_contract"]) == 0
-    assert payload["economic_bar_price_source"] == SELF_CHARGED_BAR_SOURCE
+    assert payload["economic_bar_price_source"] == CHARGED_SOURCE
 
 
 def test_a_preregistration_file_that_is_not_on_disk_aborts(

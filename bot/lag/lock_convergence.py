@@ -12,7 +12,7 @@ import pyarrow.compute as pc
 
 from bot.lag.fee_floor import published_taker_fee
 from bot.lag.ladder_run import census
-from bot.lag.lock_events import LockEvent, detect_lock_events, is_low_ladder
+from bot.lag.lock_events import NO, YES, LockEvent, detect_lock_events, is_low_ladder
 from bot.lag.read_rtt import FloorSource
 from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME, write_manifest
 from bot.lag.tape_stats import (
@@ -60,8 +60,6 @@ ECONOMIC_BAR_PRICE_SOURCE = "preregistration"
 DIRECTION = "greater"
 STATION_DAYS = "station event-days"
 SPLITS = (DISCOVERY, HOLDOUT)
-YES = "yes"
-NO = "no"
 TAKING = "invalidated_side_taking"
 PROVIDING = "invalidated_side_providing"
 BUCKETS = (TAKING, PROVIDING)

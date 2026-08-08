@@ -31,6 +31,7 @@ from bot.replay.run_scope import (  # noqa: E402
     write_exclusions,
     write_split,
 )
+from scripts.replay_blind_windows import utc_stamp  # noqa: E402
 
 
 CLASSES = (RECORDED_GAP, SUBSCRIPTION_WIDE, RESUBSCRIBE_BLIND, QUIET_BAND)
@@ -44,13 +45,6 @@ STATION_SETS: dict[str, dict[str, StationConfig]] = {
 # Concurrent with venue-wide REST 503s, so the recorded bracket understates how long the venue
 # was unreadable; the pad is a per-incident judgment, not a standing rule.
 PADDED_INCIDENT = datetime(2026, 7, 23, 7, 43, 55, tzinfo=timezone.utc)
-
-
-def utc_stamp(text: str) -> datetime:
-    stamp = datetime.fromisoformat(text)
-    if stamp.tzinfo is None:
-        return stamp.replace(tzinfo=timezone.utc)
-    return stamp.astimezone(timezone.utc)
 
 
 def build_parser() -> argparse.ArgumentParser:

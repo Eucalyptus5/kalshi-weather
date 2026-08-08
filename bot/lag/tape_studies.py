@@ -47,6 +47,9 @@ TRADES = "trades"
 KIND_SCHEMAS = {TOUCH: TOUCH_SCHEMA, LADDER: LADDER_SCHEMA, TRADES: TRADES_SCHEMA}
 EXCLUSION_CLASSES = (QUIET_BAND, RECORDED_GAP, RESUBSCRIBE_BLIND, SUBSCRIPTION_WIDE)
 
+SELF_CHARGED_BAR: Decimal = Decimal("0")
+SELF_CHARGED_BAR_SOURCE = "statistic_charges_its_own_fee"
+
 _DAY = timedelta(days=1)
 
 
@@ -316,10 +319,6 @@ def keep_mask(offered: Sequence[EvidenceWindow], kept: Sequence[EvidenceWindow])
     if cursor != len(kept):
         raise ValueError("the screened windows are not a subsequence of the ones offered")
     return mask
-
-
-SELF_CHARGED_BAR: Decimal = Decimal("0")
-SELF_CHARGED_BAR_SOURCE = "statistic_charges_its_own_fee"
 
 
 def assemble_run_inputs(
