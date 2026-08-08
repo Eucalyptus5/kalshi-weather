@@ -424,7 +424,7 @@ def sweep_convergence(
 ) -> Sweep:
     scan = scan_locks(scope, artifacts, observations, cohort=cohort)
     scoped = set(in_cohort({series for series, _ in scope.event_days}, cohort))
-    lock_dependent = in_cohort(scope.universe.lock_dependent, cohort)
+    cohort_lock_dependent = in_cohort(scope.universe.lock_dependent, cohort)
     grouped: dict[tuple[str, date], list[LockEvent]] = {}
     for event, day in scan.clean:
         grouped.setdefault((day.series, day.event_date), []).append(event)
@@ -518,7 +518,7 @@ def sweep_convergence(
         kept=tuple(kept),
         values=values,
         clean_station_days=station_days,
-        ceiling=len(lock_dependent) * len(scope.discovery_days),
+        ceiling=len(cohort_lock_dependent) * len(scope.discovery_days),
         screened=screened,
         one_sided_rows=one_sided_rows,
         no_book_at_lock=no_book_at_lock,

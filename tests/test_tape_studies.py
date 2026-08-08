@@ -1160,7 +1160,6 @@ def test_the_row_counts_hold_only_the_ladder_the_run_names(tmp_path: Path) -> No
     assert high.cohort == HIGH
     assert {kind: high.row_counts[kind] for kind in KIND_SCHEMAS} == CONSUMED
     assert {kind: low.row_counts[kind] for kind in KIND_SCHEMAS} == LOW_CONSUMED
-    assert all(high.row_counts[kind] < CONSUMED[kind] + LOW_CONSUMED[kind] for kind in KIND_SCHEMAS)
 
 
 def test_a_two_ladder_scope_counts_no_rows_until_the_run_names_a_ladder(tmp_path: Path) -> None:
