@@ -579,6 +579,33 @@ def test_a_run_paired_with_the_wrong_ladder_writes_no_manifest(tmp_path: Path) -
     assert not run_root.exists()
 
 
+def test_the_manifest_lands_before_any_statistic_is_read(tmp_path: Path) -> None:
+    root = tmp_path / "foreign"
+    unreadable = write_partition(
+        root,
+        DISCOVERY_DAY,
+        1,
+        [],
+        kind="trades",
+        schema=pa.schema([("id", pa.int64()), ("ticker", pa.string())]),
+    )
+    run_root = tmp_path / "tape_studies"
+
+    with pytest.raises(ValueError, match=unreadable.name):
+        execute(
+            run_id=RUN_ID,
+            run_scope=scope_dir(tmp_path),
+            artifacts=root,
+            observations=crossing_observations(tmp_path),
+            floor_source=FloorSource.SIGNED_READ,
+            seed=SEED,
+            run_root=run_root,
+            **run_paths(tmp_path),
+        )
+
+    assert (run_root / RUN_ID / MANIFEST_NAME).exists()
+
+
 def test_a_full_run_writes_the_manifest_whose_digest_it_returns(tmp_path: Path) -> None:
     paths = run_paths(tmp_path)
     scope_root = scope_dir(tmp_path)

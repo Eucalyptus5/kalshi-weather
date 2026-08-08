@@ -86,16 +86,10 @@ def read_observations(path: Path) -> dict[str, list[StationObservation]]:
     return grouped
 
 
-def scan_locks(
-    scope: RunScope,
-    artifacts: Path,
-    observations: Mapping[str, list[StationObservation]],
-    *,
-    cohort: str | None = None,
-) -> LockScan:
+def lock_cities(scope: RunScope, cohort: str | None = None) -> tuple[str, ...]:
     scoped = set(in_cohort({series for series, _ in scope.event_days}, cohort))
     lock_dependent = set(scope.universe.lock_dependent)
-    cities = sorted(scoped & lock_dependent)
+    cities = tuple(sorted(scoped & lock_dependent))
     # Zero locks would otherwise read as an underpowered run rather than a freeze paired with the
     # wrong ladder.
     if not cities:
@@ -103,6 +97,17 @@ def scan_locks(
             f"the scope's series {sorted(scoped)} share nothing with the universe's "
             f"lock-dependent series {sorted(lock_dependent)}"
         )
+    return cities
+
+
+def scan_locks(
+    scope: RunScope,
+    artifacts: Path,
+    observations: Mapping[str, list[StationObservation]],
+    *,
+    cohort: str | None = None,
+) -> LockScan:
+    cities = lock_cities(scope, cohort)
     windows: dict[str, tuple[datetime, datetime]] = {}
     markets = 0
     ambiguous = 0
@@ -140,7 +145,7 @@ def scan_locks(
         no_observations,
     )
     return LockScan(
-        cities=tuple(cities),
+        cities=cities,
         windows=windows,
         markets=markets,
         locked=len(windows),
@@ -185,11 +190,12 @@ def execute(
         cohort=cohort,
     )
     scope = load_run_scope(run_scope)
+    # scan_locks reads the tape, so the refusal it owns is raised here instead: a mis-paired freeze
+    # has to leave the run root untouched even though the manifest predates every statistic.
+    lock_cities(scope, cohort)
+    digest = write_manifest(run_root, inputs)
     locks = scan_locks(scope, artifacts, read_observations(observations), cohort=cohort)
     swept = sweep_prints(scope, artifacts, lock_windows=locks.windows, cohort=cohort)
-    # Every refusal above this line leaves the run root untouched, so a mis-paired freeze writes no
-    # manifest for a run that never happened.
-    digest = write_manifest(run_root, inputs)
     run = NearLockRun(
         run_id=run_id,
         manifest=run_root / run_id / MANIFEST_NAME,
