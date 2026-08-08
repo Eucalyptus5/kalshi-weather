@@ -53,6 +53,7 @@ async def compare_basis(
     source: Literal[
         "live_metar", "iowa_asos_archive", "iem_1min_asos_archive"
     ] = "iem_1min_asos_archive",
+    min_coverage_minutes: int | None = None,
     http_client: httpx.AsyncClient | None = None,
 ) -> list[BasisCompareRow]:
     if not station.startswith("K"):
@@ -87,8 +88,13 @@ async def compare_basis(
         day = start_date + timedelta(days=day_offset)
         start_utc, end_utc = observation_window(tz_name, day)
         bucket = [o for o in observations if start_utc <= o.valid_time < end_utc]
-        if bucket:
-            by_day[day] = bucket
+        if not bucket:
+            continue
+        if min_coverage_minutes is not None:
+            covered = {o.valid_time.replace(second=0, microsecond=0) for o in bucket}
+            if len(covered) < min_coverage_minutes:
+                continue
+        by_day[day] = bucket
 
     rows: list[BasisCompareRow] = []
     for day in sorted(by_day):
@@ -115,12 +121,13 @@ async def compare_basis(
         )
 
     logger.info(
-        "basis_compare station=%s start=%s end=%s extreme=%s source=%s rows=%d",
+        "basis_compare station=%s start=%s end=%s extreme=%s source=%s min_coverage_minutes=%s rows=%d",
         station,
         start_date.isoformat(),
         end_date.isoformat(),
         extreme,
         source,
+        min_coverage_minutes,
         len(rows),
     )
     return rows

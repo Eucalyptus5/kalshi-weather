@@ -903,3 +903,102 @@ async def test_compare_basis_single_observation_day_rows_under_both_extremes() -
     assert min_rows[0].extreme == "min"
     assert max_rows[0].basis_valid is True
     assert min_rows[0].basis_valid is True
+
+
+def _two_day_csv() -> str:
+    return _iem_1min_csv(
+        [
+            ("DEN", "DENVER INTL", "2026-05-18 18:00", "70.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 18:01", "80.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 18:02", "75.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 18:03", "72.0"),
+            ("DEN", "DENVER INTL", "2026-05-19 18:00", "60.0"),
+            ("DEN", "DENVER INTL", "2026-05-19 18:01", "65.0"),
+        ]
+    )
+
+
+_TWO_DAY_ACIS = {date(2026, 5, 18): "80", date(2026, 5, 19): "65"}
+
+
+async def _compare_two_days(min_coverage_minutes: int | None) -> list[BasisCompareRow]:
+    transport = _iem_route_transport(_two_day_csv(), _TWO_DAY_ACIS)
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        kwargs = (
+            {} if min_coverage_minutes is None else {"min_coverage_minutes": min_coverage_minutes}
+        )
+        return await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 19),
+            acis_client,
+            None,
+            http_client=http,
+            **kwargs,
+        )
+
+
+async def test_min_coverage_off_by_default_keeps_the_thin_day() -> None:
+    rows = await _compare_two_days(None)
+
+    assert rows == [
+        BasisCompareRow(
+            station="KDEN",
+            observation_day=date(2026, 5, 18),
+            extreme="max",
+            observed_f=Decimal("80.0"),
+            acis_f=Decimal("80"),
+            delta_f=Decimal("0.0"),
+            basis_valid=True,
+        ),
+        BasisCompareRow(
+            station="KDEN",
+            observation_day=date(2026, 5, 19),
+            extreme="max",
+            observed_f=Decimal("65.0"),
+            acis_f=Decimal("65"),
+            delta_f=Decimal("0.0"),
+            basis_valid=True,
+        ),
+    ]
+
+
+async def test_min_coverage_drops_the_thin_day_and_keeps_the_full_one() -> None:
+    rows = await _compare_two_days(3)
+
+    assert [r.observation_day for r in rows] == [date(2026, 5, 18)]
+    assert rows[0].observed_f == Decimal("80.0")
+
+
+async def test_min_coverage_floor_is_inclusive() -> None:
+    kept = await _compare_two_days(4)
+    dropped = await _compare_two_days(5)
+
+    assert [r.observation_day for r in kept] == [date(2026, 5, 18)]
+    assert dropped == []
+
+
+async def test_min_coverage_counts_distinct_minutes_not_rows() -> None:
+    csv = _iem_1min_csv(
+        [
+            ("DEN", "DENVER INTL", "2026-05-18 18:00", "70.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 18:00", "71.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 18:01", "80.0"),
+            ("DEN", "DENVER INTL", "2026-05-18 18:01", "79.0"),
+        ]
+    )
+    transport = _iem_route_transport(csv, {date(2026, 5, 18): "80"})
+    async with httpx.AsyncClient(transport=transport) as http:
+        acis_client = ACISClient(http_client=http)
+        rows = await compare_basis(
+            "KDEN",
+            date(2026, 5, 18),
+            date(2026, 5, 18),
+            acis_client,
+            None,
+            http_client=http,
+            min_coverage_minutes=3,
+        )
+
+    assert rows == []
