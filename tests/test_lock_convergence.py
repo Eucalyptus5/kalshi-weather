@@ -908,7 +908,11 @@ def test_a_scope_that_only_narrows_its_universe_still_scans(tmp_path: Path) -> N
 def test_a_scope_spanning_both_ladders_is_not_scanned_without_a_cohort(tmp_path: Path) -> None:
     scope = load_run_scope(scope_dir(tmp_path))
     paired = next(iter(scope.event_days.values()))
-    both = replace(scope, event_days={**scope.event_days, (LOW_SERIES, paired.event_date): paired})
+    both = replace(
+        scope,
+        event_days={**scope.event_days, (LOW_SERIES, paired.event_date): paired},
+        universe=replace(scope.universe, lock_dependent=(SERIES, LOW_SERIES)),
+    )
 
     with pytest.raises(ValueError, match="names no cohort"):
         scan_locks(both, artifacts_dir(tmp_path, LADDER_ROWS), ARCHIVE)
