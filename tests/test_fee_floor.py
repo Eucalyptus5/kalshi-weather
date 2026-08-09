@@ -386,7 +386,7 @@ def test_the_bar_is_symmetric_across_the_price_grid() -> None:
     middle = economic_bar_cents_per_contract(BAR_SIZE, HALF)
 
     assert tail == mirror
-    assert (middle - TICK_CENTS) / (tail - TICK_CENTS) > Decimal("5")
+    assert ((middle - TICK_CENTS) / (tail - TICK_CENTS)).quantize(FOUR_DP) == Decimal("5.1111")
 
 
 def test_a_stated_zero_size_derives_a_bar_of_zero_with_no_tick() -> None:

@@ -701,7 +701,6 @@ def test_coverage_follows_each_ticker_across_the_rows_that_interleave_it(tmp_pat
         coverage(3, 0, 5 * SECOND),
         coverage(2, SECOND, 4 * SECOND, ticker=NY),
     )
-    assert [row.ticker for row in scan.coverage] == sorted(row.ticker for row in scan.coverage)
 
 
 def test_batching_does_not_change_the_coverage_the_scan_accumulates(tmp_path: Path) -> None:

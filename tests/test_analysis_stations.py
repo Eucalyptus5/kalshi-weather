@@ -52,8 +52,9 @@ def test_the_measured_table_covers_every_low_root_exactly_once() -> None:
 
 
 def test_the_pairing_is_the_recorders_own_low_subscription_list() -> None:
-    assert set(LOW_TO_HIGH) == {root for root in RECORDING_SERIES if root.startswith("KXLOW")}
-    assert set(LOW_TO_HIGH.values()) == set(STATIONS)
+    subscribed = {root for root in RECORDING_SERIES if root.startswith("KXLOW")}
+
+    assert subscribed == {root for root, _ in MEASURED_STATIONS}
     assert len(STATIONS) == 20
 
 
@@ -70,7 +71,7 @@ def test_a_low_root_carries_its_paired_high_geography(low: str, high: str) -> No
 
 
 def test_the_analysis_map_is_forty_roots_and_carries_no_rain() -> None:
-    assert len(ANALYSIS_STATIONS) == 40
+    assert len(ANALYSIS_STATIONS) == len(STATIONS) + len(MEASURED_STATIONS)
     assert set(ANALYSIS_STATIONS) == set(STATIONS) | set(LOW_STATIONS)
     assert not [root for root in ANALYSIS_STATIONS if root.startswith("KXRAIN")]
     assert [root for root in RECORDING_SERIES if root.startswith("KXRAIN")]

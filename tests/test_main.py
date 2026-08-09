@@ -326,8 +326,8 @@ def test_houston_settles_on_hobby() -> None:
     # KXHIGHTHOU and KXLOWTHOU settle on CLIHOU, which is Hobby, not CLIIAH/Intercontinental
     hou = STATIONS["KXHIGHTHOU"]
     assert hou.station == "KHOU"
-    assert hou.latitude == pytest.approx(29.6375, abs=1e-4)
-    assert hou.longitude == pytest.approx(-95.2825, abs=1e-4)
+    assert hou.latitude == 29.6375
+    assert hou.longitude == -95.2825
     assert hou.timezone == "America/Chicago"
 
 
