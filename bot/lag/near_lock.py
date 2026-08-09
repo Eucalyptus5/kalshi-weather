@@ -86,7 +86,7 @@ def read_observations(path: Path) -> dict[str, list[StationObservation]]:
     return grouped
 
 
-def lock_cities(scope: RunScope, cohort: str | None = None) -> tuple[str, ...]:
+def lock_cities(scope: RunScope, *, cohort: str | None = None) -> tuple[str, ...]:
     scoped = set(in_cohort({series for series, _ in scope.event_days}, cohort))
     lock_dependent = set(scope.universe.lock_dependent)
     cities = tuple(sorted(scoped & lock_dependent))
@@ -107,7 +107,7 @@ def scan_locks(
     *,
     cohort: str | None = None,
 ) -> LockScan:
-    cities = lock_cities(scope, cohort)
+    cities = lock_cities(scope, cohort=cohort)
     windows: dict[str, tuple[datetime, datetime]] = {}
     markets = 0
     ambiguous = 0
@@ -192,7 +192,7 @@ def execute(
     scope = load_run_scope(run_scope)
     # scan_locks reads the tape, so the refusal it owns is raised here instead: a mis-paired freeze
     # has to leave the run root untouched even though the manifest predates every statistic.
-    lock_cities(scope, cohort)
+    lock_cities(scope, cohort=cohort)
     digest = write_manifest(run_root, inputs)
     locks = scan_locks(scope, artifacts, read_observations(observations), cohort=cohort)
     swept = sweep_prints(scope, artifacts, lock_windows=locks.windows, cohort=cohort)

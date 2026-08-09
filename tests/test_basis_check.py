@@ -905,8 +905,8 @@ async def test_compare_basis_single_observation_day_rows_under_both_extremes() -
     assert min_rows[0].basis_valid is True
 
 
-def _two_day_csv() -> str:
-    return _iem_1min_csv(
+async def _compare_two_days(min_coverage_minutes: int | None) -> list[BasisCompareRow]:
+    csv = _iem_1min_csv(
         [
             ("DEN", "DENVER INTL", "2026-05-18 18:00", "70.0"),
             ("DEN", "DENVER INTL", "2026-05-18 18:01", "80.0"),
@@ -916,18 +916,19 @@ def _two_day_csv() -> str:
             ("DEN", "DENVER INTL", "2026-05-19 18:01", "65.0"),
         ]
     )
-
-
-_TWO_DAY_ACIS = {date(2026, 5, 18): "80", date(2026, 5, 19): "65"}
-
-
-async def _compare_two_days(min_coverage_minutes: int | None) -> list[BasisCompareRow]:
-    transport = _iem_route_transport(_two_day_csv(), _TWO_DAY_ACIS)
+    acis = {date(2026, 5, 18): "80", date(2026, 5, 19): "65"}
+    transport = _iem_route_transport(csv, acis)
     async with httpx.AsyncClient(transport=transport) as http:
         acis_client = ACISClient(http_client=http)
-        kwargs = (
-            {} if min_coverage_minutes is None else {"min_coverage_minutes": min_coverage_minutes}
-        )
+        if min_coverage_minutes is None:
+            return await compare_basis(
+                "KDEN",
+                date(2026, 5, 18),
+                date(2026, 5, 19),
+                acis_client,
+                None,
+                http_client=http,
+            )
         return await compare_basis(
             "KDEN",
             date(2026, 5, 18),
@@ -935,7 +936,7 @@ async def _compare_two_days(min_coverage_minutes: int | None) -> list[BasisCompa
             acis_client,
             None,
             http_client=http,
-            **kwargs,
+            min_coverage_minutes=min_coverage_minutes,
         )
 
 
@@ -979,7 +980,7 @@ async def test_min_coverage_floor_is_inclusive() -> None:
     assert dropped == []
 
 
-async def test_min_coverage_counts_distinct_minutes_not_rows() -> None:
+async def _compare_duplicated_minutes(min_coverage_minutes: int) -> list[BasisCompareRow]:
     csv = _iem_1min_csv(
         [
             ("DEN", "DENVER INTL", "2026-05-18 18:00", "70.0"),
@@ -991,14 +992,20 @@ async def test_min_coverage_counts_distinct_minutes_not_rows() -> None:
     transport = _iem_route_transport(csv, {date(2026, 5, 18): "80"})
     async with httpx.AsyncClient(transport=transport) as http:
         acis_client = ACISClient(http_client=http)
-        rows = await compare_basis(
+        return await compare_basis(
             "KDEN",
             date(2026, 5, 18),
             date(2026, 5, 18),
             acis_client,
             None,
             http_client=http,
-            min_coverage_minutes=3,
+            min_coverage_minutes=min_coverage_minutes,
         )
 
-    assert rows == []
+
+async def test_min_coverage_counts_distinct_minutes_not_rows() -> None:
+    kept = await _compare_duplicated_minutes(2)
+
+    assert await _compare_duplicated_minutes(3) == []
+    assert [r.observation_day for r in kept] == [date(2026, 5, 18)]
+    assert kept[0].observed_f == Decimal("80.0")

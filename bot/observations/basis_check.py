@@ -141,8 +141,7 @@ def summarize_basis(rows: list[BasisCompareRow]) -> list[BasisSummary]:
         by_group.setdefault((row.station, row.extreme), []).append(row)
 
     out: list[BasisSummary] = []
-    for station, extreme in sorted(by_group):
-        group = by_group[(station, extreme)]
+    for (station, extreme), group in sorted(by_group.items()):
         deltas = sorted(r.delta_f for r in group)
         n = len(group)
         invalid_count = sum(1 for r in group if not r.basis_valid)
