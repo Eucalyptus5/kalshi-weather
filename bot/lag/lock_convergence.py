@@ -330,7 +330,7 @@ def in_band(mid: int | None, side_locked: str) -> bool:
 # it, and an entry counts only when every state it takes through the persistence window holds.
 def converged(
     stamps: Sequence[datetime],
-    mids: Sequence[Decimal | None],
+    mids: Sequence[int | None],
     *,
     side_locked: str,
     t_lock: datetime,
