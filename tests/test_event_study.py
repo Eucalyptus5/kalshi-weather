@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from datetime import timezone as _timezone
 from decimal import Decimal
@@ -46,12 +47,19 @@ def _snap(
     t: datetime,
     yes_bid: Decimal | str,
     yes_ask: Decimal | str,
+    *,
+    yes_bid_depth: int = 50,
+    no_bid_depth: int = 50,
 ) -> OrderbookSnapshotRow:
+    ask = Decimal(str(yes_ask))
     return OrderbookSnapshotRow(
         ticker=ticker,
         snapshot_at=t,
         yes_bid=Decimal(str(yes_bid)),
-        yes_ask=Decimal(str(yes_ask)),
+        yes_ask=ask,
+        no_bid=Decimal("1") - ask,
+        yes_bid_depth=yes_bid_depth,
+        no_bid_depth=no_bid_depth,
     )
 
 
@@ -496,3 +504,40 @@ def test_sub_second_cadence_clears_the_snapshot_floor_flag() -> None:
 
     assert b.cadence_s == 0
     assert b.snapshot_unreliable is False
+
+
+def test_an_empty_no_book_is_not_a_reprice() -> None:
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ev = _event("KXHIGHDEN-26JUN17-T85", t0=t0)
+    snaps = [
+        OrderbookSnapshotRow(
+            ticker="KXHIGHDEN-26JUN17-T85",
+            snapshot_at=t0 + timedelta(seconds=30),
+            yes_bid=Decimal("0.90"),
+            yes_ask=Decimal("1.00"),
+            no_bid=Decimal("0"),
+            yes_bid_depth=40,
+            no_bid_depth=0,
+        )
+    ]
+
+    report = study_lag([ev], snaps)
+
+    assert report.raw[0].median_lag_s is None
+    assert report.raw[0].never_repriced_n == 1
+
+
+def test_a_snapshot_without_a_no_bid_is_skipped_and_counted() -> None:
+    t0 = datetime(2026, 6, 17, 20, 0, tzinfo=UTC)
+    ticker = "KXHIGHDEN-26JUN17-T85"
+    ev = _event(ticker, t0=t0)
+    snaps = [
+        replace(_snap(ticker, t0 + timedelta(seconds=30), "0.94", "0.96"), no_bid=None),
+        _snap(ticker, t0 + timedelta(seconds=60), "0.94", "0.96"),
+    ]
+
+    report = study_lag([ev], snaps)
+
+    assert report.raw[0].no_mid_n == 1
+    assert report.raw[0].median_lag_s == 60
+    assert report.raw_pooled.no_mid_n == 1

@@ -833,3 +833,22 @@ def test_gap_lookup_seeks_its_index(db) -> None:
 
     assert "SEARCH ws_gaps USING INDEX ix_ws_gaps_ticker_detected_at" in plan
     assert "SCAN" not in plan, plan
+
+
+def test_an_empty_no_book_is_not_a_band_crossing(db) -> None:
+    path, factory = db
+    _snapshot(factory, received_at=T0, seq=10, yes=[("0.900000", "30")], no=[("0.050000", "40")])
+    _delta(
+        factory,
+        received_at=T0 + timedelta(seconds=40),
+        seq=11,
+        side="no",
+        price="0.050000",
+        delta="-40",
+    )
+
+    with open_book_db(path) as conn:
+        probe = probe_event(conn, TICKER, T0, "yes", decision_offsets_s=OFFSETS)
+
+    assert probe is not None
+    assert probe.lag_s is None

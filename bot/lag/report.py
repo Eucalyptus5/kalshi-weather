@@ -145,7 +145,7 @@ def _format_buckets(buckets: list[LagBucket]) -> list[str]:
             f"  {b.series}  n={b.n}  median_lag_s={_int_or_na(b.median_lag_s)}  "
             f"p25_lag_s={_int_or_na(b.p25_lag_s)}  p90_lag_s={_int_or_na(b.p90_lag_s)}  "
             f"cadence_s={_int_or_na(b.cadence_s)}  never_repriced_n={b.never_repriced_n}  "
-            f"mislock_n={b.mislock_n}  "
+            f"no_mid_n={b.no_mid_n}  mislock_n={b.mislock_n}  "
             f"mislock_rate={b.mislock_rate.quantize(_RATE_Q)}{annot}"
         )
     return out

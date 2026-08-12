@@ -37,6 +37,7 @@ from bot.lag.depth_map import (
 )
 from bot.lag.fee_floor import MAKER_RATE_SOURCE, PUBLISHED_MAKER_RATE
 from bot.lag.ladder_consistency import PRICE_TICKS, SIZE_UNITS
+from bot.lag.mid import mid2_array, two_sided_array
 from bot.lag.read_rtt import FloorSource, LatencyFloor
 from bot.lag.run_manifest import MANIFEST_NAME, write_manifest
 from bot.lag.tape_studies import (
@@ -376,13 +377,17 @@ def _sweep_file(
         rows = np.flatnonzero(seat_of_row == index)
         stamps = times[rows]
         quoted = (
-            (yes_sizes[rows, 0] > 0)
-            & (no_sizes[rows, 0] > 0)
+            two_sided_array(
+                yes_prices[rows, 0],
+                no_prices[rows, 0],
+                yes_depth=yes_sizes[rows, 0],
+                no_depth=no_sizes[rows, 0],
+            )
             & (stamps >= plan.day_start_us)
             & (stamps <= plan.day_end_us)
         )
         if quoted.any():
-            mid2 = yes_prices[rows, 0] + PRICE_TICKS - no_prices[rows, 0]
+            mid2 = mid2_array(yes_prices[rows, 0], no_prices[rows, 0])
             root.quotes.setdefault(ticker, []).append(mid2[quoted].astype(np.int32))
 
         held = rows[_last_at_each(stamps)]

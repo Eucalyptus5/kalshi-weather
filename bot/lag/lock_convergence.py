@@ -15,8 +15,10 @@ from bot.lag.fee_floor import (
     PUBLISHED_MAKER_RATE,
     published_taker_fee,
 )
+from bot.lag.ladder_consistency import PRICE_TICKS, SIZE_UNITS
 from bot.lag.ladder_run import census
 from bot.lag.lock_events import NO, YES, LockEvent, detect_lock_events, is_low_ladder
+from bot.lag.mid import mid2, ticks, two_sided
 from bot.lag.read_rtt import FloorSource
 from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME, write_manifest
 from bot.lag.tape_stats import (
@@ -52,6 +54,7 @@ from bot.replay.run_scope import DISCOVERY, HOLDOUT, EventDay
 logger = logging.getLogger(__name__)
 
 LOCK_BAND = Decimal("0.95")
+_LOCK_BAND2 = 2 * ticks(LOCK_BAND)
 PERSIST_S = 60
 HALF_LIFE_THRESHOLD_S = Decimal(120)
 STATION_DAY_MIN = 20
@@ -88,7 +91,6 @@ LENGTH_BIAS = (
     "counts are surfaced and no correction is applied"
 )
 
-_ONE = Decimal(1)
 _PERSIST = timedelta(seconds=PERSIST_S)
 _MICROSECOND = timedelta(microseconds=1)
 _MICROS_PER_S = Decimal(1_000_000)
@@ -289,13 +291,10 @@ def scan_locks(
     )
 
 
-# yes_ask is stored as one minus the NO bid, so an empty NO book prices the ask at 1.00 against no
-# size at all. A mid taken there reads as locked the instant the losing side's book empties, which
-# is exactly what a lock causes, so both sides must carry depth before the mid means anything.
-def book_states(table: pa.Table, ticker: str) -> tuple[list[datetime], list[Decimal | None], int]:
+def book_states(table: pa.Table, ticker: str) -> tuple[list[datetime], list[int | None], int]:
     rows = table.filter(pc.equal(table.column("ticker"), ticker))
     stamps = rows.column("received_at").to_pylist()
-    mids: list[Decimal | None] = []
+    mids: list[int | None] = []
     one_sided = 0
     for bid, bid_depth, ask, ask_depth in zip(
         rows.column("yes_bid").to_pylist(),
@@ -304,20 +303,27 @@ def book_states(table: pa.Table, ticker: str) -> tuple[list[datetime], list[Deci
         rows.column("yes_ask_depth").to_pylist(),
         strict=True,
     ):
-        if Decimal(bid_depth) <= 0 or Decimal(ask_depth) <= 0:
+        yes_bid = ticks(Decimal(bid))
+        no_bid = PRICE_TICKS - ticks(Decimal(ask))
+        if not two_sided(
+            yes_bid,
+            no_bid,
+            yes_depth=int(Decimal(bid_depth) * SIZE_UNITS),
+            no_depth=int(Decimal(ask_depth) * SIZE_UNITS),
+        ):
             mids.append(None)
             one_sided += 1
             continue
-        mids.append((Decimal(bid) + Decimal(ask)) / 2)
+        mids.append(mid2(yes_bid, no_bid))
     return stamps, mids, one_sided
 
 
-def in_band(mid: Decimal | None, side_locked: str) -> bool:
+def in_band(mid: int | None, side_locked: str) -> bool:
     if mid is None:
         return False
     if side_locked == YES:
-        return mid >= LOCK_BAND
-    return mid <= _ONE - LOCK_BAND
+        return mid >= _LOCK_BAND2
+    return mid <= 2 * PRICE_TICKS - _LOCK_BAND2
 
 
 # The book is a step function, so it can only enter the band at the lock itself or at a row after

@@ -41,6 +41,7 @@ from bot.lag.lock_convergence import (
     sweep_convergence,
 )
 from bot.lag.lock_events import LockEvent, detect_lock_events
+from bot.lag.mid import ticks
 from bot.lag.r0_universe import Coverage, freeze_universe, write_universe
 from bot.lag.read_rtt import FloorSource
 from bot.lag.run_manifest import MANIFEST_NAME
@@ -724,7 +725,7 @@ def test_a_discovery_split_under_the_minimum_is_underpowered_even_carrying_an_es
 
 def test_the_convergence_instant_is_the_first_durable_entry_into_the_band() -> None:
     stamps = [at(17, 59), at(18, 0, 30), at(18, 1)]
-    mids = [Decimal("0.96"), Decimal("0.60"), Decimal("0.96")]
+    mids = [2 * ticks(Decimal("0.96")), 2 * ticks(Decimal("0.60")), 2 * ticks(Decimal("0.96"))]
 
     found = converged(stamps, mids, side_locked="yes", t_lock=LOCK_AT, window_end=WINDOW_END)
 

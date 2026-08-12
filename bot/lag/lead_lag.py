@@ -9,6 +9,7 @@ import pyarrow as pa
 
 from bot.lag.fee_floor import published_taker_fee
 from bot.lag.ladder_consistency import PRICE_TICKS
+from bot.lag.mid import mid2_array, two_sided_array
 
 
 # The smallest whole-cent move that clears a round trip at mid with a tick to spare:
@@ -155,10 +156,8 @@ def atm_series(
     received_us = table.column("received_at").cast(pa.int64()).to_numpy()
     yes_bid = _tick_column(table, "yes_bid")
     no_bid = _tick_column(table, "no_bid")
-    mid2 = yes_bid + PRICE_TICKS - no_bid
-    # The pass stores yes_ask as 1 - no_bid, so an empty NO book reads back as a live-looking 1.00
-    # at zero depth and a book empty on both sides reads as a mid of exactly 0.5 by construction.
-    two_sided = (yes_bid > 0) & (no_bid > 0)
+    mid2 = mid2_array(yes_bid, no_bid)
+    two_sided = two_sided_array(yes_bid, no_bid)
 
     inside = (received_us >= _micros(window_start)) & (received_us <= _micros(window_end))
     quoted = inside & two_sided

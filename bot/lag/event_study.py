@@ -6,6 +6,7 @@ from decimal import Decimal, ROUND_HALF_EVEN
 from typing import Mapping
 
 from bot.lag.lock_events import LockEvent
+from bot.lag.mid import mid2, ticks, two_sided
 from bot.markets.parser import series_id
 
 
@@ -13,7 +14,8 @@ POOLED = "POOLED"
 
 YES_BAND = Decimal("0.95")
 NO_BAND = Decimal("0.05")
-_TWO = Decimal(2)
+YES_BAND2 = 2 * ticks(YES_BAND)
+NO_BAND2 = 2 * ticks(NO_BAND)
 _FLOOR_FACTOR = Decimal("1.5")
 
 
@@ -40,6 +42,7 @@ class LagBucket:
     p90_lag_s: int | None
     cadence_s: int | None
     never_repriced_n: int
+    no_mid_n: int
     mislock_n: int
     mislock_rate: Decimal
     snapshot_unreliable: bool
@@ -57,6 +60,7 @@ class LagReport:
 class EventProbe:
     lag_s: int | None
     cadence_s: int | None
+    no_mid_n: int = 0
 
 
 def study_lag(
@@ -72,13 +76,15 @@ def study_lag(
     for rows in by_ticker.values():
         rows.sort(key=lambda r: r.snapshot_at)
 
-    probes = {
-        (ev.ticker, ev.t0): EventProbe(
-            lag_s=_event_lag(ev, by_ticker.get(ev.ticker, []), day_window_seconds),
-            cadence_s=_event_cadence(ev, by_ticker.get(ev.ticker, [])),
+    probes: dict[tuple[str, datetime], EventProbe] = {}
+    for ev in events:
+        ticker_snaps = by_ticker.get(ev.ticker, [])
+        lag_s, no_mid_n = _event_lag(ev, ticker_snaps, day_window_seconds)
+        probes[(ev.ticker, ev.t0)] = EventProbe(
+            lag_s=lag_s,
+            cadence_s=_event_cadence(ev, ticker_snaps),
+            no_mid_n=no_mid_n,
         )
-        for ev in events
-    }
     return study_lag_from_probes(events, probes, settle_by_event=settle_by_event)
 
 
@@ -123,9 +129,11 @@ def _bucket(
     lags: list[int | None] = []
     cadences: list[int] = []
     mislock_n = 0
+    no_mid_n = 0
     for ev in events:
         probe = probes[(ev.ticker, ev.t0)]
         lags.append(probe.lag_s)
+        no_mid_n += probe.no_mid_n
         if probe.cadence_s is not None:
             cadences.append(probe.cadence_s)
         if _is_mislock(ev, settle_by_event):
@@ -149,6 +157,7 @@ def _bucket(
         p90_lag_s=_quantile(non_none, Decimal("0.9")),
         cadence_s=bucket_cadence,
         never_repriced_n=sum(1 for v in lags if v is None),
+        no_mid_n=no_mid_n,
         mislock_n=mislock_n,
         mislock_rate=Decimal(mislock_n) / Decimal(max(1, n)),
         snapshot_unreliable=bool(unreliable),
@@ -159,19 +168,27 @@ def _event_lag(
     ev: LockEvent,
     ticker_snaps: list[OrderbookSnapshotRow],
     day_window_seconds: int,
-) -> int | None:
+) -> tuple[int | None, int]:
+    no_mid_n = 0
     for snap in ticker_snaps:
         delta = (snap.snapshot_at - ev.t0).total_seconds()
         if delta <= 0:
             continue
         if delta > day_window_seconds:
             break
-        mid = (snap.yes_bid + snap.yes_ask) / _TWO
-        if ev.side_locked == "yes" and mid >= YES_BAND:
-            return int(delta)
-        if ev.side_locked == "no" and mid <= NO_BAND:
-            return int(delta)
-    return None
+        if snap.no_bid is None:
+            no_mid_n += 1
+            continue
+        yes_bid = ticks(snap.yes_bid)
+        no_bid = ticks(snap.no_bid)
+        if not two_sided(yes_bid, no_bid, yes_depth=snap.yes_bid_depth, no_depth=snap.no_bid_depth):
+            continue
+        mid = mid2(yes_bid, no_bid)
+        if ev.side_locked == "yes" and mid >= YES_BAND2:
+            return int(delta), no_mid_n
+        if ev.side_locked == "no" and mid <= NO_BAND2:
+            return int(delta), no_mid_n
+    return None, no_mid_n
 
 
 def _event_cadence(ev: LockEvent, ticker_snaps: list[OrderbookSnapshotRow]) -> int | None:

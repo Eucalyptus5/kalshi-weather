@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from bot.lag.fee_floor import published_taker_fee
+from bot.lag.mid import mid2_array, two_sided_array
 from bot.lag.tape_stats import ClusterAggregate
 from bot.replay.ladder import _SIZE_EXPONENT, _quantized
 
@@ -149,11 +150,8 @@ def build_ticker_book(ticker: str, table: pa.Table) -> TickerBook:
         ticker=ticker,
         received_us=table.column("received_at").cast(pa.int64()).to_numpy(),
         ts_ms=ts_ms,
-        # Doubling keeps every intermediate exact in int64; the caller halves at the end.
-        mid2=yes_bid + PRICE_TICKS - no_bid,
-        # A zero price is _best reporting an empty side, not a one-tick market, and a book empty
-        # on both sides would otherwise read as a mid of exactly 0.5 by construction.
-        two_sided=(yes_bid > 0) & (no_bid > 0),
+        mid2=mid2_array(yes_bid, no_bid),
+        two_sided=two_sided_array(yes_bid, no_bid),
         delta_rows=delta_rows,
         delta_ts=delta_ts,
         snapshots_before=np.concatenate(([0], np.cumsum(~is_delta, dtype=np.int64))),

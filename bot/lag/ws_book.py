@@ -8,10 +8,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Iterable, Iterator, Literal, Sequence
 
-from bot.lag.event_study import NO_BAND, YES_BAND, OrderbookSnapshotRow, median_int
-
-
-_TWO = Decimal(2)
+from bot.lag.event_study import NO_BAND2, YES_BAND2, OrderbookSnapshotRow, median_int
+from bot.lag.mid import mid2, ticks, two_sided
 
 
 class WsGapError(ValueError):
@@ -224,12 +222,16 @@ def _apply_one(
 
 
 def _in_band(book: dict[str, dict[Decimal, Decimal]], side_locked: str) -> bool:
-    yes_bid, _ = _best(book["yes"])
-    no_bid, _ = _best(book["no"])
-    mid = (yes_bid + Decimal("1") - no_bid) / _TWO
+    yes_bid, yes_depth = _best(book["yes"])
+    no_bid, no_depth = _best(book["no"])
+    yes_ticks = ticks(yes_bid)
+    no_ticks = ticks(no_bid)
+    if not two_sided(yes_ticks, no_ticks, yes_depth=yes_depth, no_depth=no_depth):
+        return False
+    mid = mid2(yes_ticks, no_ticks)
     if side_locked == "yes":
-        return mid >= YES_BAND
-    return mid <= NO_BAND
+        return mid >= YES_BAND2
+    return mid <= NO_BAND2
 
 
 def _cadence(arrivals: list[datetime]) -> int | None:
