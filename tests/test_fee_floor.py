@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from decimal import Decimal
 
 import pytest
@@ -19,11 +20,15 @@ from bot.lag.fee_floor import (
     published_taker_fee,
     quantum_is_corrected,
 )
+from bot.lag.maker_headroom import PRICE_GRID
 
 
 FOUR_DP = Decimal("0.0001")
 HALF = Decimal("0.50")
 BAR_SIZE = Decimal("26")
+STATED_REGIME = ("maker_rate", "maker_rate_source")
+ZERO_RATE = Decimal("0")
+ZERO_RATE_SOURCE = "kalshi_series_metadata"
 
 
 def _per_contract_cents(contracts: Decimal, price: Decimal, rate: Decimal) -> Decimal:
@@ -172,7 +177,7 @@ def test_published_rate_is_the_schedule_rate() -> None:
 
 
 def test_fee_source_names_the_published_formula_not_the_execution_module() -> None:
-    source = fee_source()
+    source = fee_source(maker_rate=PUBLISHED_MAKER_RATE, maker_rate_source=MAKER_RATE_SOURCE)
 
     assert isinstance(source, FeeSource)
     assert source.threshold_source == "published_formula"
@@ -180,7 +185,7 @@ def test_fee_source_names_the_published_formula_not_the_execution_module() -> No
 
 
 def test_fee_source_reads_the_live_module_quantum_as_corrected() -> None:
-    source = fee_source()
+    source = fee_source(maker_rate=PUBLISHED_MAKER_RATE, maker_rate_source=MAKER_RATE_SOURCE)
 
     assert source.fee_module_quantum == FEE_QUANTUM
     assert source.fee_module_quantum == CENT
@@ -191,7 +196,7 @@ def test_fee_source_follows_the_module_quantum_back_to_uncorrected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(fees, "FEE_QUANTUM", Decimal("0.000001"))
-    source = fee_source()
+    source = fee_source(maker_rate=PUBLISHED_MAKER_RATE, maker_rate_source=MAKER_RATE_SOURCE)
 
     assert source.fee_module_quantum == Decimal("0.000001")
     assert source.fee_module_corrected is False
@@ -213,11 +218,41 @@ def test_correction_predicate_is_decided_by_the_quantum(quantum: Decimal, correc
 
 
 def test_fee_source_carries_the_published_maker_rate_and_its_provenance() -> None:
-    source = fee_source()
+    source = fee_source(maker_rate=PUBLISHED_MAKER_RATE, maker_rate_source=MAKER_RATE_SOURCE)
 
     assert source.maker_rate == PUBLISHED_MAKER_RATE
     assert source.maker_rate == Decimal("0.0175")
     assert source.maker_rate_source == MAKER_RATE_SOURCE
+
+
+def test_fee_source_carries_a_stated_zero_regime_instead_of_the_published_one() -> None:
+    source = fee_source(maker_rate=ZERO_RATE, maker_rate_source=ZERO_RATE_SOURCE)
+
+    assert source.maker_rate == ZERO_RATE
+    assert source.maker_rate_source == ZERO_RATE_SOURCE
+    assert PUBLISHED_MAKER_RATE == Decimal("0.0175")
+
+
+def test_fee_source_states_no_default_regime() -> None:
+    parameters = inspect.signature(fee_source).parameters
+
+    assert tuple(parameters) == STATED_REGIME
+    for name in STATED_REGIME:
+        assert parameters[name].default is inspect.Parameter.empty
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_fee_source_refuses_to_price_a_run_that_states_no_regime() -> None:
+    with pytest.raises(TypeError, match="maker_rate"):
+        fee_source()
+
+
+@pytest.mark.parametrize("price", PRICE_GRID)
+def test_a_zero_maker_regime_charges_nothing_across_the_grid(price: Decimal) -> None:
+    fee = published_maker_fee(BAR_SIZE, price, ZERO_RATE)
+
+    assert fee == Decimal("0.00")
+    assert fee.as_tuple().exponent == -2
 
 
 @pytest.mark.parametrize(

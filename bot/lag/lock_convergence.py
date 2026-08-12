@@ -10,7 +10,11 @@ from statistics import median
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from bot.lag.fee_floor import published_taker_fee
+from bot.lag.fee_floor import (
+    MAKER_RATE_SOURCE as PUBLISHED_MAKER_RATE_SOURCE,
+    PUBLISHED_MAKER_RATE,
+    published_taker_fee,
+)
 from bot.lag.ladder_run import census
 from bot.lag.lock_events import NO, YES, LockEvent, detect_lock_events, is_low_ladder
 from bot.lag.read_rtt import FloorSource
@@ -56,6 +60,8 @@ ROUNDING_MARGIN_F = Decimal("1.0")
 ECONOMIC_BAR_SIZE: Decimal = Decimal("26")
 ECONOMIC_BAR_PRICE: Decimal = Decimal("0.50")
 ECONOMIC_BAR_PRICE_SOURCE = "preregistration"
+MAKER_RATE: Decimal = PUBLISHED_MAKER_RATE
+MAKER_RATE_SOURCE = PUBLISHED_MAKER_RATE_SOURCE
 
 DIRECTION = "greater"
 STATION_DAYS = "station event-days"
@@ -619,6 +625,8 @@ def execute(
     settles: Mapping[tuple[str, date], Decimal],
     rtt_samples: Path,
     floor_source: FloorSource,
+    maker_rate: Decimal,
+    maker_rate_source: str,
     economic_bar_size: Decimal,
     economic_bar_price: Decimal,
     economic_bar_price_source: str,
@@ -634,6 +642,8 @@ def execute(
         artifacts=artifacts,
         rtt_samples=rtt_samples,
         floor_source=floor_source,
+        maker_rate=maker_rate,
+        maker_rate_source=maker_rate_source,
         economic_bar_size=economic_bar_size,
         economic_bar_price=economic_bar_price,
         economic_bar_price_source=economic_bar_price_source,

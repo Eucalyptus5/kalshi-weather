@@ -11,6 +11,10 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from bot.lag.fee_floor import (
+    MAKER_RATE_SOURCE as PUBLISHED_MAKER_RATE_SOURCE,
+    PUBLISHED_MAKER_RATE,
+)
 from bot.lag.read_rtt import FloorSource
 from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME, write_manifest
 from bot.lag.taker_flow import (
@@ -73,6 +77,8 @@ NULL_VALUE = Decimal("0")
 ECONOMIC_BAR_SIZE: Decimal = Decimal("26")
 ECONOMIC_BAR_PRICE: Decimal = Decimal("0.50")
 ECONOMIC_BAR_PRICE_SOURCE = "preregistration"
+MAKER_RATE: Decimal = PUBLISHED_MAKER_RATE
+MAKER_RATE_SOURCE = PUBLISHED_MAKER_RATE_SOURCE
 DIRECTION = "greater"
 TICKERS = "tickers"
 
@@ -430,6 +436,8 @@ def execute(
     artifacts: Path,
     rtt_samples: Path,
     floor_source: FloorSource,
+    maker_rate: Decimal,
+    maker_rate_source: str,
     economic_bar_size: Decimal,
     economic_bar_price: Decimal,
     economic_bar_price_source: str,
@@ -445,6 +453,8 @@ def execute(
         artifacts=artifacts,
         rtt_samples=rtt_samples,
         floor_source=floor_source,
+        maker_rate=maker_rate,
+        maker_rate_source=maker_rate_source,
         economic_bar_size=economic_bar_size,
         economic_bar_price=economic_bar_price,
         economic_bar_price_source=economic_bar_price_source,

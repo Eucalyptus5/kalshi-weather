@@ -14,7 +14,12 @@ import pyarrow.parquet as pq
 import pytest
 
 from bot.lag import ladder_run, lock_convergence, taker_flow_run
-from bot.lag.fee_floor import economic_bar_cents_per_contract, fee_source
+from bot.lag.fee_floor import (
+    MAKER_RATE_SOURCE,
+    PUBLISHED_MAKER_RATE,
+    economic_bar_cents_per_contract,
+    fee_source,
+)
 from bot.lag.r0_universe import (
     DISAGREE,
     LOCK_CARVE_OUT,
@@ -153,6 +158,7 @@ FAMILY_SCRIPTS = family_scripts()
 
 STATED_BAR = ("economic_bar_size", "economic_bar_price", "economic_bar_price_source")
 DERIVED_BAR = "economic_bar_cents_per_contract"
+STATED_REGIME = ("maker_rate", "maker_rate_source")
 
 
 def argument_flags(source: str) -> set[str]:
@@ -479,6 +485,8 @@ def assemble(paths: dict[str, Path], cohort: str | None = None) -> RunInputs:
     return assemble_run_inputs(
         run_id=RUN_ID,
         floor_source=FloorSource.SIGNED_READ,
+        maker_rate=PUBLISHED_MAKER_RATE,
+        maker_rate_source=MAKER_RATE_SOURCE,
         economic_bar_size=SELF_CHARGED_BAR,
         economic_bar_price=SELF_CHARGED_BAR,
         economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
@@ -1093,7 +1101,9 @@ def test_the_assembled_inputs_carry_every_field_the_manifest_names(paths: dict[s
     manifest = build_manifest(inputs)
     assert manifest.run_id == RUN_ID
     assert manifest.preregistration == paths["preregistration"]
-    assert manifest.fee == fee_source()
+    assert manifest.fee == fee_source(
+        maker_rate=PUBLISHED_MAKER_RATE, maker_rate_source=MAKER_RATE_SOURCE
+    )
     assert manifest.floor.source is FloorSource.SIGNED_READ
     assert manifest.floor.n_usable == ADEQUATE_SAMPLES
     assert manifest.bootstrap_seed == SEED
@@ -1201,15 +1211,30 @@ def test_the_universe_the_manifest_records_is_the_frozen_one(paths: dict[str, Pa
     assert manifest_payload(build_manifest(inputs))["r0_universe_sha256"] == stored
 
 
-def test_the_assembler_states_no_default_bar(paths: dict[str, Path]) -> None:
+def test_the_assembler_states_no_default_bar_or_regime(paths: dict[str, Path]) -> None:
     parameters = inspect.signature(assemble_run_inputs).parameters
 
-    for name in STATED_BAR:
+    for name in (*STATED_BAR, *STATED_REGIME):
         assert parameters[name].default is inspect.Parameter.empty
         assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
     with pytest.raises(TypeError, match="economic_bar_size"):
         assemble_run_inputs(
-            run_id=RUN_ID, floor_source=FloorSource.SIGNED_READ, bootstrap_seed=SEED, **paths
+            run_id=RUN_ID,
+            floor_source=FloorSource.SIGNED_READ,
+            maker_rate=PUBLISHED_MAKER_RATE,
+            maker_rate_source=MAKER_RATE_SOURCE,
+            bootstrap_seed=SEED,
+            **paths,
+        )
+    with pytest.raises(TypeError, match="maker_rate"):
+        assemble_run_inputs(
+            run_id=RUN_ID,
+            floor_source=FloorSource.SIGNED_READ,
+            economic_bar_size=SELF_CHARGED_BAR,
+            economic_bar_price=SELF_CHARGED_BAR,
+            economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
+            bootstrap_seed=SEED,
+            **paths,
         )
 
 
@@ -1228,20 +1253,24 @@ def test_an_ungated_study_states_a_zero_bar_and_still_writes_its_manifest(
 
 
 @pytest.mark.parametrize("module", [ladder_run, lock_convergence, taker_flow_run])
-def test_every_gated_family_states_the_bar_it_is_read_under(module: ModuleType) -> None:
+def test_every_gated_family_states_the_bar_and_regime_it_is_read_under(module: ModuleType) -> None:
     bar = economic_bar_cents_per_contract(module.ECONOMIC_BAR_SIZE, module.ECONOMIC_BAR_PRICE)
 
     assert module.ECONOMIC_BAR_SIZE == Decimal("26")
     assert module.ECONOMIC_BAR_PRICE == Decimal("0.50")
     assert module.ECONOMIC_BAR_PRICE_SOURCE == "preregistration"
     assert bar.quantize(Decimal("0.0001")) == Decimal("2.7692")
+    assert module.MAKER_RATE == PUBLISHED_MAKER_RATE
+    assert module.MAKER_RATE_SOURCE == MAKER_RATE_SOURCE
 
 
 @pytest.mark.parametrize("module", [ladder_run, lock_convergence, taker_flow_run])
-def test_a_gated_family_will_not_run_without_the_bar_it_is_read_under(module: ModuleType) -> None:
+def test_a_gated_family_will_not_run_without_the_bar_and_regime_it_is_read_under(
+    module: ModuleType,
+) -> None:
     parameters = inspect.signature(module.execute).parameters
 
-    for name in STATED_BAR:
+    for name in (*STATED_BAR, *STATED_REGIME):
         assert parameters[name].default is inspect.Parameter.empty
         assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
 
@@ -1252,9 +1281,10 @@ def test_every_known_family_script_is_discovered() -> None:
 
 
 @pytest.mark.parametrize("name", FAMILY_SCRIPTS)
-def test_no_family_script_takes_the_bar_off_the_command_line(name: str) -> None:
+def test_no_family_script_takes_the_bar_or_the_regime_off_the_command_line(name: str) -> None:
     flags = argument_flags((SCRIPTS / name).read_text())
 
     assert flags
-    assert flags.isdisjoint({*STATED_BAR, DERIVED_BAR})
+    assert flags.isdisjoint({*STATED_BAR, DERIVED_BAR, *STATED_REGIME})
     assert [flag for flag in flags if "bar" in flag] == []
+    assert [flag for flag in flags if "rate" in flag] == []

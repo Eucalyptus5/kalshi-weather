@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pyarrow.compute as pc
 
+from bot.lag.fee_floor import MAKER_RATE_SOURCE, PUBLISHED_MAKER_RATE
 from bot.lag.lock_events import detect_lock_events
 from bot.lag.read_rtt import FloorSource
 from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME, write_manifest
@@ -183,6 +184,8 @@ def execute(
         artifacts=artifacts,
         rtt_samples=rtt_samples,
         floor_source=floor_source,
+        maker_rate=PUBLISHED_MAKER_RATE,
+        maker_rate_source=MAKER_RATE_SOURCE,
         economic_bar_size=SELF_CHARGED_BAR,
         economic_bar_price=SELF_CHARGED_BAR,
         economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,

@@ -52,12 +52,12 @@ def quantum_is_corrected(quantum: Decimal) -> bool:
     return quantum == CENT
 
 
-def fee_source() -> FeeSource:
+def fee_source(*, maker_rate: Decimal, maker_rate_source: str) -> FeeSource:
     return FeeSource(
         threshold_source=THRESHOLD_SOURCE,
         fee_module=FEE_MODULE,
         fee_module_quantum=fees.FEE_QUANTUM,
         fee_module_corrected=quantum_is_corrected(fees.FEE_QUANTUM),
-        maker_rate=PUBLISHED_MAKER_RATE,
-        maker_rate_source=MAKER_RATE_SOURCE,
+        maker_rate=maker_rate,
+        maker_rate_source=maker_rate_source,
     )

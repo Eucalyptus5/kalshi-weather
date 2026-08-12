@@ -35,6 +35,7 @@ from bot.lag.depth_map import (
     walk_capacity,
     weighted_quantile,
 )
+from bot.lag.fee_floor import MAKER_RATE_SOURCE, PUBLISHED_MAKER_RATE
 from bot.lag.ladder_consistency import PRICE_TICKS, SIZE_UNITS
 from bot.lag.read_rtt import FloorSource, LatencyFloor
 from bot.lag.run_manifest import MANIFEST_NAME, write_manifest
@@ -798,6 +799,8 @@ def execute(
         artifacts=artifacts,
         rtt_samples=rtt_samples,
         floor_source=floor_source,
+        maker_rate=PUBLISHED_MAKER_RATE,
+        maker_rate_source=MAKER_RATE_SOURCE,
         economic_bar_size=SELF_CHARGED_BAR,
         economic_bar_price=SELF_CHARGED_BAR,
         economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,

@@ -57,6 +57,8 @@ FOUR_DP = Decimal("0.0001")
 BAR_SIZE = Decimal("26")
 BAR_PRICE = Decimal("0.50")
 BAR_PRICE_SOURCE = "preregistration"
+ZERO_RATE = Decimal("0")
+ZERO_RATE_SOURCE = "kalshi_series_metadata"
 NO_TAPE = "the statistic reads no ws tape"
 NO_READS = "the statistic places no read against the api"
 FLOOR_KEYS = (
@@ -172,7 +174,7 @@ def complete(preregistration: Path, repo: Path) -> RunInputs:
         accrual_end=ACCRUAL_END,
         row_counts=dict(ROW_COUNTS),
         universe=_universe(),
-        fee=fee_source(),
+        fee=fee_source(maker_rate=PUBLISHED_MAKER_RATE, maker_rate_source=MAKER_RATE_SOURCE),
         floor=derive_latency_floor(_adequate_samples(), FloorSource.SIGNED_READ),
         economic_bar_size=BAR_SIZE,
         economic_bar_price=BAR_PRICE,
@@ -562,7 +564,9 @@ def test_a_loosened_r0_threshold_moves_the_recorded_digest(complete: RunInputs) 
 
 
 def test_a_corrected_fee_module_is_recorded_as_corrected(complete: RunInputs) -> None:
-    payload = manifest_payload(build_manifest(replace(complete, fee=fee_source())))
+    source = fee_source(maker_rate=PUBLISHED_MAKER_RATE, maker_rate_source=MAKER_RATE_SOURCE)
+
+    payload = manifest_payload(build_manifest(replace(complete, fee=source)))
 
     assert payload["fee_module_quantum"] == "0.01"
     assert payload["fee_module_corrected"] is True
@@ -572,8 +576,9 @@ def test_an_uncorrected_fee_module_is_recorded_as_uncorrected(
     monkeypatch: pytest.MonkeyPatch, complete: RunInputs
 ) -> None:
     monkeypatch.setattr(fees, "FEE_QUANTUM", Decimal("0.000001"))
+    source = fee_source(maker_rate=PUBLISHED_MAKER_RATE, maker_rate_source=MAKER_RATE_SOURCE)
 
-    payload = manifest_payload(build_manifest(replace(complete, fee=fee_source())))
+    payload = manifest_payload(build_manifest(replace(complete, fee=source)))
 
     assert payload["fee_module_quantum"] == "0.000001"
     assert payload["fee_module_corrected"] is False
@@ -593,6 +598,19 @@ def test_the_written_manifest_round_trips_both_maker_fee_keys(
     assert payload["fee_module"] == "bot.execution.fees.taker_fee"
     assert payload["fee_module_quantum"] == str(fees.FEE_QUANTUM)
     assert payload["fee_module_corrected"] is True
+
+
+def test_the_regime_a_run_states_is_the_regime_its_manifest_digests(complete: RunInputs) -> None:
+    zero = fee_source(maker_rate=ZERO_RATE, maker_rate_source=ZERO_RATE_SOURCE)
+
+    stated = manifest_payload(build_manifest(replace(complete, fee=zero)))
+    published = manifest_payload(build_manifest(complete))
+
+    assert stated["fee_maker_rate"] == "0"
+    assert stated["fee_maker_rate_source"] == ZERO_RATE_SOURCE
+    assert published["fee_maker_rate"] == "0.0175"
+    assert published["fee_maker_rate_source"] == MAKER_RATE_SOURCE
+    assert freeze_digest(stated) != freeze_digest(published)
 
 
 def test_the_fee_key_derivation_rule_reproduces_the_published_keys_byte_for_byte(

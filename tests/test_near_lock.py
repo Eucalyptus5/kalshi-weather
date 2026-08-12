@@ -8,6 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from bot.lag.fee_floor import MAKER_RATE_SOURCE, PUBLISHED_MAKER_RATE
 from bot.lag.near_lock import (
     LOCK_HALF_WIDTH_S,
     PRINT_MIN_STRATUM,
@@ -632,6 +633,8 @@ def test_a_full_run_writes_the_manifest_whose_digest_it_returns(tmp_path: Path) 
                     run_scope=scope_root,
                     artifacts=artifacts,
                     floor_source=FloorSource.SIGNED_READ,
+                    maker_rate=PUBLISHED_MAKER_RATE,
+                    maker_rate_source=MAKER_RATE_SOURCE,
                     economic_bar_size=SELF_CHARGED_BAR,
                     economic_bar_price=SELF_CHARGED_BAR,
                     economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,

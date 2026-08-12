@@ -9,6 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from bot.lag.fee_floor import MAKER_RATE_SOURCE, PUBLISHED_MAKER_RATE  # noqa: E402
 from bot.lag.read_rtt import FloorSource  # noqa: E402
 from bot.lag.run_manifest import (  # noqa: E402
     MANIFEST_NAME,
@@ -66,6 +67,8 @@ def run(args: argparse.Namespace) -> int:
             artifacts=args.artifacts,
             rtt_samples=args.rtt_samples,
             floor_source=FloorSource(args.floor_source),
+            maker_rate=PUBLISHED_MAKER_RATE,
+            maker_rate_source=MAKER_RATE_SOURCE,
             economic_bar_size=SELF_CHARGED_BAR,
             economic_bar_price=SELF_CHARGED_BAR,
             economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,

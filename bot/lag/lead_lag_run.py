@@ -12,6 +12,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from bot.lag.fee_floor import MAKER_RATE_SOURCE, PUBLISHED_MAKER_RATE
 from bot.lag.lead_lag import (
     CITY_SERIES,
     CORRIDORS,
@@ -480,6 +481,8 @@ def execute(
         artifacts=artifacts,
         rtt_samples=rtt_samples,
         floor_source=floor_source,
+        maker_rate=PUBLISHED_MAKER_RATE,
+        maker_rate_source=MAKER_RATE_SOURCE,
         economic_bar_size=SELF_CHARGED_BAR,
         economic_bar_price=SELF_CHARGED_BAR,
         economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
