@@ -31,8 +31,8 @@ def two_sided(
     yes_bid: int,
     no_bid: int,
     *,
-    yes_depth: int | None = None,
-    no_depth: int | None = None,
+    yes_depth: int | None,
+    no_depth: int | None,
 ) -> bool:
     live_yes = yes_bid > 0 and (yes_depth is None or yes_depth > 0)
     live_no = no_bid > 0 and (no_depth is None or no_depth > 0)
@@ -43,8 +43,8 @@ def two_sided_array(
     yes_bid: np.ndarray,
     no_bid: np.ndarray,
     *,
-    yes_depth: np.ndarray | None = None,
-    no_depth: np.ndarray | None = None,
+    yes_depth: np.ndarray | None,
+    no_depth: np.ndarray | None,
 ) -> np.ndarray:
     live = (yes_bid > 0) & (no_bid > 0)
     if yes_depth is not None:

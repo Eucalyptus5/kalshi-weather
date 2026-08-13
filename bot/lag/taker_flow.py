@@ -9,7 +9,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from bot.lag.fee_floor import published_taker_fee
-from bot.lag.mid import mid2_array, two_sided_array
+from bot.lag.ladder_consistency import PRICE_TICKS as LADDER_PRICE_TICKS
+from bot.lag.mid import mid2_array, ticks, two_sided_array
 from bot.lag.tape_stats import ClusterAggregate
 from bot.replay.ladder import _SIZE_EXPONENT, _quantized
 
@@ -21,7 +22,7 @@ PRINT_MIN_DISCOVERY: int = 5_000
 CENT_BAR: Decimal = Decimal("1.0")
 # Stored prices carry _PRICE_EXPONENT, so a stored price is this many units per dollar. A unit is a
 # hundredth of the cent CENT_BAR measures, not the increment the exchange trades on.
-PRICE_TICKS: int = 10_000
+PRICE_TICKS: int = LADDER_PRICE_TICKS
 
 YES = "yes"
 NO = "no"
@@ -151,7 +152,7 @@ def build_ticker_book(ticker: str, table: pa.Table) -> TickerBook:
         received_us=table.column("received_at").cast(pa.int64()).to_numpy(),
         ts_ms=ts_ms,
         mid2=mid2_array(yes_bid, no_bid),
-        two_sided=two_sided_array(yes_bid, no_bid),
+        two_sided=two_sided_array(yes_bid, no_bid, yes_depth=None, no_depth=None),
         delta_rows=delta_rows,
         delta_ts=delta_ts,
         snapshots_before=np.concatenate(([0], np.cumsum(~is_delta, dtype=np.int64))),
@@ -305,12 +306,4 @@ def horizon_result(
 
 def _tick_column(table: pa.Table, name: str) -> np.ndarray:
     prices = table.column(name).to_pylist()
-    return np.array([_ticks(Decimal(value)) for value in prices], dtype=np.int64)
-
-
-def _ticks(price: Decimal) -> int:
-    scaled = price * PRICE_TICKS
-    ticks = int(scaled)
-    if scaled != ticks:
-        raise ValueError(f"price {price} is off the {PRICE_TICKS}-per-dollar grid")
-    return ticks
+    return np.array([ticks(Decimal(value)) for value in prices], dtype=np.int64)

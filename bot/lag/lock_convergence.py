@@ -15,7 +15,7 @@ from bot.lag.fee_floor import (
     PUBLISHED_MAKER_RATE,
     published_taker_fee,
 )
-from bot.lag.ladder_consistency import PRICE_TICKS, SIZE_UNITS
+from bot.lag.ladder_consistency import PRICE_TICKS
 from bot.lag.ladder_run import census
 from bot.lag.lock_events import NO, YES, LockEvent, detect_lock_events, is_low_ladder
 from bot.lag.mid import mid2, ticks, two_sided
@@ -304,12 +304,13 @@ def book_states(table: pa.Table, ticker: str) -> tuple[list[datetime], list[int 
         strict=True,
     ):
         yes_bid = ticks(Decimal(bid))
+        # This artifact carries no no_bid column, so the NO bid is recovered from the YES ask.
         no_bid = PRICE_TICKS - ticks(Decimal(ask))
         if not two_sided(
             yes_bid,
             no_bid,
-            yes_depth=int(Decimal(bid_depth) * SIZE_UNITS),
-            no_depth=int(Decimal(ask_depth) * SIZE_UNITS),
+            yes_depth=int(Decimal(bid_depth)),
+            no_depth=int(Decimal(ask_depth)),
         ):
             mids.append(None)
             one_sided += 1

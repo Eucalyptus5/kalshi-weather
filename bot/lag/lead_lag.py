@@ -9,7 +9,7 @@ import pyarrow as pa
 
 from bot.lag.fee_floor import published_taker_fee
 from bot.lag.ladder_consistency import PRICE_TICKS
-from bot.lag.mid import mid2_array, two_sided_array
+from bot.lag.mid import mid2_array, ticks, two_sided_array
 
 
 # The smallest whole-cent move that clears a round trip at mid with a tick to spare:
@@ -157,7 +157,7 @@ def atm_series(
     yes_bid = _tick_column(table, "yes_bid")
     no_bid = _tick_column(table, "no_bid")
     mid2 = mid2_array(yes_bid, no_bid)
-    two_sided = two_sided_array(yes_bid, no_bid)
+    two_sided = two_sided_array(yes_bid, no_bid, yes_depth=None, no_depth=None)
 
     inside = (received_us >= _micros(window_start)) & (received_us <= _micros(window_end))
     quoted = inside & two_sided
@@ -303,13 +303,5 @@ def _stamp(micros: int) -> datetime:
 
 def _tick_column(table: pa.Table, name: str) -> np.ndarray:
     return np.array(
-        [_ticks(Decimal(value)) for value in table.column(name).to_pylist()], dtype=np.int64
+        [ticks(Decimal(value)) for value in table.column(name).to_pylist()], dtype=np.int64
     )
-
-
-def _ticks(price: Decimal) -> int:
-    scaled = price * PRICE_TICKS
-    ticks = int(scaled)
-    if scaled != ticks:
-        raise ValueError(f"price {price} is off the {PRICE_TICKS}-per-dollar grid")
-    return ticks

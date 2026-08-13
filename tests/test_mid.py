@@ -24,12 +24,12 @@ def test_the_mid_is_an_integer_not_a_quotient() -> None:
 
 
 def test_a_zero_no_bid_is_never_two_sided() -> None:
-    assert not two_sided(9_900, 0)
+    assert not two_sided(9_900, 0, yes_depth=None, no_depth=None)
     assert not two_sided(9_999, 0, yes_depth=500, no_depth=500)
 
 
 def test_a_zero_yes_bid_is_never_two_sided() -> None:
-    assert not two_sided(0, 9_900)
+    assert not two_sided(0, 9_900, yes_depth=None, no_depth=None)
     assert not two_sided(0, 9_999, yes_depth=500, no_depth=500)
 
 
@@ -40,8 +40,8 @@ def test_a_book_priced_on_both_sides_but_empty_on_one_is_not_two_sided() -> None
 
 
 def test_depth_left_unrecorded_falls_back_to_the_prices() -> None:
-    assert two_sided(4_000, 5_000)
-    assert not two_sided(4_000, 0)
+    assert two_sided(4_000, 5_000, yes_depth=None, no_depth=None)
+    assert not two_sided(4_000, 0, yes_depth=None, no_depth=None)
 
 
 def test_the_array_forms_agree_with_the_scalar_forms() -> None:
@@ -64,10 +64,11 @@ def test_the_array_form_agrees_with_the_scalar_form_when_depth_is_unrecorded() -
     yes_bid = np.array([9_900, 0, 4_000], dtype=np.int64)
     no_bid = np.array([0, 9_900, 5_000], dtype=np.int64)
 
-    flags = two_sided_array(yes_bid, no_bid)
+    flags = two_sided_array(yes_bid, no_bid, yes_depth=None, no_depth=None)
 
     assert flags.tolist() == [
-        two_sided(int(y), int(n)) for y, n in zip(yes_bid, no_bid, strict=True)
+        two_sided(int(y), int(n), yes_depth=None, no_depth=None)
+        for y, n in zip(yes_bid, no_bid, strict=True)
     ]
 
 
