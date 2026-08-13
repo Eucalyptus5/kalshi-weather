@@ -23,11 +23,13 @@ from bot.lag.depth_map import (
     cell_edges,
     classify_print,
     cumulative_depth,
+    depth_at_price,
     hour_of_day,
     hours_to_close_bucket,
     level_units,
     scaled_units,
     screen_cells,
+    volume_at_price,
     walk_capacity,
     weighted_quantile,
 )
@@ -42,7 +44,7 @@ from bot.lag.tape_studies import (
     merge_intervals,
     screen_windows,
 )
-from bot.replay.artifacts import TOUCH_SCHEMA
+from bot.replay.artifacts import TOUCH_SCHEMA, TRADES_SCHEMA
 from bot.replay.run_scope import (
     DISCOVERY,
     QUIET_BAND,
@@ -76,6 +78,18 @@ WIDE_END = datetime(2026, 7, 18, 18, 30, tzinfo=UTC)
 
 WIDTH = 6
 BAR_UNITS = int(SLIPPAGE_BAR_CENTS * PRICE_TICKS // 100)
+
+DEEP_LEVELS: tuple[tuple[str, str], ...] = (
+    ("0.4000", "100.00"),
+    ("0.3900", "1.00"),
+    ("0.3800", "1.00"),
+    ("0.3700", "1.00"),
+    ("0.3600", "7.00"),
+    ("0.3500", "1.00"),
+)
+SHORT_LEVELS: tuple[tuple[str, str], ...] = DEEP_LEVELS[:3]
+UNQUOTED = Decimal("0.3000")
+TRUNCATED_LEVELS = 9
 
 PRICE_TABLE: tuple[tuple[str, int, int], ...] = (
     ("0.0000", 4, 0),
@@ -119,6 +133,56 @@ def book(prices: Sequence[str], sizes: Sequence[str]) -> tuple[np.ndarray, np.nd
         np.array([units(prices, PRICE_TICKS)], dtype=np.int64),
         np.array([units(sizes, SIZE_UNITS)], dtype=np.int64),
     )
+
+
+def ladder_row(
+    yes: Sequence[tuple[str, str]],
+    no: Sequence[tuple[str, str]],
+    *,
+    yes_levels: int | None = None,
+    no_levels: int | None = None,
+) -> dict:
+    return {
+        "yes_prices": [level for level, _ in yes],
+        "yes_sizes": [depth for _, depth in yes],
+        "yes_levels": len(yes) if yes_levels is None else yes_levels,
+        "no_prices": [level for level, _ in no],
+        "no_sizes": [depth for _, depth in no],
+        "no_levels": len(no) if no_levels is None else no_levels,
+    }
+
+
+def truncation_rows() -> list[dict]:
+    return [
+        ladder_row(DEEP_LEVELS, SHORT_LEVELS, yes_levels=TRUNCATED_LEVELS),
+        ladder_row(DEEP_LEVELS, SHORT_LEVELS),
+        ladder_row(SHORT_LEVELS, SHORT_LEVELS),
+    ]
+
+
+def ladder_arrays(rows: Sequence[dict], side: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    prices = pa.array([row[f"{side}_prices"] for row in rows], type=pa.list_(pa.string()))
+    sizes = pa.array([row[f"{side}_sizes"] for row in rows], type=pa.list_(pa.string()))
+    levels = np.array([row[f"{side}_levels"] for row in rows], dtype=np.int64)
+    return level_units(prices, 4, WIDTH), level_units(sizes, 2, WIDTH), levels
+
+
+def trade_row(row_id: int, seconds: int, yes_price: str, count: str, taker_side: str) -> dict:
+    return {
+        "id": row_id,
+        "ticker": LEG_A,
+        "received_at": WINDOW_START + timedelta(seconds=seconds),
+        "ts_ms": None,
+        "yes_price": yes_price,
+        "no_price": str(Decimal("1") - Decimal(yes_price)),
+        "count": count,
+        "taker_side": taker_side,
+        "trade_id": f"t{row_id}",
+    }
+
+
+def trades_table(rows: Sequence[dict]) -> pa.Table:
+    return pa.Table.from_pylist(list(rows), schema=TRADES_SCHEMA)
 
 
 def average_slippage(prices: Sequence[str], sizes: Sequence[str], walk: Decimal) -> Decimal:
@@ -438,6 +502,100 @@ def test_capacity_is_zero_only_where_the_side_is_empty() -> None:
     prices, sizes = book(["0.4000"], ["0.01"])
     walk = walk_capacity(prices, sizes, np.array([1]), BAR_UNITS)
     assert walk.capacity.tolist() == [1]
+
+
+def test_depth_reads_the_level_the_price_names() -> None:
+    row = ladder_row(DEEP_LEVELS, SHORT_LEVELS)
+    assert depth_at_price(row, "yes", Decimal("0.3600")) == (Decimal("7.00"), False)
+    assert depth_at_price(row, "yes", Decimal("0.4000")) == (Decimal("100.00"), False)
+
+
+def test_a_price_the_row_does_not_carry_rests_at_zero() -> None:
+    assert [depth_at_price(row, "yes", UNQUOTED) for row in truncation_rows()] == [
+        (Decimal("0"), True),
+        (Decimal("0"), False),
+        (Decimal("0"), False),
+    ]
+
+
+def test_a_stored_list_of_six_levels_is_not_evidence_of_truncation() -> None:
+    rows = truncation_rows()
+    assert [len(row["yes_prices"]) >= WIDTH for row in rows] == [True, True, False]
+    assert [depth_at_price(row, "yes", UNQUOTED)[1] for row in rows] == [True, False, False]
+
+
+def test_walk_capacity_censors_the_rows_the_level_count_censors() -> None:
+    walk = walk_capacity(*ladder_arrays(truncation_rows(), "yes"), BAR_UNITS)
+    assert walk.censored.tolist() == [True, False, False]
+    assert walk.exhausted.tolist() == [False, True, True]
+
+
+def test_a_fractional_size_survives_the_read() -> None:
+    row = ladder_row(SHORT_LEVELS + (("0.3700", "0.01"),), SHORT_LEVELS)
+    assert depth_at_price(row, "yes", Decimal("0.3700")) == (Decimal("0.01"), False)
+
+
+def test_depth_reads_the_side_it_is_given() -> None:
+    row = ladder_row(SHORT_LEVELS, DEEP_LEVELS, no_levels=TRUNCATED_LEVELS)
+    assert depth_at_price(row, "no", Decimal("0.3600")) == (Decimal("7.00"), True)
+    assert depth_at_price(row, "yes", Decimal("0.3600")) == (Decimal("0"), False)
+    assert depth_at_price(row, "no", UNQUOTED) == (Decimal("0"), True)
+
+
+def test_volume_routes_a_print_to_the_quote_it_could_have_filled() -> None:
+    prints = trades_table(
+        [
+            trade_row(1, 10, "0.4100", "3.00", "yes"),
+            trade_row(2, 20, "0.4100", "4.00", "no"),
+        ]
+    )
+    resting_yes = volume_at_price(prints, "yes", Decimal("0.4100"), WINDOW_START, WINDOW_END)
+    resting_no = volume_at_price(prints, "no", Decimal("0.5900"), WINDOW_START, WINDOW_END)
+    assert resting_yes == Decimal("4.00")
+    assert resting_no == Decimal("3.00")
+    assert resting_yes + resting_no == Decimal("7.00")
+    assert resting_yes != Decimal("7.00")
+    assert resting_no != Decimal("7.00")
+
+
+def test_volume_sums_contracts_rather_than_prints() -> None:
+    prints = trades_table(
+        [
+            trade_row(1, 10, "0.4100", "3.00", "no"),
+            trade_row(2, 20, "0.4100", "4.00", "no"),
+        ]
+    )
+    volume = volume_at_price(prints, "yes", Decimal("0.4100"), WINDOW_START, WINDOW_END)
+    assert volume == Decimal("7.00")
+    assert volume != Decimal("2")
+
+
+def test_volume_is_endpoint_inclusive_on_both_ends() -> None:
+    prints = trades_table(
+        [
+            trade_row(1, 0, "0.4100", "1.00", "no"),
+            trade_row(2, 30, "0.4100", "2.00", "no"),
+            trade_row(3, 60, "0.4100", "4.00", "no"),
+        ]
+    )
+    last = WINDOW_START + timedelta(seconds=60)
+    assert volume_at_price(prints, "yes", Decimal("0.4100"), WINDOW_START, last) == Decimal("7.00")
+    assert volume_at_price(
+        prints, "yes", Decimal("0.4100"), WINDOW_START + MICROSECOND, last - MICROSECOND
+    ) == Decimal("2.00")
+
+
+def test_a_fractional_print_is_not_filtered_out() -> None:
+    prints = trades_table([trade_row(1, 10, "0.4100", "0.01", "no")])
+    volume = volume_at_price(prints, "yes", Decimal("0.4100"), WINDOW_START, WINDOW_END)
+    assert volume == Decimal("0.01")
+
+
+def test_a_price_that_never_traded_has_no_volume() -> None:
+    prints = trades_table([trade_row(1, 10, "0.4100", "3.00", "no")])
+    volume = volume_at_price(prints, "yes", UNQUOTED, WINDOW_START, WINDOW_END)
+    assert volume == Decimal("0")
+    assert isinstance(volume, Decimal)
 
 
 def test_an_hour_at_depth_one_outweighs_a_second_at_depth_two_hundred() -> None:

@@ -11,6 +11,7 @@ import pyarrow.compute as pc
 
 from bot.lag.ladder_consistency import PRICE_TICKS
 from bot.lag.tape_studies import Intervals, RunScope
+from bot.replay.artifacts import LADDER_DEPTH
 
 
 SLIPPAGE_BAR_CENTS: Decimal = Decimal("1")
@@ -32,6 +33,7 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _MICROSECOND = timedelta(microseconds=1)
 _BEFORE_EVERYTHING = np.iinfo(np.int64).min
 _FOLD_PAIRS = 1_000_000
+_AGGRESSOR = {"yes": "no", "no": "yes"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +106,44 @@ def walk_capacity(
         capacity=np.where(crossed, reachable, quantity[:, -1]),
         censored=~crossed & (levels > width),
         exhausted=~crossed & (levels <= width),
+    )
+
+
+# The stored price and size lists are cut to LADDER_DEPTH but the level count is written before
+# the cut, so a row holding six levels is censored only when it carried more than six: a book that
+# is genuinely six deep rests a true zero at every price it does not name.
+def depth_at_price(row: Mapping[str, object], side: str, price: Decimal) -> tuple[Decimal, bool]:
+    censored = row[f"{side}_levels"] > LADDER_DEPTH
+    for level, size in zip(row[f"{side}_prices"], row[f"{side}_sizes"], strict=True):
+        if Decimal(level) == price:
+            return Decimal(size), censored
+    return Decimal("0"), censored
+
+
+# taker_side names the side the aggressor bought, and a YES buy lifts the yes ask, which is stored
+# as the complement of the NO bid: it consumes resting NO. Price cannot route on its own, since
+# no_price is written as the complement of yes_price on the same row and so matches both quotes.
+def volume_at_price(
+    prints: pa.Table, resting_side: str, price: Decimal, start: datetime, end: datetime
+) -> Decimal:
+    received = prints.column("received_at")
+    taken = prints.filter(
+        pc.and_(
+            pc.and_(pc.greater_equal(received, start), pc.less_equal(received, end)),
+            pc.equal(prints.column("taker_side"), _AGGRESSOR[resting_side]),
+        )
+    )
+    return sum(
+        (
+            Decimal(count)
+            for count, level in zip(
+                taken.column("count").to_pylist(),
+                taken.column(f"{resting_side}_price").to_pylist(),
+                strict=True,
+            )
+            if Decimal(level) == price
+        ),
+        Decimal("0"),
     )
 
 
