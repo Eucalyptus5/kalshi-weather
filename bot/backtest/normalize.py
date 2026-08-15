@@ -30,6 +30,7 @@ class CanonicalSnapshot(BaseModel):
     created_time: datetime | None = None
 
     floor_strike: int | None = None
+    cap_strike: int | None = None
     strike_type: str | None = None
     observed_value: Decimal | None = None
 
@@ -112,6 +113,7 @@ def from_kalshi_api(market: dict) -> CanonicalSnapshot:
         close_time=_iso_to_datetime(market.get("close_time")),
         created_time=_iso_to_datetime(market.get("created_time")),
         floor_strike=market.get("floor_strike"),
+        cap_strike=market.get("cap_strike"),
         strike_type=market.get("strike_type"),
         observed_value=_api_decimal(market, "expiration_value"),
         yes_bid_size=_api_decimal(market, "yes_bid_size_fp"),
