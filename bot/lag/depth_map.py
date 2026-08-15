@@ -110,8 +110,7 @@ def walk_capacity(
 
 
 # The stored price and size lists are cut to LADDER_DEPTH but the level count is written before
-# the cut, so a row holding six levels is censored only when it carried more than six: a book that
-# is genuinely six deep rests a true zero at every price it does not name.
+# the cut: a book that is genuinely six deep rests a true zero at every price it does not name.
 def depth_at_price(row: Mapping[str, object], side: str, price: Decimal) -> tuple[Decimal, bool]:
     censored = row[f"{side}_levels"] > LADDER_DEPTH
     for level, size in zip(row[f"{side}_prices"], row[f"{side}_sizes"], strict=True):
@@ -124,15 +123,20 @@ def depth_at_price(row: Mapping[str, object], side: str, price: Decimal) -> tupl
 # as the complement of the NO bid: it consumes resting NO. Price cannot route on its own, since
 # no_price is written as the complement of yes_price on the same row and so matches both quotes.
 def volume_at_price(
-    prints: pa.Table, resting_side: str, price: Decimal, start: datetime, end: datetime
+    prints: pa.Table,
+    ticker: str,
+    resting_side: str,
+    price: Decimal,
+    start: datetime,
+    end: datetime,
 ) -> Decimal:
     received = prints.column("received_at")
-    taken = prints.filter(
-        pc.and_(
-            pc.and_(pc.greater_equal(received, start), pc.less_equal(received, end)),
-            pc.equal(prints.column("taker_side"), _AGGRESSOR[resting_side]),
-        )
+    inside = pc.and_(pc.greater_equal(received, start), pc.less_equal(received, end))
+    quote = pc.and_(
+        pc.equal(prints.column("ticker"), ticker),
+        pc.equal(prints.column("taker_side"), _AGGRESSOR[resting_side]),
     )
+    taken = prints.filter(pc.and_(inside, quote))
     return sum(
         (
             Decimal(count)

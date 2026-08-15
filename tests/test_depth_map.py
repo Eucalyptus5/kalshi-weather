@@ -167,10 +167,12 @@ def ladder_arrays(rows: Sequence[dict], side: str) -> tuple[np.ndarray, np.ndarr
     return level_units(prices, 4, WIDTH), level_units(sizes, 2, WIDTH), levels
 
 
-def trade_row(row_id: int, seconds: int, yes_price: str, count: str, taker_side: str) -> dict:
+def trade_row(
+    row_id: int, seconds: int, yes_price: str, count: str, taker_side: str, *, ticker: str = LEG_A
+) -> dict:
     return {
         "id": row_id,
-        "ticker": LEG_A,
+        "ticker": ticker,
         "received_at": WINDOW_START + timedelta(seconds=seconds),
         "ts_ms": None,
         "yes_price": yes_price,
@@ -549,8 +551,8 @@ def test_volume_routes_a_print_to_the_quote_it_could_have_filled() -> None:
             trade_row(2, 20, "0.4100", "4.00", "no"),
         ]
     )
-    resting_yes = volume_at_price(prints, "yes", Decimal("0.4100"), WINDOW_START, WINDOW_END)
-    resting_no = volume_at_price(prints, "no", Decimal("0.5900"), WINDOW_START, WINDOW_END)
+    resting_yes = volume_at_price(prints, LEG_A, "yes", Decimal("0.4100"), WINDOW_START, WINDOW_END)
+    resting_no = volume_at_price(prints, LEG_A, "no", Decimal("0.5900"), WINDOW_START, WINDOW_END)
     assert resting_yes == Decimal("4.00")
     assert resting_no == Decimal("3.00")
     assert resting_yes + resting_no == Decimal("7.00")
@@ -565,7 +567,7 @@ def test_volume_sums_contracts_rather_than_prints() -> None:
             trade_row(2, 20, "0.4100", "4.00", "no"),
         ]
     )
-    volume = volume_at_price(prints, "yes", Decimal("0.4100"), WINDOW_START, WINDOW_END)
+    volume = volume_at_price(prints, LEG_A, "yes", Decimal("0.4100"), WINDOW_START, WINDOW_END)
     assert volume == Decimal("7.00")
     assert volume != Decimal("2")
 
@@ -579,21 +581,36 @@ def test_volume_is_endpoint_inclusive_on_both_ends() -> None:
         ]
     )
     last = WINDOW_START + timedelta(seconds=60)
-    assert volume_at_price(prints, "yes", Decimal("0.4100"), WINDOW_START, last) == Decimal("7.00")
-    assert volume_at_price(
-        prints, "yes", Decimal("0.4100"), WINDOW_START + MICROSECOND, last - MICROSECOND
-    ) == Decimal("2.00")
+    closed = volume_at_price(prints, LEG_A, "yes", Decimal("0.4100"), WINDOW_START, last)
+    interior = volume_at_price(
+        prints, LEG_A, "yes", Decimal("0.4100"), WINDOW_START + MICROSECOND, last - MICROSECOND
+    )
+    assert closed == Decimal("7.00")
+    assert interior == Decimal("2.00")
 
 
 def test_a_fractional_print_is_not_filtered_out() -> None:
     prints = trades_table([trade_row(1, 10, "0.4100", "0.01", "no")])
-    volume = volume_at_price(prints, "yes", Decimal("0.4100"), WINDOW_START, WINDOW_END)
+    volume = volume_at_price(prints, LEG_A, "yes", Decimal("0.4100"), WINDOW_START, WINDOW_END)
     assert volume == Decimal("0.01")
+
+
+def test_volume_ignores_a_leg_resting_at_the_same_price() -> None:
+    prints = trades_table(
+        [
+            trade_row(1, 10, "0.4100", "4.00", "no"),
+            trade_row(2, 20, "0.4100", "5.00", "no", ticker=LEG_B),
+        ]
+    )
+    leg_a = volume_at_price(prints, LEG_A, "yes", Decimal("0.4100"), WINDOW_START, WINDOW_END)
+    leg_b = volume_at_price(prints, LEG_B, "yes", Decimal("0.4100"), WINDOW_START, WINDOW_END)
+    assert leg_a == Decimal("4.00")
+    assert leg_b == Decimal("5.00")
 
 
 def test_a_price_that_never_traded_has_no_volume() -> None:
     prints = trades_table([trade_row(1, 10, "0.4100", "3.00", "no")])
-    volume = volume_at_price(prints, "yes", UNQUOTED, WINDOW_START, WINDOW_END)
+    volume = volume_at_price(prints, LEG_A, "yes", UNQUOTED, WINDOW_START, WINDOW_END)
     assert volume == Decimal("0")
     assert isinstance(volume, Decimal)
 
