@@ -235,6 +235,19 @@ def test_a_touch_that_leaves_the_placement_price_cancels_the_order(
     assert swept.yes_fills == fills
 
 
+def test_a_touch_that_re_publishes_at_the_same_price_keeps_the_order_resting() -> None:
+    rows = [
+        flat(1, OPENED),
+        ladder_row(2, FIRST + timedelta(seconds=120), [("0.39", "3")], [(NO_BID, "5")]),
+    ]
+    prints = [trade_row(1, FIRST + timedelta(seconds=200), NO_TOUCH_PRINT, "10", "yes")]
+
+    swept = sweep(rows, prints)
+
+    assert swept.no_fills == 1
+    assert swept.yes_fills == 0
+
+
 def test_a_fill_is_credited_whole_at_the_side_size() -> None:
     at = FIRST + timedelta(seconds=10)
     swept = sweep(
