@@ -43,6 +43,7 @@ class CloseSidecar:
 # The window spans exactly PLACEMENTS steps, so rounding its open up to the clock grid pushes the
 # last instant back by the same amount and it stays strictly inside the 12-hour edge. The count is
 # therefore fixed by the pre-registration and never depends on where the close sits in a step.
+# Venue closes are whole seconds; a sub-second one would open the grid before the 24-hour edge.
 def placement_grid(close: datetime) -> tuple[datetime, ...]:
     opened = int((close - timedelta(hours=WINDOW_OPEN_HOURS)).timestamp())
     first = -(-opened // PLACEMENT_STEP_S) * PLACEMENT_STEP_S
