@@ -28,6 +28,7 @@ AUG13_CLOSE = datetime(2026, 8, 14, 6, 59, tzinfo=UTC)
 AUG14_CLOSE = datetime(2026, 8, 15, 7, tzinfo=UTC)
 FIRST = datetime(2026, 8, 13, 7, tzinfo=UTC)
 OPENED = FIRST - timedelta(minutes=1)
+SIBLING_AT = OPENED + timedelta(seconds=1)
 STEP = timedelta(seconds=900)
 RESTED = timedelta(seconds=REST_S)
 
@@ -38,6 +39,7 @@ NO_BID = "0.58"
 # A print stores no_price as the complement of yes_price on the same row, so a print at 0.42 is
 # the one that can take the no quote resting at 0.58.
 NO_TOUCH_PRINT = "0.42"
+SIBLING_BID = "0.20"
 DEEP = "500"
 
 PLAN_LEVELS: tuple[tuple[str, str], ...] = (
@@ -404,8 +406,9 @@ def test_a_fill_carries_two_instants_neither_read_off_the_other() -> None:
 
 def test_the_print_that_carries_the_volume_past_the_queue_is_the_fill() -> None:
     prints = [
-        trade_row(1, FIRST + timedelta(seconds=10), YES_BID, "2", "no"),
-        trade_row(2, FIRST + timedelta(seconds=20), YES_BID, "2", "no"),
+        trade_row(1, FIRST + timedelta(seconds=10), YES_BID, "3", "no"),
+        trade_row(2, FIRST + timedelta(seconds=20), YES_BID, "1", "no"),
+        trade_row(3, FIRST + timedelta(seconds=30), YES_BID, "1", "no"),
     ]
 
     swept = sweep([flat(1, OPENED, yes_depth="3")], prints)
@@ -420,3 +423,22 @@ def test_a_sibling_tickers_print_does_not_credit_our_quote() -> None:
 
     assert sweep(rows, prints, ticker=AUG13).yes_fills == 0
     assert sweep(rows, prints, ticker=BRACKET).yes_fills == 1
+
+
+def test_a_sibling_tickers_book_is_not_read_as_our_own() -> None:
+    rows = [
+        flat(1, OPENED, yes_depth="3"),
+        ladder_row(2, SIBLING_AT, [(SIBLING_BID, "50")], [("0.79", "50")], ticker=BRACKET),
+    ]
+    prints = [
+        trade_row(1, FIRST + timedelta(seconds=10), YES_BID, "10", "no"),
+        trade_row(2, FIRST + timedelta(seconds=10), SIBLING_BID, "60", "no", ticker=BRACKET),
+    ]
+
+    assert rows[1]["received_at"] > rows[0]["received_at"]
+    assert [fill.placement_price for fill in sweep(rows, prints, ticker=AUG13).fills] == [
+        Decimal("0.40")
+    ]
+    assert [fill.placement_price for fill in sweep(rows, prints, ticker=BRACKET).fills] == [
+        Decimal("0.20")
+    ]

@@ -62,8 +62,7 @@ class TickerTape:
 
 
 # The prints stay whole: volume_at_price scopes them to the ticker itself, and two brackets of one
-# event rest at the same price often enough that pre-filtering would hide a missing scope. The
-# stamps are scoped, since a sibling's print time would otherwise stand in for our own fill.
+# event rest at the same price often enough that pre-filtering would hide a missing scope.
 def ticker_tape(ladder: pa.Table, prints: pa.Table, ticker: str) -> TickerTape:
     book = ladder.filter(pc.equal(ladder.column("ticker"), ticker)).sort_by("received_at")
     own = prints.filter(pc.equal(prints.column("ticker"), ticker))
