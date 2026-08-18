@@ -248,6 +248,20 @@ def test_a_touch_that_re_publishes_at_the_same_price_keeps_the_order_resting() -
     assert swept.yes_fills == 0
 
 
+@pytest.mark.parametrize(("arrives_s", "fills"), [(250, 1), (350, 0)])
+def test_a_touch_that_moves_only_after_the_deadline_still_ends_the_rest_at_it(
+    arrives_s: int, fills: int
+) -> None:
+    rows = [
+        flat(1, OPENED),
+        ladder_row(2, FIRST + RESTED + timedelta(seconds=100), [("0.39", "3")], [(NO_BID, "5")]),
+    ]
+
+    swept = sweep(rows, [trade_row(1, FIRST + timedelta(seconds=arrives_s), YES_BID, "10", "no")])
+
+    assert swept.yes_fills == fills
+
+
 def test_a_fill_is_credited_whole_at_the_side_size() -> None:
     at = FIRST + timedelta(seconds=10)
     swept = sweep(
