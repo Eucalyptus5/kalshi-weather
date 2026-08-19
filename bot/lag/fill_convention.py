@@ -62,7 +62,9 @@ class TickerTape:
 
 
 # The prints stay whole: volume_at_price scopes them to the ticker itself, and two brackets of one
-# event rest at the same price often enough that pre-filtering would hide a missing scope.
+# event rest at the same price often enough that pre-filtering would hide a missing scope. The
+# stamps are scoped only to spare a whole-table filter per candidate: our total steps only at our
+# own prints, so the earliest crediting stamp is unchanged either way.
 def ticker_tape(ladder: pa.Table, prints: pa.Table, ticker: str) -> TickerTape:
     book = ladder.filter(pc.equal(ladder.column("ticker"), ticker)).sort_by("received_at")
     own = prints.filter(pc.equal(prints.column("ticker"), ticker))
@@ -80,6 +82,8 @@ def credited(volume: Decimal, ahead: Decimal) -> bool:
 
 
 # two_sided reads its two halves and ands them, so one half handed in twice reads that half alone.
+# Depth reaches the artifact quantised to 0.01, so it converts to hundredths first: a plain int()
+# would read a side resting under one contract as empty.
 def side_is_live(row: Mapping[str, object], side: str) -> bool:
     bid = ticks(Decimal(row[f"{side}_bid"]))
     depth = int(Decimal(row[f"{side}_bid_depth"]) * _SIZE_UNITS)

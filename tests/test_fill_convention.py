@@ -41,6 +41,7 @@ NO_BID = "0.58"
 NO_TOUCH_PRINT = "0.42"
 SIBLING_BID = "0.20"
 DEEP = "500"
+HALF = "0.50"
 
 PLAN_LEVELS: tuple[tuple[str, str], ...] = (
     ("0.40", "9"),
@@ -321,6 +322,17 @@ def test_an_empty_side_places_no_order_and_is_counted() -> None:
     assert swept.no_empty == 48
     assert swept.yes_empty == 0
     assert swept.offered == 48
+
+
+def test_a_touch_resting_under_one_contract_is_placed_not_counted_empty() -> None:
+    rows = [flat(1, OPENED, yes_depth=HALF)]
+
+    swept = sweep(rows)
+
+    assert Decimal(rows[0]["yes_bid_depth"]) < Decimal("1")
+    assert swept.yes_empty == 0
+    assert swept.no_empty == 0
+    assert swept.offered == 96
 
 
 def test_the_modelled_fill_rate_comes_back_beside_the_fills() -> None:
