@@ -17,7 +17,7 @@ from bot.lag.tape_studies import EvidenceWindow, RunScope, Screened, keep_mask, 
 
 # 200 doubled ticks is one cent on one contract: half of it undoes the doubling, and the rest is
 # 10,000 ticks to the dollar against 100 cents to the dollar.
-CENTS_DIVISOR: Decimal = Decimal(200)
+_CENTS_DIVISOR: Decimal = Decimal(200)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -92,7 +92,7 @@ def mark_out_cents(
     closed = mid2_at(book, anchor + timedelta(seconds=horizon_s))
     if opened is None or closed is None:
         return None
-    return Decimal((closed - opened) * yes_pressure(side)) / CENTS_DIVISOR
+    return Decimal((closed - opened) * yes_pressure(side)) / _CENTS_DIVISOR
 
 
 # The fill is marked to the mid, so the capture is one half tick and the mark-out already carries

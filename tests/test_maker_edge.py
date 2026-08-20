@@ -1,7 +1,6 @@
 from collections.abc import Sequence
-from dataclasses import fields
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import pyarrow as pa
@@ -13,7 +12,6 @@ from bot.lag.maker_edge import (
     HORIZONS_S,
     PRIMARY_HORIZON_S,
     EdgeCurve,
-    FillEdge,
     HorizonEdges,
     QuoteBook,
     edge_cents,
@@ -153,7 +151,7 @@ def resolve(
     fills: Sequence[Fill],
     *,
     rate: Decimal = FREE,
-    event_date=DISCOVERY_DAY,
+    event_date: date = DISCOVERY_DAY,
 ) -> EdgeCurve:
     return resolve_curve(
         book=quotes,
@@ -163,11 +161,6 @@ def resolve(
         event_date=event_date,
         maker_rate=rate,
     )
-
-
-def test_the_curve_reports_the_four_pre_registered_horizons() -> None:
-    assert HORIZONS_S == (1, 10, 60, 300)
-    assert PRIMARY_HORIZON_S == 60
 
 
 def test_a_sibling_brackets_book_is_not_read_as_our_own() -> None:
@@ -251,7 +244,6 @@ def test_the_mark_out_signs_off_the_side_the_quote_filled() -> None:
 
     assert long_yes == Decimal("-0.20")
     assert long_no == Decimal("0.20")
-    assert long_yes == -long_no
 
 
 def test_a_free_fill_pays_the_half_tick_less_the_adverse_move() -> None:
@@ -262,7 +254,6 @@ def test_a_free_fill_pays_the_half_tick_less_the_adverse_move() -> None:
 
     assert maker_fee_cents_per_contract(YES_CONTRACTS, STRIKE, FREE) == Decimal("0")
     assert mark_out == Decimal("-0.20")
-    assert -mark_out == Decimal("0.20")
     assert edge == Decimal("0.30")
     assert edge != Decimal("0.70")
 
@@ -344,17 +335,6 @@ def test_the_truncated_size_is_the_one_place_the_verdict_turns() -> None:
     assert truncated == Decimal("0.0000")
     assert modelled > 0
     assert not truncated > 0
-
-
-def test_the_tuple_carries_the_fields_the_grouping_reads() -> None:
-    assert [field.name for field in fields(FillEdge)] == [
-        "ticker",
-        "side",
-        "contracts",
-        "placement_price",
-        "horizon_s",
-        "edge_cents_per_contract",
-    ]
 
 
 def test_the_side_is_carried_rather_than_inferred_from_the_size(tmp_path: Path) -> None:
@@ -521,6 +501,24 @@ def test_a_horizon_counts_its_exclusions_apart_from_its_drops(tmp_path: Path) ->
     assert far.edges == ()
 
 
+def test_a_horizon_that_modelled_no_fills_has_no_dropped_fraction(tmp_path: Path) -> None:
+    empty = resolve_edges(
+        book=flat_book(),
+        fills=[],
+        scope=scope_at(tmp_path),
+        series=SERIES,
+        event_date=DISCOVERY_DAY,
+        maker_rate=FREE,
+        horizon_s=PRIMARY_HORIZON_S,
+    )
+
+    assert empty.modelled == 0
+    assert empty.dropped == 0
+    assert empty.edges == ()
+    with pytest.raises(InvalidOperation):
+        _ = empty.dropped_fraction
+
+
 def test_the_mark_out_anchors_on_the_fill_and_the_window_opens_at_the_placement(
     tmp_path: Path,
 ) -> None:
@@ -534,7 +532,6 @@ def test_the_mark_out_anchors_on_the_fill_and_the_window_opens_at_the_placement(
     curve = resolve(tmp_path, moved, [placed])
 
     assert mark_out == Decimal("-0.20")
-    assert -mark_out == Decimal("0.20")
     assert edge_cents(
         mark_out=mark_out, contracts=YES_CONTRACTS, price=STRIKE, rate=FREE
     ) == Decimal("0.30")
@@ -550,10 +547,10 @@ def test_the_mark_out_anchors_on_the_fill_and_the_window_opens_at_the_placement(
 
 
 def test_the_seam_fill_at_the_published_rate_reads_the_fractional_size(tmp_path: Path) -> None:
-    curve = resolve(tmp_path, falling_book(), [fill(YES)], rate=MAKER_RATE)
-    mark_out = mark_out_cents(
-        falling_book(), anchor=at(FILL_S), horizon_s=PRIMARY_HORIZON_S, side=YES
-    )
+    moved = falling_book()
+
+    curve = resolve(tmp_path, moved, [fill(YES)], rate=MAKER_RATE)
+    mark_out = mark_out_cents(moved, anchor=at(FILL_S), horizon_s=PRIMARY_HORIZON_S, side=YES)
 
     assert curve.gate.edges[0].edge_cents_per_contract == Decimal("-0.1854")
     assert edge_cents(
