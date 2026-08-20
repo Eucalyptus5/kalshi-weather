@@ -297,11 +297,14 @@ def test_each_side_is_charged_the_fee_its_own_size_earns(tmp_path: Path) -> None
 
     curve = resolve(tmp_path, flat_book(), [fill(YES), fill(NO)], rate=MAKER_RATE)
     priced = {edge.side: edge.edge_cents_per_contract for edge in curve.gate.edges}
+    sized = {edge.side: edge.contracts for edge in curve.gate.edges}
 
     assert no_fee == Decimal("0.4615")
     assert no_fee != yes_fee
     assert priced[YES] == Decimal("0.0146")
     assert priced[NO] == Decimal("0.0385")
+    assert sized[YES] == YES_CONTRACTS
+    assert sized[NO] == NO_CONTRACTS
 
 
 def test_the_fee_is_charged_at_the_fill_own_placement_price(tmp_path: Path) -> None:
@@ -361,6 +364,7 @@ def test_the_side_is_carried_rather_than_inferred_from_the_size(tmp_path: Path) 
     edges = curve.gate.edges
 
     assert {edge.contracts for edge in edges} == {YES_CONTRACTS}
+    assert [edge.ticker for edge in edges] == [TICKER, TICKER]
     assert [edge.side for edge in edges] == [YES, NO]
     assert [edge.placement_price for edge in edges] == [STRIKE, STRIKE]
     assert [edge.horizon_s for edge in edges] == [PRIMARY_HORIZON_S, PRIMARY_HORIZON_S]
