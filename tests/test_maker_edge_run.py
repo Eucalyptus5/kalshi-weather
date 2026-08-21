@@ -8,12 +8,18 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from bot.lag.fee_floor import (
+    MAKER_RATE_SOURCE as PUBLISHED_MAKER_RATE_SOURCE,
+    PUBLISHED_MAKER_RATE,
+)
 from bot.lag.fill_convention import NO, NO_CONTRACTS, YES, YES_CONTRACTS
 from bot.lag.maker_edge import HORIZONS_S, PRIMARY_HORIZON_S, FillEdge
 from bot.lag.maker_edge_run import (
     ALPHA,
+    CI_LEVEL,
     CLOSED,
     COHORT,
+    DIRECTION,
     MAKER_RATE,
     MAKER_RATE_SOURCE,
     MARKET_DAY_MIN_DISCOVERY,
@@ -37,7 +43,7 @@ from bot.lag.maker_edge_run import (
 from bot.lag.placement_grid import MarketClose, sidecar_payload
 from bot.lag.r0_universe import Coverage, freeze_digest, freeze_universe, write_universe
 from bot.lag.read_rtt import FloorSource
-from bot.lag.run_manifest import MANIFEST_NAME, ManifestIncomplete
+from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME, ManifestIncomplete
 from bot.lag.tape_stats import (
     ALPHA as CAMPAIGN_ALPHA,
     BootstrapResult,
@@ -62,6 +68,9 @@ from bot.replay.run_scope import (
     EXCLUSIONS_SCHEMA,
     HOLDOUT,
     QUIET_BAND,
+    RECORDED_GAP,
+    RESUBSCRIBE_BLIND,
+    SUBSCRIPTION_WIDE,
     Split,
     write_split,
 )
@@ -94,6 +103,7 @@ B62 = "KXHIGHDEN-26AUG10-B62"
 B64 = "KXHIGHDEN-26AUG10-B64"
 T62 = "KXHIGHDEN-26AUG10-T62"
 T64 = "KXHIGHDEN-26AUG10-T64"
+T66 = "KXHIGHDEN-26AUG10-T66"
 NEXT_TICKER = "KXHIGHDEN-26AUG11-T62"
 
 DISCOVERY_CLOSE = datetime(2026, 8, 11, 7, tzinfo=UTC)
@@ -105,10 +115,26 @@ SEED = 20260819
 RUN_ID = "2026-08-19-f1"
 FREE = Decimal("0")
 YES_BID = "0.4000"
+STEP_BID = "0.4100"
 NO_BID = "0.5800"
 YES_TOUCH = "0.4200"
 QUIET_START = datetime(2026, 8, 10, 23, tzinfo=UTC)
 QUIET_END = datetime(2026, 8, 10, 23, 30, tzinfo=UTC)
+MARK_BAND = (
+    datetime(2026, 8, 10, 7, 0, 30, tzinfo=UTC),
+    datetime(2026, 8, 10, 7, 0, 40, tzinfo=UTC),
+)
+HOLDOUT_BAND = (
+    datetime(2026, 8, 11, 7, 0, 30, tzinfo=UTC),
+    datetime(2026, 8, 11, 7, 0, 40, tzinfo=UTC),
+)
+LISTS_EARLY = datetime(2026, 8, 10, 14, tzinfo=UTC)
+
+QUANTUM = Decimal("0.0001")
+FLAT_EDGE = Decimal("0.5000")
+GATING_EDGE = Decimal("0.3222")
+PLACEMENTS_PER_MARKET = 48
+MARKETS_SWEPT = 3
 
 HEADLINE_SPREAD = 0.0251
 POOLED_SPREAD = 2.8e-17
@@ -218,7 +244,9 @@ def regate(gate: GateVerdict, result: BootstrapResult, **overrides: object) -> G
     return evaluate_gate(**(arguments | overrides))
 
 
-def ladder_row(row_id: int, at: datetime, ticker: str, *, no_bid: str = NO_BID) -> dict:
+def ladder_row(
+    row_id: int, at: datetime, ticker: str, *, yes_bid: str = YES_BID, no_bid: str = NO_BID
+) -> dict:
     empty = Decimal(no_bid) == 0
     no_depth = "0.00" if empty else "5.00"
     return {
@@ -226,15 +254,15 @@ def ladder_row(row_id: int, at: datetime, ticker: str, *, no_bid: str = NO_BID) 
         "ticker": ticker,
         "received_at": at,
         "ts_ms": None,
-        "yes_bid": YES_BID,
+        "yes_bid": yes_bid,
         "yes_bid_depth": "3.00",
         "yes_ask": str(Decimal("1") - Decimal(no_bid)),
         "yes_ask_depth": no_depth,
         "no_bid": no_bid,
         "no_bid_depth": no_depth,
-        "no_ask": str(Decimal("1") - Decimal(YES_BID)),
+        "no_ask": str(Decimal("1") - Decimal(yes_bid)),
         "no_ask_depth": "3.00",
-        "yes_prices": [YES_BID],
+        "yes_prices": [yes_bid],
         "yes_sizes": ["3.00"],
         "yes_levels": 1,
         "no_prices": [] if empty else [no_bid],
@@ -259,34 +287,51 @@ def trade_row(
     }
 
 
+# The yes bid ticks up for the minute after the fills and settles back, so the mark-out is zero at
+# 1, 10 and 300 seconds and one half cent at 60: a readout taken off any other horizon of this book
+# reads a different edge than the gating one.
 def book_rows(row_id: int, ticker: str, base: datetime, *, one_sided: bool = False) -> list[dict]:
-    minutes = (-1, 0, 3, 6, 10)
+    minutes = (-1, 0, 1, 3, 6, 10)
     return [
         ladder_row(
             row_id + index,
             base + timedelta(minutes=offset),
             ticker,
-            no_bid="0.0000" if one_sided and offset == 3 else NO_BID,
+            yes_bid=STEP_BID if offset == 1 else YES_BID,
+            no_bid="0.0000" if one_sided and offset in (3, 10) else NO_BID,
         )
         for index, offset in enumerate(minutes)
     ]
 
 
-def fill_trades(row_id: int, ticker: str, base: datetime) -> list[dict]:
+def fill_trades(row_id: int, ticker: str, base: datetime, *, no_count: str = "6.00") -> list[dict]:
     return [
         trade_row(row_id, base + timedelta(seconds=10), ticker, YES_BID, "4.00", NO),
-        trade_row(row_id + 1, base + timedelta(seconds=20), ticker, YES_TOUCH, "6.00", YES),
+        trade_row(row_id + 1, base + timedelta(seconds=20), ticker, YES_TOUCH, no_count, YES),
     ]
 
 
-def artifacts_dir(tmp_path: Path, *, one_sided: bool = False, name: str = "artifacts") -> Path:
+def artifacts_dir(
+    tmp_path: Path,
+    *,
+    one_sided: bool = False,
+    no_side_short: bool = False,
+    strays: bool = False,
+    name: str = "artifacts",
+) -> Path:
     root = tmp_path / name
+    strayed = (
+        book_rows(31, T66, FIRST_PLACEMENT) + book_rows(41, NEXT_TICKER, LISTS_EARLY)
+        if strays
+        else []
+    )
     write_partition(
         root,
         DISCOVERY_DAY,
         1,
         book_rows(1, T62, FIRST_PLACEMENT, one_sided=one_sided)
-        + book_rows(11, T64, FIRST_PLACEMENT, one_sided=one_sided),
+        + book_rows(11, T64, FIRST_PLACEMENT, one_sided=one_sided)
+        + strayed,
         kind=LADDER,
         schema=LADDER_SCHEMA,
         series=SERIES,
@@ -304,7 +349,8 @@ def artifacts_dir(tmp_path: Path, *, one_sided: bool = False, name: str = "artif
         root,
         DISCOVERY_DAY,
         1,
-        fill_trades(101, T62, FIRST_PLACEMENT) + fill_trades(111, T64, FIRST_PLACEMENT),
+        fill_trades(101, T62, FIRST_PLACEMENT)
+        + fill_trades(111, T64, FIRST_PLACEMENT, no_count="5.00" if no_side_short else "6.00"),
         kind=TRADES,
         schema=TRADES_SCHEMA,
         series=SERIES,
@@ -363,12 +409,22 @@ def event_day_table(series: Sequence[str] = (SERIES,)) -> pa.Table:
     return pa.Table.from_pylist(rows, schema=EVENT_DAYS_SCHEMA)
 
 
-def scope_dir(tmp_path: Path, *, series: Sequence[str] = (SERIES,), name: str = "scope") -> Path:
+def scope_dir(
+    tmp_path: Path,
+    *,
+    series: Sequence[str] = (SERIES,),
+    bands: Sequence[tuple[str, datetime, datetime]] = ((QUIET_BAND, QUIET_START, QUIET_END),),
+    name: str = "scope",
+) -> Path:
     directory = tmp_path / name
     directory.mkdir()
     pq.write_table(
         pa.Table.from_pylist(
-            [exclusion_row(0, QUIET_BAND, QUIET_START, QUIET_END)], schema=EXCLUSIONS_SCHEMA
+            [
+                exclusion_row(index, exclusion_class, start, end)
+                for index, (exclusion_class, start, end) in enumerate(bands)
+            ],
+            schema=EXCLUSIONS_SCHEMA,
         ),
         directory / "exclusions.parquet",
     )
@@ -454,6 +510,16 @@ def test_the_cluster_unit_is_the_market_day_and_the_total_is_contract_weighted()
     assert bootstrap.estimate > SELF_CHARGED_BAR
     assert bootstrap.degenerate is False
     assert bootstrap.replicate_spread == pytest.approx(HEADLINE_SPREAD, abs=1e-4)
+
+
+def test_the_bootstrap_measures_against_the_same_zero_the_gate_reads() -> None:
+    result = bootstrap_of(cluster_aggregates(GATING_EDGES), SEED)
+
+    assert result.null_value == SELF_CHARGED_BAR
+    assert result.direction == DIRECTION
+    assert result.resamples == BOOTSTRAP_RESAMPLES
+    assert result.ci_level == CI_LEVEL
+    assert CI_LEVEL == 0.95
 
 
 def test_a_size_blind_total_reads_the_other_side_of_the_zero_bar() -> None:
@@ -592,6 +658,7 @@ def test_the_discovery_floor_binds_at_two_hundred_market_days(
     decision = decide(discovery, holdout)
 
     assert MARKET_DAY_MIN_DISCOVERY == 200
+    assert MARKET_DAYS == "market-days"
     assert decision.gate.n == market_days
     assert decision.gate.n_min == 200
     assert decision.gate.n_unit == MARKET_DAYS
@@ -624,6 +691,17 @@ def test_a_split_with_no_scored_fill_carries_no_gate() -> None:
     assert decision.verdict == UNDERPOWERED
 
 
+def test_a_gate_that_passed_against_an_empty_holdout_replicates_nothing() -> None:
+    discovery = readout_of(spread("20", MARKET_DAY_MIN_DISCOVERY, split=DISCOVERY), split=DISCOVERY)
+
+    decision = decide(discovery, readout_of((), split=HOLDOUT))
+
+    assert decision.gate.passed is True
+    assert decision.replication is None
+    assert decision.skipped == NO_ESTIMATE
+    assert decision.verdict == CLOSED
+
+
 def test_the_holdout_floor_is_the_shared_half_of_the_discovery_floor() -> None:
     verdict = evaluate_holdout(
         discovery_estimate=Decimal("1"),
@@ -648,10 +726,73 @@ def test_the_sweep_scores_one_market_day_per_ticker(swept: Sweep) -> None:
     assert sorted(holdout.totals) == [NEXT_TICKER]
     assert swept.yes_fills == 3
     assert swept.no_fills == 3
+    assert swept.yes_empty == 0
+    assert swept.no_empty == 0
+    assert swept.offered == MARKETS_SWEPT * PLACEMENTS_PER_MARKET * 2
     assert swept.unnamed_markets == 0
+    assert discovery.n_fills == 4
+    assert discovery.contracts == 2 * (YES_CONTRACTS + NO_CONTRACTS)
     assert discovery.weights[T62] == YES_CONTRACTS + NO_CONTRACTS
-    assert discovery.totals[T62] == Decimal("0.50") * (YES_CONTRACTS + NO_CONTRACTS)
+    # The half-tick capture is 0.50, and the bid step adds half a cent to the filled yes quote at 60
+    # seconds while taking the same half cent off the filled no one.
+    assert discovery.totals[T62] == Decimal("1.00") * YES_CONTRACTS + Decimal("0") * NO_CONTRACTS
+    assert swept.tallies[(DISCOVERY, 1)].totals[T62] == Decimal("0.50") * (
+        YES_CONTRACTS + NO_CONTRACTS
+    )
     assert swept.market_days == {(SERIES, DISCOVERY_DAY): 2, (SERIES, HOLDOUT_DAY): 1}
+
+
+def test_a_print_that_only_matches_the_queue_ahead_credits_that_side_nothing(
+    tmp_path: Path, paths: dict[str, Path], scope: RunScope
+) -> None:
+    swept = sweep_fills(
+        scope,
+        artifacts_dir(tmp_path, no_side_short=True, name="no_side_short"),
+        paths["closes"],
+        maker_rate=FREE,
+        cohort=COHORT,
+    )
+    discovery = swept.tallies[(DISCOVERY, PRIMARY_HORIZON_S)]
+
+    assert swept.yes_fills == 3
+    assert swept.no_fills == 2
+    assert swept.offered == MARKETS_SWEPT * PLACEMENTS_PER_MARKET * 2
+    assert discovery.weights[T62] == YES_CONTRACTS + NO_CONTRACTS
+    assert discovery.weights[T64] == YES_CONTRACTS
+
+
+def test_a_side_the_book_never_quotes_is_never_offered_and_counted_on_its_own_side(
+    tmp_path: Path, paths: dict[str, Path], scope: RunScope
+) -> None:
+    swept = sweep_fills(
+        scope,
+        artifacts_dir(tmp_path, one_sided=True, name="one_sided"),
+        paths["closes"],
+        maker_rate=FREE,
+        cohort=COHORT,
+    )
+    resting = MARKETS_SWEPT * (PLACEMENTS_PER_MARKET - 1)
+
+    assert swept.yes_empty == 0
+    assert swept.no_empty == resting
+    assert swept.offered == MARKETS_SWEPT * PLACEMENTS_PER_MARKET * 2 - resting
+
+
+def test_the_sweep_reads_only_the_markets_this_event_day_settles_and_the_pull_named(
+    tmp_path: Path, paths: dict[str, Path], scope: RunScope
+) -> None:
+    swept = sweep_fills(
+        scope,
+        artifacts_dir(tmp_path, strays=True, name="strays"),
+        paths["closes"],
+        maker_rate=FREE,
+        cohort=COHORT,
+    )
+
+    assert swept.market_days == {(SERIES, DISCOVERY_DAY): 3, (SERIES, HOLDOUT_DAY): 1}
+    assert swept.unnamed_markets == 1
+    assert sorted(swept.tallies[(DISCOVERY, PRIMARY_HORIZON_S)].totals) == [T62, T64]
+    assert sorted(swept.tallies[(HOLDOUT, PRIMARY_HORIZON_S)].totals) == [NEXT_TICKER]
 
 
 def test_every_horizon_reads_the_same_seed(swept: Sweep) -> None:
@@ -676,16 +817,18 @@ def test_the_two_rates_price_the_same_fills_and_only_one_reaches_the_manifest(
     sensitivity = payload["published_rate_sensitivity"]
     manifest = json.loads((tmp_path / "tape_studies" / RUN_ID / MANIFEST_NAME).read_text())
 
-    assert payload["discovery"]["edge_cents_per_contract"] == "0.5000"
+    assert Decimal(payload["discovery"]["edge_cents_per_contract"]).quantize(QUANTUM) == GATING_EDGE
     assert sensitivity["rate"] == str(MAKER_RATE)
     assert sensitivity["gating"] is False
-    assert Decimal(sensitivity[f"{DISCOVERY}_edge_cents_per_contract"]) < Decimal("0.5000")
+    assert Decimal(sensitivity[f"{DISCOVERY}_edge_cents_per_contract"]) < FLAT_EDGE
     assert sensitivity[f"{DISCOVERY}_market_days"] == 2
     assert payload["gate"]["estimate"] == payload["discovery"]["edge_cents_per_contract"]
     assert Decimal(payload["gate"]["estimate"]) != Decimal(
         sensitivity[f"{DISCOVERY}_edge_cents_per_contract"]
     )
     assert set(sensitivity).isdisjoint({"economic", "significant", "powered", "passed", "bar"})
+    assert payload["maker_rate"] == str(FREE)
+    assert payload["maker_rate"] != str(MAKER_RATE)
     assert manifest["fee_maker_rate"] == "0"
     assert manifest["fee_maker_rate"] != str(MAKER_RATE)
     assert manifest["economic_bar_size"] == "0"
@@ -799,3 +942,145 @@ def test_the_run_states_the_zero_bar_and_the_regime_it_prices_under(
     assert payload["verdict"] == UNDERPOWERED
     assert [item["horizon_s"] for item in payload["horizon_curve"]] == list(HORIZONS_S)
     assert json.loads(json.dumps(payload)) == payload
+
+
+def test_the_gate_reads_the_sixty_second_horizon_and_not_its_neighbours(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    payload = result_payload(run_at(tmp_path, paths, rate=FREE))
+    curve = {item["horizon_s"]: item for item in payload["horizon_curve"]}
+
+    assert payload["primary_horizon_s"] == PRIMARY_HORIZON_S
+    assert payload["discovery"] == curve[PRIMARY_HORIZON_S]
+    assert payload["gate"]["estimate"] == curve[PRIMARY_HORIZON_S]["edge_cents_per_contract"]
+    assert payload["gate"]["n"] == payload["discovery"]["market_days"]
+    assert (
+        Decimal(curve[PRIMARY_HORIZON_S]["edge_cents_per_contract"]).quantize(QUANTUM)
+        == GATING_EDGE
+    )
+    assert {Decimal(curve[horizon_s]["edge_cents_per_contract"]) for horizon_s in (1, 10, 300)} == {
+        FLAT_EDGE
+    }
+    assert payload["discovery"]["n_fills"] == 4
+    assert payload["discovery"]["contracts"] == str(2 * (YES_CONTRACTS + NO_CONTRACTS))
+    assert payload["discovery"]["ci_level"] == CI_LEVEL
+    assert payload["fills"]["scored_discovery"] == 4
+    assert payload["fills"]["scored_holdout"] == 2
+
+
+def test_the_published_rate_edge_comes_off_the_horizon_the_gate_reads(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    payload = result_payload(run_at(tmp_path, paths, rate=MAKER_RATE))
+    sensitivity = payload["published_rate_sensitivity"]
+    holdout = payload["holdout"]["edge_cents_per_contract"]
+    curve = {
+        item["horizon_s"]: item["edge_cents_per_contract"] for item in payload["horizon_curve"]
+    }
+
+    assert sensitivity["horizon_s"] == PRIMARY_HORIZON_S
+    assert sensitivity["rate"] == "0.0175"
+    assert sensitivity["rate_source"] == "published_formula"
+    assert sensitivity[f"{DISCOVERY}_edge_cents_per_contract"] == curve[PRIMARY_HORIZON_S]
+    assert sensitivity[f"{DISCOVERY}_edge_cents_per_contract"] not in {
+        curve[horizon_s] for horizon_s in (1, 10, 300)
+    }
+    assert sensitivity[f"{HOLDOUT}_edge_cents_per_contract"] == holdout
+    assert sensitivity[f"{HOLDOUT}_market_days"] == 1
+
+
+# Which regime gates and which is only reported is a pre-registration decision, so both stand
+# pinned where the run left them and a change to either has to show up as one.
+def test_the_gating_rate_and_the_reported_rate_stand_where_the_run_left_them() -> None:
+    assert MAKER_RATE == Decimal("0.0175")
+    assert MAKER_RATE_SOURCE == "published_formula"
+    assert PUBLISHED_MAKER_RATE == Decimal("0.0175")
+    assert PUBLISHED_MAKER_RATE_SOURCE == "published_formula"
+
+
+def test_a_resample_spread_that_only_vanishes_against_its_scale_is_still_degenerate(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    payload = result_payload(run_at(tmp_path, paths, rate=FREE))
+
+    assert payload["discovery"]["market_days"] == 2
+    assert payload["discovery"]["replicate_spread"] > 0
+    assert payload["discovery"]["degenerate"] is True
+    assert payload["gate"]["undecidable"] is True
+    assert payload["gate"]["significant"] is False
+
+
+def test_a_degenerate_holdout_refuses_the_replication_the_run_otherwise_reaches(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    payload = result_payload(run_at(tmp_path, paths, rate=FREE))
+    replication = payload["replication"]
+
+    assert payload["holdout"]["market_days"] == 1
+    assert payload["holdout"]["degenerate"] is True
+    assert replication["holdout_n"] == 1
+    assert replication["same_sign"] is True
+    assert replication["magnitude"] is True
+    assert replication["undecidable"] is True
+    assert replication["significant"] is False
+    assert replication["replicated"] is False
+    assert payload["replication_skipped"] == ""
+
+
+def test_the_manifest_names_the_seed_the_bootstrap_drew_and_the_sources_it_priced_under(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    run = run_at(tmp_path, paths, rate=MAKER_RATE)
+    payload = result_payload(run)
+    manifest = json.loads((tmp_path / "tape_studies" / RUN_ID / MANIFEST_NAME).read_text())
+
+    assert manifest["bootstrap_seed"] == SEED
+    assert manifest["bootstrap_seed"] == run.primary.bootstrap.seed
+    assert manifest["bootstrap_seed"] == run.holdout.bootstrap.seed
+    assert manifest["fee_maker_rate"] == str(MAKER_RATE)
+    assert manifest["fee_maker_rate_source"] == MAKER_RATE_SOURCE
+    assert manifest["economic_bar_price_source"] == SELF_CHARGED_BAR_SOURCE
+    assert payload["manifest"] == str(tmp_path / "tape_studies" / RUN_ID / MANIFEST_NAME)
+    assert Path(payload["manifest"]).exists()
+
+
+def test_a_band_over_the_mark_out_drops_the_fill_and_names_the_class_that_dropped_it(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    paths["run_scope"] = scope_dir(
+        tmp_path,
+        bands=((QUIET_BAND, *MARK_BAND), (RECORDED_GAP, *HOLDOUT_BAND)),
+        name="banded",
+    )
+    payload = result_payload(run_at(tmp_path, paths, rate=FREE))
+    curve = {item["horizon_s"]: item for item in payload["horizon_curve"]}
+    sensitivity = payload["published_rate_sensitivity"]
+
+    assert curve[1]["candidates"] == 4
+    assert curve[1]["excluded"] == 0
+    assert Decimal(curve[1]["excluded_fraction"]) == 0
+    assert curve[10]["excluded"] == 2
+    assert curve[PRIMARY_HORIZON_S]["candidates"] == 4
+    assert curve[PRIMARY_HORIZON_S]["excluded"] == 4
+    assert Decimal(curve[PRIMARY_HORIZON_S]["excluded_fraction"]) == 1
+    assert curve[PRIMARY_HORIZON_S]["out_of_window"] == 0
+    assert curve[PRIMARY_HORIZON_S]["out_of_scope"] == 0
+    assert curve[PRIMARY_HORIZON_S]["by_class"][QUIET_BAND] == 4
+    assert curve[PRIMARY_HORIZON_S]["by_class"][RECORDED_GAP] == 0
+    assert payload["holdout"]["excluded"] == 2
+    assert payload["holdout"]["by_class"][RECORDED_GAP] == 2
+    assert payload["exclusions"]["candidates"] == 6
+    assert payload["exclusions"]["excluded"] == 6
+    assert Decimal(payload["exclusions"]["excluded_fraction"]) == 1
+    assert payload["exclusions"]["by_class"] == {
+        QUIET_BAND: 4,
+        RECORDED_GAP: 2,
+        RESUBSCRIBE_BLIND: 0,
+        SUBSCRIPTION_WIDE: 0,
+    }
+    assert payload["discovery"]["edge_cents_per_contract"] is None
+    assert sensitivity[f"{DISCOVERY}_edge_cents_per_contract"] is None
+    assert sensitivity[f"{DISCOVERY}_market_days"] == 0
+    assert payload["gate"] is None
+    assert payload["replication_skipped"] == NO_ESTIMATE
+    assert payload["verdict"] == UNDERPOWERED
