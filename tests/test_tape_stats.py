@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import subprocess
@@ -1240,3 +1241,77 @@ def test_the_gate_powers_off_the_cluster_count_the_result_carries() -> None:
     assert verdict.n == 3
     assert not verdict.powered
     assert not verdict.passed
+
+
+def test_a_strict_gate_refuses_an_estimate_sitting_exactly_on_the_bar() -> None:
+    arguments = {
+        "estimate": Decimal("0"),
+        "p_value": 0.001,
+        "result": counted(120),
+        "threshold": Decimal("0"),
+        "direction": "greater",
+        "alpha": FIXTURE_ALPHA,
+        "n_min": 100,
+        "n_unit": "market-days",
+        "undecidable": False,
+    }
+
+    inclusive = evaluate_gate(**arguments)
+    strict = evaluate_gate(**arguments, strict=True)
+
+    assert inclusive.economic
+    assert inclusive.passed
+    assert not strict.economic
+    assert not strict.passed
+    assert strict.significant
+    assert strict.powered
+
+
+def test_the_strict_comparison_runs_in_both_directions() -> None:
+    upward = evaluate_gate(
+        estimate=Decimal("0.03"),
+        p_value=0.001,
+        result=counted(120),
+        threshold=Decimal("0.02"),
+        direction="greater",
+        alpha=FIXTURE_ALPHA,
+        n_min=100,
+        n_unit="market-days",
+        undecidable=False,
+        strict=True,
+    )
+    downward = evaluate_gate(
+        estimate=Decimal("0.01"),
+        p_value=0.001,
+        result=counted(120),
+        threshold=Decimal("0.02"),
+        direction="less",
+        alpha=FIXTURE_ALPHA,
+        n_min=100,
+        n_unit="market-days",
+        undecidable=False,
+        strict=True,
+    )
+    on_the_bar = evaluate_gate(
+        estimate=Decimal("0.02"),
+        p_value=0.001,
+        result=counted(120),
+        threshold=Decimal("0.02"),
+        direction="less",
+        alpha=FIXTURE_ALPHA,
+        n_min=100,
+        n_unit="market-days",
+        undecidable=False,
+        strict=True,
+    )
+
+    assert upward.economic
+    assert downward.economic
+    assert not on_the_bar.economic
+
+
+def test_the_strict_comparison_is_off_unless_a_caller_asks_for_it() -> None:
+    strict = inspect.signature(evaluate_gate).parameters["strict"]
+
+    assert strict.default is False
+    assert strict.kind is inspect.Parameter.KEYWORD_ONLY

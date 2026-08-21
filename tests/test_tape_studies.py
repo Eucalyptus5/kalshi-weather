@@ -145,6 +145,7 @@ KNOWN_FAMILY_SCRIPTS = {
     "q4_report.py",
     "depth_report.py",
     "depth_continuity_report.py",
+    "f1_report.py",
 }
 
 

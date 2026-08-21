@@ -379,10 +379,16 @@ def evaluate_gate(
     n_min: int,
     n_unit: str,
     undecidable: bool,
+    strict: bool = False,
 ) -> GateVerdict:
     if direction not in DIRECTIONS:
         raise ValueError(f"direction must be one of {DIRECTIONS}, got {direction!r}")
-    economic = estimate >= threshold if direction == "greater" else estimate <= threshold
+    # Only a bar of zero puts a verdict on the boundary itself, so the inclusive comparison stays
+    # the default and a question stating a zero bar asks for the strict one.
+    if direction == "greater":
+        economic = estimate > threshold if strict else estimate >= threshold
+    else:
+        economic = estimate < threshold if strict else estimate <= threshold
     # An undecidable estimate carries no p-value worth comparing, and refusing at significance
     # rather than at passed is what makes the refusal bind on every condition downstream of it.
     significant = not undecidable and p_value < alpha
