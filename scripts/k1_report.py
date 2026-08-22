@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--regime",
         required=True,
         choices=REGIMES,
-        help="which schedule the venue carries for weather series, and so which grid decides",
+        help="which fee_type the series api carries for weather series, and so which grid decides",
     )
     parser.add_argument(
         "--rate",

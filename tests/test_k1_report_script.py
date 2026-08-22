@@ -9,11 +9,12 @@ from pathlib import Path
 import pytest
 
 from bot.lag.maker_headroom import BAND, MODELLED_NO, MODELLED_YES
-from scripts.k1_report import CLOSED, NO_FEE_REGIME, OPEN, PUBLISHED_REGIME
+from scripts.k1_report import CLOSED, NO_FEE_REGIME, OPEN, PUBLISHED_REGIME, build_parser
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = REPO_ROOT / "scripts" / "k1_report.py"
+REGIME_HELP = "which fee_type the series api carries for weather series, and so which grid decides"
 
 
 def invoke(*argv: str) -> subprocess.CompletedProcess[str]:
@@ -128,6 +129,13 @@ def test_the_script_refuses_to_guess_the_regime() -> None:
     assert completed.returncode == 2
     assert "--regime" in completed.stderr
     assert completed.stdout == ""
+
+
+def test_the_regime_flag_names_the_series_api_field_and_not_a_schedule() -> None:
+    text = " ".join(build_parser().format_help().split())
+
+    assert REGIME_HELP in text
+    assert "schedule" not in text
 
 
 def test_the_rate_is_read_as_a_decimal_not_a_float() -> None:

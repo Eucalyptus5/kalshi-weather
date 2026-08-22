@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from bot.lag.fee_floor import PUBLISHED_MAKER_RATE
 from bot.lag.maker_edge import HORIZONS_S, PRIMARY_HORIZON_S
 from bot.lag.maker_edge_run import (
     ALPHA,
@@ -129,6 +130,7 @@ def test_a_complete_run_writes_the_manifest_and_the_results_beside_it(
     assert results["bootstrap_seed"] == SEED
     assert results["bootstrap_resamples"] == BOOTSTRAP_RESAMPLES
     assert manifest["fee_maker_rate"] == str(MAKER_RATE)
+    assert manifest["fee_maker_rate"] != str(PUBLISHED_MAKER_RATE)
     assert capsys.readouterr().out == format_report(results) + "\n"
 
 
@@ -234,9 +236,10 @@ def test_the_published_rate_prints_beside_the_gating_figure_without_gating(
     results = results_of(run_root)
     sensitivity = results["published_rate_sensitivity"]
     assert sensitivity["gating"] is False
-    assert sensitivity["rate"] == str(MAKER_RATE)
+    assert sensitivity["rate"] == str(PUBLISHED_MAKER_RATE)
+    assert sensitivity["rate"] != results["maker_rate"]
     assert sensitivity["horizon_s"] == PRIMARY_HORIZON_S
-    assert Decimal(sensitivity["discovery_edge_cents_per_contract"]) == Decimal(
+    assert Decimal(sensitivity["discovery_edge_cents_per_contract"]) < Decimal(
         results["discovery"]["edge_cents_per_contract"]
     )
     assert "not gating" in format_report(results)

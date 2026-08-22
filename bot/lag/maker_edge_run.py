@@ -62,8 +62,8 @@ DIRECTION = "greater"
 MARKET_DAYS = "market-days"
 MARKET_DAY_MIN_DISCOVERY = 200
 COHORT = HIGH
-MAKER_RATE: Decimal = PUBLISHED_MAKER_RATE
-MAKER_RATE_SOURCE = PUBLISHED_MAKER_RATE_SOURCE
+MAKER_RATE: Decimal = Decimal("0")
+MAKER_RATE_SOURCE = "series_api_fee_type_quadratic_2026-08-19"
 
 # 0.05 Bonferroni-corrected at the three questions this tape's pre-registration fixed. Written as
 # the division because 0.05/3 has no exact decimal literal; the divisor is the frozen family count

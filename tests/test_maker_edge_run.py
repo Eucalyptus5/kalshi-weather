@@ -825,19 +825,19 @@ def test_the_two_rates_price_the_same_fills_and_only_one_reaches_the_manifest(
     manifest = json.loads((tmp_path / "tape_studies" / RUN_ID / MANIFEST_NAME).read_text())
 
     assert Decimal(payload["discovery"]["edge_cents_per_contract"]).quantize(QUANTUM) == GATING_EDGE
-    assert sensitivity["rate"] == str(MAKER_RATE)
+    assert sensitivity["rate"] == str(PUBLISHED_MAKER_RATE)
     assert sensitivity["gating"] is False
     assert Decimal(sensitivity[f"{DISCOVERY}_edge_cents_per_contract"]) < FLAT_EDGE
     assert sensitivity[f"{DISCOVERY}_market_days"] == 2
     assert payload["gate"]["estimate"] == payload["discovery"]["edge_cents_per_contract"]
-    assert Decimal(payload["gate"]["estimate"]) != Decimal(
+    assert Decimal(payload["gate"]["estimate"]) > Decimal(
         sensitivity[f"{DISCOVERY}_edge_cents_per_contract"]
     )
     assert set(sensitivity).isdisjoint({"economic", "significant", "powered", "passed", "bar"})
     assert payload["maker_rate"] == str(FREE)
-    assert payload["maker_rate"] != str(MAKER_RATE)
+    assert payload["maker_rate"] != str(PUBLISHED_MAKER_RATE)
     assert manifest["fee_maker_rate"] == "0"
-    assert manifest["fee_maker_rate"] != str(MAKER_RATE)
+    assert manifest["fee_maker_rate"] != str(PUBLISHED_MAKER_RATE)
     assert manifest["economic_bar_size"] == "0"
     assert manifest["economic_bar_cents_per_contract"] == "0"
     assert manifest["cohort"] == HIGH
@@ -978,13 +978,14 @@ def test_the_gate_reads_the_sixty_second_horizon_and_not_its_neighbours(
 def test_the_published_rate_edge_comes_off_the_horizon_the_gate_reads(
     tmp_path: Path, paths: dict[str, Path]
 ) -> None:
-    payload = result_payload(run_at(tmp_path, paths, rate=MAKER_RATE))
+    payload = result_payload(run_at(tmp_path, paths, rate=PUBLISHED_MAKER_RATE))
     sensitivity = payload["published_rate_sensitivity"]
     holdout = payload["holdout"]["edge_cents_per_contract"]
     curve = {
         item["horizon_s"]: item["edge_cents_per_contract"] for item in payload["horizon_curve"]
     }
 
+    assert payload["maker_rate"] == str(PUBLISHED_MAKER_RATE)
     assert sensitivity["horizon_s"] == PRIMARY_HORIZON_S
     assert sensitivity["rate"] == "0.0175"
     assert sensitivity["rate_source"] == "published_formula"
@@ -999,10 +1000,12 @@ def test_the_published_rate_edge_comes_off_the_horizon_the_gate_reads(
 # Which regime gates and which is only reported is a pre-registration decision, so both stand
 # pinned where the run left them and a change to either has to show up as one.
 def test_the_gating_rate_and_the_reported_rate_stand_where_the_run_left_them() -> None:
-    assert MAKER_RATE == Decimal("0.0175")
-    assert MAKER_RATE_SOURCE == "published_formula"
+    assert MAKER_RATE == Decimal("0")
+    assert MAKER_RATE_SOURCE == "series_api_fee_type_quadratic_2026-08-19"
     assert PUBLISHED_MAKER_RATE == Decimal("0.0175")
     assert PUBLISHED_MAKER_RATE_SOURCE == "published_formula"
+    assert MAKER_RATE != PUBLISHED_MAKER_RATE
+    assert MAKER_RATE_SOURCE != PUBLISHED_MAKER_RATE_SOURCE
 
 
 def test_a_resample_spread_that_only_vanishes_against_its_scale_is_still_degenerate(
