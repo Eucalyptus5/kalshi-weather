@@ -1,5 +1,5 @@
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -30,6 +30,7 @@ from bot.lag.maker_edge_run import (
     UNDERPOWERED,
     ZERO_ESTIMATE,
     HorizonReadout,
+    MakerEdgeRun,
     Sweep,
     bootstrap_of,
     cluster_aggregates,
@@ -176,7 +177,9 @@ def city_event_day(item: FillEdge) -> str:
     return item.ticker.rsplit("-", 1)[0]
 
 
-def keyed(edges: Sequence[FillEdge], key) -> tuple[ClusterAggregate, ...]:
+def keyed(
+    edges: Sequence[FillEdge], key: Callable[[FillEdge], str]
+) -> tuple[ClusterAggregate, ...]:
     totals: dict[str, Decimal] = {}
     weights: dict[str, Decimal] = {}
     for item in edges:
@@ -470,7 +473,7 @@ def run_paths(tmp_path: Path) -> dict[str, Path]:
 
 def run_at(
     tmp_path: Path, paths: dict[str, Path], *, rate: Decimal = FREE, cohort: str | None = COHORT
-):
+) -> MakerEdgeRun:
     return execute(
         run_id=RUN_ID,
         floor_source=FloorSource.SIGNED_READ,

@@ -78,6 +78,7 @@ CLOSED = "CLOSED"
 UNDERPOWERED = "UNDERPOWERED"
 ZERO_ESTIMATE = "a discovery estimate of exactly zero fixes no direction to replicate"
 NO_ESTIMATE = "a split with no scored fill carries no estimate to replicate"
+NO_GATE_ESTIMATE = "a split with no scored fill carries no estimate to test against the bar"
 
 
 # The cluster unit is the market-day: one Kalshi market on one event-day is exactly one ticker.

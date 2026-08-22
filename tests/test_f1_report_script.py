@@ -7,11 +7,18 @@ from pathlib import Path
 import pytest
 
 from bot.lag.maker_edge import HORIZONS_S, PRIMARY_HORIZON_S
-from bot.lag.maker_edge_run import ALPHA, MAKER_RATE, RESULTS_NAME, UNDERPOWERED
+from bot.lag.maker_edge_run import (
+    ALPHA,
+    MAKER_RATE,
+    NO_ESTIMATE,
+    NO_GATE_ESTIMATE,
+    RESULTS_NAME,
+    UNDERPOWERED,
+)
 from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME
 from bot.lag.tape_studies import SELF_CHARGED_BAR_SOURCE
 from bot.replay.analysis_stations import HIGH, LOW
-from bot.replay.run_scope import DISCOVERY, HOLDOUT
+from bot.replay.run_scope import DISCOVERY, HOLDOUT, QUIET_BAND, RECORDED_GAP
 from scripts.f1_report import (
     DEFAULT_RUN_ROOT,
     FLOOR_SOURCES,
@@ -22,8 +29,10 @@ from scripts.f1_report import (
 )
 from tests.test_maker_edge_run import (
     DISCOVERY_DAY,
+    HOLDOUT_BAND,
     HOLDOUT_DAY,
     LOW_SERIES,
+    MARK_BAND,
     SEED,
     SERIES,
     T62,
@@ -175,6 +184,27 @@ def test_the_gate_block_reads_the_gates_own_estimate_and_its_predicates(
 
     assert lines[at + 1].startswith(f"  estimate={gate['estimate']}  threshold={gate['threshold']}")
     assert f"passed={gate['passed']}" in lines[at + 2]
+
+
+def test_a_gate_with_no_estimate_reads_its_own_reason_and_not_the_replications(
+    paths: dict[str, Path], run_root: Path, tmp_path: Path
+) -> None:
+    paths["run_scope"] = scope_dir(
+        tmp_path, bands=((QUIET_BAND, *MARK_BAND), (RECORDED_GAP, *HOLDOUT_BAND)), name="banded"
+    )
+
+    assert run(args_for(paths, run_root)) == 0
+
+    results = results_of(run_root)
+    lines = format_report(results).splitlines()
+    at = lines.index("== GATE")
+    replication_at = lines.index("== REPLICATION")
+
+    assert results["gate"] is None
+    assert results["replication_skipped"] == NO_ESTIMATE
+    assert lines[at + 1] == f"  not evaluated: {NO_GATE_ESTIMATE}"
+    assert "replicate" not in lines[at + 1]
+    assert lines[replication_at + 1] == f"  not evaluated: {NO_ESTIMATE}"
 
 
 def test_each_split_block_reads_its_own_split_and_prints_in_fixed_point(

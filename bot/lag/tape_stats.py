@@ -383,8 +383,8 @@ def evaluate_gate(
 ) -> GateVerdict:
     if direction not in DIRECTIONS:
         raise ValueError(f"direction must be one of {DIRECTIONS}, got {direction!r}")
-    # Only a bar of zero puts a verdict on the boundary itself, so the inclusive comparison stays
-    # the default and a question stating a zero bar asks for the strict one.
+    # Equality means the bar has been met unless the bar is zero, where it means no edge at all,
+    # so the inclusive comparison stays the default and a zero bar asks for the strict one.
     if direction == "greater":
         economic = estimate > threshold if strict else estimate >= threshold
     else:
