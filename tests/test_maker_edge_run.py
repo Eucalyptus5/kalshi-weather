@@ -94,6 +94,9 @@ LOW_SERIES = "KXLOWTDEN"
 DISCOVERY_DAY = date(2026, 8, 10)
 HOLDOUT_DAY = date(2026, 8, 11)
 OPENS = timedelta(hours=6)
+# The window runs a full day from its open, so shutting it three minutes after the fills means
+# opening it the day before the event day.
+TAIL_OPENS = timedelta(hours=7, minutes=3) - timedelta(days=1)
 SCOPE_START = datetime(2026, 8, 10, 6, tzinfo=UTC)
 SCOPE_END = datetime(2026, 8, 12, 6, tzinfo=UTC)
 
@@ -396,10 +399,10 @@ def closes_dir(tmp_path: Path, *, roots: Sequence[str] = (SERIES,)) -> Path:
     return directory
 
 
-def event_day_table(series: Sequence[str] = (SERIES,)) -> pa.Table:
+def event_day_table(series: Sequence[str] = (SERIES,), *, opens: timedelta = OPENS) -> pa.Table:
     rows = [
         event_day_row(
-            event_date, in_scope=True, split=split, day_index=index, opens=OPENS, series=name
+            event_date, in_scope=True, split=split, day_index=index, opens=opens, series=name
         )
         for name in series
         for index, (event_date, split) in enumerate(
@@ -414,6 +417,7 @@ def scope_dir(
     *,
     series: Sequence[str] = (SERIES,),
     bands: Sequence[tuple[str, datetime, datetime]] = ((QUIET_BAND, QUIET_START, QUIET_END),),
+    opens: timedelta = OPENS,
     name: str = "scope",
 ) -> Path:
     directory = tmp_path / name
@@ -428,7 +432,7 @@ def scope_dir(
         ),
         directory / "exclusions.parquet",
     )
-    pq.write_table(event_day_table(series), directory / "event_days.parquet")
+    pq.write_table(event_day_table(series, opens=opens), directory / "event_days.parquet")
     write_split(
         directory / "split.json",
         Split(
@@ -1084,3 +1088,21 @@ def test_a_band_over_the_mark_out_drops_the_fill_and_names_the_class_that_droppe
     assert payload["gate"] is None
     assert payload["replication_skipped"] == NO_ESTIMATE
     assert payload["verdict"] == UNDERPOWERED
+
+
+def test_a_mark_out_running_past_the_day_window_is_out_of_window_and_not_excluded(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    paths["run_scope"] = scope_dir(tmp_path, opens=TAIL_OPENS, name="tail")
+
+    payload = result_payload(run_at(tmp_path, paths, rate=FREE))
+    curve = {item["horizon_s"]: item for item in payload["horizon_curve"]}
+
+    assert curve[300]["candidates"] == 4
+    assert curve[300]["out_of_window"] == 4
+    assert curve[300]["excluded"] == 0
+    assert curve[300]["out_of_scope"] == 0
+    assert curve[300]["edge_cents_per_contract"] is None
+    assert curve[PRIMARY_HORIZON_S]["out_of_window"] == 0
+    assert payload["holdout"]["out_of_window"] == 0
+    assert Decimal(payload["discovery"]["edge_cents_per_contract"]).quantize(QUANTUM) == GATING_EDGE

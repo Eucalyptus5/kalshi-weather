@@ -48,6 +48,17 @@ REQUIRED = (
     "--floor-source",
     "--seed",
 )
+SECTIONS = (
+    "== FILLS",
+    "== DISCOVERY (primary)",
+    "== HOLDOUT (primary)",
+    "== GATE",
+    "== REPLICATION",
+    "== HORIZON CURVE (discovery)",
+    "== PUBLISHED-RATE SENSITIVITY (reported, not gating)",
+    "== EXCLUSIONS",
+    "== COVERAGE",
+)
 
 
 def argv_for(paths: dict[str, Path], run_root: Path) -> list[str]:
@@ -138,6 +149,51 @@ def test_the_results_carry_the_readout_the_question_asked_for(
         f"{SERIES} {HOLDOUT_DAY.isoformat()}": 1,
     }
     assert T62.startswith(SERIES) and T64.startswith(SERIES)
+
+
+def test_the_report_opens_on_the_verdict_and_lays_its_sections_out_in_order(
+    paths: dict[str, Path], run_root: Path
+) -> None:
+    assert run(args_for(paths, run_root)) == 0
+
+    lines = format_report(results_of(run_root)).splitlines()
+    at = [lines.index(name) for name in SECTIONS]
+
+    assert lines[0] == f"== F1 MAKER EDGE  run_id={RUN_ID}  verdict={UNDERPOWERED}"
+    assert at == sorted(at)
+
+
+def test_the_gate_block_reads_the_gates_own_estimate_and_its_predicates(
+    paths: dict[str, Path], run_root: Path
+) -> None:
+    assert run(args_for(paths, run_root)) == 0
+
+    results = results_of(run_root)
+    gate = results["gate"]
+    lines = format_report(results).splitlines()
+    at = lines.index("== GATE")
+
+    assert lines[at + 1].startswith(f"  estimate={gate['estimate']}  threshold={gate['threshold']}")
+    assert f"passed={gate['passed']}" in lines[at + 2]
+
+
+def test_each_split_block_reads_its_own_split_and_prints_in_fixed_point(
+    paths: dict[str, Path], run_root: Path
+) -> None:
+    assert run(args_for(paths, run_root)) == 0
+
+    results = results_of(run_root)
+    discovery = results["discovery"]
+    lines = format_report(results).splitlines()
+    at = lines.index("== DISCOVERY (primary)")
+    holdout_at = lines.index("== HOLDOUT (primary)")
+
+    assert discovery["market_days"] != results["holdout"]["market_days"]
+    assert f"market_days={discovery['market_days']}" in lines[at + 1]
+    assert f"market_days={results['holdout']['market_days']}" in lines[holdout_at + 1]
+    assert str(discovery["p_value"]) != f"{discovery['p_value']:.5f}"
+    assert f"p_value={discovery['p_value']:.5f}" in lines[at + 1]
+    assert f"degenerate={discovery['degenerate']}" in lines[at + 2]
 
 
 def test_the_published_rate_prints_beside_the_gating_figure_without_gating(
