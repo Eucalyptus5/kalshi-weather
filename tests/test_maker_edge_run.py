@@ -934,16 +934,17 @@ def test_a_two_ladder_scope_needs_the_run_to_name_its_cohort(tmp_path: Path) -> 
     assert COHORT == HIGH
 
 
+@pytest.mark.parametrize("rate", (MAKER_RATE, PUBLISHED_MAKER_RATE))
 def test_the_run_states_the_zero_bar_and_the_regime_it_prices_under(
-    tmp_path: Path, paths: dict[str, Path]
+    tmp_path: Path, paths: dict[str, Path], rate: Decimal
 ) -> None:
-    payload = result_payload(run_at(tmp_path, paths, rate=MAKER_RATE))
+    payload = result_payload(run_at(tmp_path, paths, rate=rate))
 
     assert payload["bar"] == "0"
     assert payload["bar_source"] == SELF_CHARGED_BAR_SOURCE
     assert payload["bar_is_strict"] is True
     assert payload["alpha"] == ALPHA
-    assert payload["maker_rate"] == str(MAKER_RATE)
+    assert payload["maker_rate"] == str(rate)
     assert payload["market_day_min_discovery"] == 200
     assert payload["gate"]["threshold"] == "0"
     assert payload["verdict"] == UNDERPOWERED
@@ -1001,6 +1002,7 @@ def test_the_published_rate_edge_comes_off_the_horizon_the_gate_reads(
 # pinned where the run left them and a change to either has to show up as one.
 def test_the_gating_rate_and_the_reported_rate_stand_where_the_run_left_them() -> None:
     assert MAKER_RATE == Decimal("0")
+    assert str(MAKER_RATE) == "0"
     assert MAKER_RATE_SOURCE == "series_api_fee_type_quadratic_2026-08-19"
     assert PUBLISHED_MAKER_RATE == Decimal("0.0175")
     assert PUBLISHED_MAKER_RATE_SOURCE == "published_formula"

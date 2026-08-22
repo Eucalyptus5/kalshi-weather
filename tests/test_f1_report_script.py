@@ -6,11 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from bot.lag.fee_floor import PUBLISHED_MAKER_RATE
+from bot.lag.fee_floor import (
+    MAKER_RATE_SOURCE as PUBLISHED_MAKER_RATE_SOURCE,
+    PUBLISHED_MAKER_RATE,
+)
 from bot.lag.maker_edge import HORIZONS_S, PRIMARY_HORIZON_S
 from bot.lag.maker_edge_run import (
     ALPHA,
     MAKER_RATE,
+    MAKER_RATE_SOURCE,
     NO_ESTIMATE,
     NO_GATE_ESTIMATE,
     RESULTS_NAME,
@@ -131,6 +135,8 @@ def test_a_complete_run_writes_the_manifest_and_the_results_beside_it(
     assert results["bootstrap_resamples"] == BOOTSTRAP_RESAMPLES
     assert manifest["fee_maker_rate"] == str(MAKER_RATE)
     assert manifest["fee_maker_rate"] != str(PUBLISHED_MAKER_RATE)
+    assert manifest["fee_maker_rate_source"] == MAKER_RATE_SOURCE
+    assert manifest["fee_maker_rate_source"] != PUBLISHED_MAKER_RATE_SOURCE
     assert capsys.readouterr().out == format_report(results) + "\n"
 
 
@@ -235,6 +241,10 @@ def test_the_published_rate_prints_beside_the_gating_figure_without_gating(
 
     results = results_of(run_root)
     sensitivity = results["published_rate_sensitivity"]
+    report = format_report(results)
+    lines = report.splitlines()
+    at = lines.index("== PUBLISHED-RATE SENSITIVITY (reported, not gating)")
+
     assert sensitivity["gating"] is False
     assert sensitivity["rate"] == str(PUBLISHED_MAKER_RATE)
     assert sensitivity["rate"] != results["maker_rate"]
@@ -242,7 +252,11 @@ def test_the_published_rate_prints_beside_the_gating_figure_without_gating(
     assert Decimal(sensitivity["discovery_edge_cents_per_contract"]) < Decimal(
         results["discovery"]["edge_cents_per_contract"]
     )
-    assert "not gating" in format_report(results)
+    assert lines[at + 1].startswith(f"  rate={sensitivity['rate']} ")
+    assert next(line for line in lines if line.startswith("bar=")).endswith(
+        f"maker_rate={results['maker_rate']}"
+    )
+    assert "not gating" in report
 
 
 def test_the_curve_reports_every_frozen_horizon_on_discovery(
