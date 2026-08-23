@@ -101,6 +101,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 SERIES = "KXHIGHDEN"
 LOW_SERIES = "KXLOWTDEN"
+OTHER_SERIES = "KXHIGHNY"
 DISCOVERY_DAY = date(2026, 8, 10)
 HOLDOUT_DAY = date(2026, 8, 11)
 OPENS = timedelta(hours=6)
@@ -1204,10 +1205,29 @@ def test_the_wire_reads_the_roots_the_cohort_sweeps_and_no_others(
             LOW_SERIES: series_body(LOW_SERIES, fee_multiplier=2),
         },
     )
+    both = paths | {
+        "run_scope": scope_dir(tmp_path, series=(SERIES, LOW_SERIES), name="both"),
+        "closes": closes_dir(tmp_path, roots=(SERIES, LOW_SERIES)),
+        "fee_regime": moved,
+    }
 
-    run_at(tmp_path, paths | {"fee_regime": moved}, cohort=HIGH)
+    run_at(tmp_path, both, cohort=HIGH)
 
     assert manifest_of(tmp_path)["fee_type_check"] == PLAIN_REGIME
+
+
+def test_the_wire_reads_the_root_the_run_sweeps_and_not_the_one_it_was_written_for(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    elsewhere = paths | {
+        "run_scope": scope_dir(tmp_path, series=(OTHER_SERIES,), name="other"),
+        "fee_regime": fee_regime_at(tmp_path / "den_only.json", {SERIES: series_body(SERIES)}),
+    }
+
+    with pytest.raises(FeeRegimeMoved, match=OTHER_SERIES):
+        run_at(tmp_path, elsewhere, cohort=HIGH)
+
+    assert not (tmp_path / "tape_studies").exists()
 
 
 def test_a_tampered_fee_regime_sidecar_stops_the_run(

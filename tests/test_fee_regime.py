@@ -30,7 +30,7 @@ ROOTS = (DEN, NY, SFO, MIA)
 MAKER_FEE_TYPE = "quadratic_with_maker_fees"
 
 
-def series_body(root: str, fee_type: str = PLAIN_FEE_TYPE, fee_multiplier: int = 1) -> dict:
+def series_body(root: str, fee_type: str = PLAIN_FEE_TYPE, fee_multiplier: object = 1) -> dict:
     return {
         "series": {
             "ticker": root,
@@ -89,6 +89,18 @@ def test_the_sidecar_reproduces_its_digest_on_a_second_read(tmp_path: Path) -> N
     assert read_fee_regime(path).sha256 == read_fee_regime(path).sha256
 
 
+def test_the_order_the_roots_were_asked_for_does_not_move_the_digest(tmp_path: Path) -> None:
+    bodies = plain_bodies()
+    forward = tmp_path / "forward.json"
+    reverse = tmp_path / "reverse.json"
+
+    ahead = pull_fee_regime(list(ROOTS), OBSERVED_AT, forward, transport_for(bodies))
+    behind = pull_fee_regime(list(reversed(ROOTS)), OBSERVED_AT, reverse, transport_for(bodies))
+
+    assert ahead == behind
+    assert forward.read_text() == reverse.read_text()
+
+
 def test_the_sweep_refuses_to_overwrite_a_frozen_sidecar(tmp_path: Path) -> None:
     path = tmp_path / "fee_regime.json"
     bodies = plain_bodies()
@@ -125,6 +137,17 @@ def test_a_series_the_venue_refuses_is_never_frozen(tmp_path: Path) -> None:
 
     with pytest.raises(httpx.HTTPStatusError):
         pull_fee_regime([DEN, "KXHIGHNOWHERE"], OBSERVED_AT, path, transport_for(plain_bodies()))
+
+
+def test_a_response_naming_another_series_leaves_the_asked_for_root_unfrozen(
+    tmp_path: Path,
+) -> None:
+    regime = frozen(tmp_path / "fee_regime.json", {DEN: series_body(NY)})
+
+    assert sorted(regime.series) == [NY]
+
+    with pytest.raises(FeeRegimeMoved, match=f"{DEN} is not named in the frozen sidecar"):
+        check_fee_regime(regime, (DEN,))
 
 
 def test_a_plain_sweep_clears_the_wire(plain: FeeRegime) -> None:
@@ -164,6 +187,27 @@ def test_a_doubled_multiplier_trips_the_wire(tmp_path: Path) -> None:
 
     assert MIA in str(excinfo.value)
     assert "fee_multiplier=2" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("body", "offender"),
+    (
+        (series_body(SFO, fee_multiplier=1.0), ""),
+        (series_body(SFO, fee_multiplier="1"), "fee_multiplier=1"),
+        (series_body(SFO, fee_type="QUADRATIC"), "fee_type=QUADRATIC"),
+    ),
+)
+def test_the_wire_compares_the_values_the_venue_sent_and_coerces_none_of_them(
+    tmp_path: Path, body: dict, offender: str
+) -> None:
+    regime = frozen(tmp_path / "fee_regime.json", {SFO: body})
+
+    if not offender:
+        assert check_fee_regime(regime, (SFO,)) == PLAIN_REGIME
+        return
+
+    with pytest.raises(FeeRegimeMoved, match=offender):
+        check_fee_regime(regime, (SFO,))
 
 
 def test_a_root_the_sidecar_does_not_name_trips_the_wire(plain: FeeRegime) -> None:

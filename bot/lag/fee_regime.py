@@ -32,7 +32,7 @@ class FeeRegimeMoved(RuntimeError):
 class SeriesFee:
     root: str
     fee_type: str
-    fee_multiplier: int
+    fee_multiplier: object
 
 
 @dataclass(frozen=True, slots=True)
