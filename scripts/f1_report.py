@@ -48,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--rtt-samples", type=Path, required=True, help="the read-RTT sample file")
     parser.add_argument(
+        "--fee-regime",
+        type=Path,
+        required=True,
+        help="the frozen series fee_type sidecar the run is checked against",
+    )
+    parser.add_argument(
         "--floor-source",
         required=True,
         choices=FLOOR_SOURCES,
@@ -78,6 +84,7 @@ def run(args: argparse.Namespace) -> int:
             artifacts=args.artifacts,
             closes=args.closes,
             rtt_samples=args.rtt_samples,
+            fee_regime=args.fee_regime,
             floor_source=FloorSource(args.floor_source),
             maker_rate=MAKER_RATE,
             maker_rate_source=MAKER_RATE_SOURCE,

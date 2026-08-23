@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from bot.lag.fee_floor import FeeSource, economic_bar_cents_per_contract
+from bot.lag.fee_regime import FeeRegimeCheck
 from bot.lag.r0_universe import R0Universe, freeze_digest, universe_payload
 from bot.lag.read_rtt import (
     FloorSource,
@@ -84,6 +85,7 @@ class RunInputs:
     bootstrap_seed: int | None
     cohort: str | None = None
     exemptions: tuple[Exemption, ...] = ()
+    fee_type_check: FeeRegimeCheck | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +114,7 @@ class Manifest:
     bootstrap_seed: int
     cohort: str | None
     exemptions: tuple[Exemption, ...]
+    fee_type_check: FeeRegimeCheck | None
 
 
 def preregistration_sha256(path: Path) -> str:
@@ -193,6 +196,7 @@ def build_manifest(inputs: RunInputs) -> Manifest:
         bootstrap_seed=inputs.bootstrap_seed,
         cohort=inputs.cohort,
         exemptions=tuple(sorted(inputs.exemptions, key=lambda exemption: exemption.field)),
+        fee_type_check=inputs.fee_type_check,
     )
 
 
@@ -253,6 +257,13 @@ def manifest_payload(manifest: Manifest) -> dict:
             {"field": exemption.field, "reason": exemption.reason}
             for exemption in manifest.exemptions
         ]
+    # The pre-flight tripwire is not a rate and not a field every family supplies, so three null
+    # keys would move every digest frozen before the sidecar existed.
+    checked = manifest.fee_type_check
+    if checked is not None:
+        payload["fee_type_check"] = checked.result
+        payload["fee_type_observed_at"] = checked.observed_at.isoformat()
+        payload["fee_type_sha256"] = checked.sha256
     return payload
 
 

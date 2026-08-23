@@ -12,6 +12,7 @@ from bot.lag.fee_floor import (
     MAKER_RATE_SOURCE as PUBLISHED_MAKER_RATE_SOURCE,
     PUBLISHED_MAKER_RATE,
 )
+from bot.lag.fee_regime import FeeRegimeCheck, check_fee_regime, read_fee_regime
 from bot.lag.fill_convention import NO, YES, sweep_market_day
 from bot.lag.maker_edge import (
     HORIZONS_S,
@@ -385,6 +386,7 @@ def execute(
     artifacts: Path,
     closes: Path,
     rtt_samples: Path,
+    fee_regime: Path,
     floor_source: FloorSource,
     maker_rate: Decimal,
     maker_rate_source: str,
@@ -395,6 +397,17 @@ def execute(
     run_root: Path,
     cohort: str | None = None,
 ) -> MakerEdgeRun:
+    # The wire is pre-flight: a run whose fee regime has moved leaves no manifest behind, so the
+    # sidecar is read and checked before anything is written.
+    scope = load_run_scope(run_scope)
+    regime = read_fee_regime(fee_regime)
+    checked = FeeRegimeCheck(
+        result=check_fee_regime(
+            regime, in_cohort({series for series, _ in scope.event_days}, cohort)
+        ),
+        observed_at=regime.observed_at,
+        sha256=regime.sha256,
+    )
     inputs = assemble_run_inputs(
         run_id=run_id,
         preregistration=preregistration,
@@ -410,10 +423,10 @@ def execute(
         economic_bar_price_source=economic_bar_price_source,
         bootstrap_seed=seed,
         cohort=cohort,
+        fee_type_check=checked,
     )
     digest = write_manifest(run_root, inputs)
 
-    scope = load_run_scope(run_scope)
     swept = sweep_fills(scope, artifacts, closes, maker_rate=maker_rate, cohort=cohort)
     # One seed across the four horizons is the pre-registered draw: the horizons carrying equal
     # cluster counts then resample identical positions, so the curve's differences are the horizon

@@ -10,6 +10,7 @@ from bot.lag.fee_floor import (
     MAKER_RATE_SOURCE as PUBLISHED_MAKER_RATE_SOURCE,
     PUBLISHED_MAKER_RATE,
 )
+from bot.lag.fee_regime import PLAIN_REGIME, FeeRegimeMoved, read_fee_regime
 from bot.lag.maker_edge import HORIZONS_S, PRIMARY_HORIZON_S
 from bot.lag.maker_edge_run import (
     ALPHA,
@@ -44,9 +45,11 @@ from tests.test_maker_edge_run import (
     T64,
     artifacts_dir,
     closes_dir,
+    fee_regime_at,
     run_paths,
     scope_dir,
 )
+from tests.test_fee_regime import series_body
 from tests.test_tape_studies import SHORT_SAMPLES, argument_flags, write_rtt_samples
 
 
@@ -59,6 +62,7 @@ REQUIRED = (
     "--artifacts",
     "--closes",
     "--rtt-samples",
+    "--fee-regime",
     "--floor-source",
     "--seed",
 )
@@ -89,6 +93,8 @@ def argv_for(paths: dict[str, Path], run_root: Path) -> list[str]:
         str(paths["closes"]),
         "--rtt-samples",
         str(paths["rtt_samples"]),
+        "--fee-regime",
+        str(paths["fee_regime"]),
         "--floor-source",
         "RTT_read",
         "--seed",
@@ -395,3 +401,27 @@ def test_the_bar_and_the_regime_are_not_command_line_inputs() -> None:
     assert [flag for flag in flags if "rate" in flag] == []
     assert "closes" in flags
     assert isinstance(ast.parse(SCRIPT.read_text()), ast.Module)
+
+
+def test_the_manifest_the_run_writes_records_the_regime_the_wire_cleared(
+    paths: dict[str, Path], run_root: Path
+) -> None:
+    assert run(args_for(paths, run_root)) == 0
+
+    manifest = json.loads((run_root / RUN_ID / MANIFEST_NAME).read_text())
+    assert manifest["fee_type_check"] == PLAIN_REGIME
+    assert manifest["fee_type_sha256"] == read_fee_regime(paths["fee_regime"]).sha256
+    assert manifest["fee_maker_rate"] == str(MAKER_RATE)
+
+
+def test_a_moved_regime_stops_the_run_before_it_writes_anything(
+    paths: dict[str, Path], run_root: Path, tmp_path: Path
+) -> None:
+    paths["fee_regime"] = fee_regime_at(
+        tmp_path / "moved.json", {SERIES: series_body(SERIES, fee_multiplier=2)}
+    )
+
+    with pytest.raises(FeeRegimeMoved, match=SERIES):
+        run(args_for(paths, run_root))
+
+    assert not run_root.exists()

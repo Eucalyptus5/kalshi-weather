@@ -12,6 +12,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from bot.lag.fee_floor import fee_source
+from bot.lag.fee_regime import FeeRegimeCheck
 from bot.lag.r0_universe import R0Universe
 from bot.lag.r0_universe import freeze_digest as universe_digest
 from bot.lag.read_rtt import FloorSource, load_samples
@@ -337,6 +338,7 @@ def assemble_run_inputs(
     economic_bar_price_source: str,
     bootstrap_seed: int,
     cohort: str | None = None,
+    fee_type_check: FeeRegimeCheck | None = None,
 ) -> RunInputs:
     scope = load_run_scope(run_scope)
     swept = set(in_cohort({series for series, _ in scope.event_days}, cohort))
@@ -371,6 +373,7 @@ def assemble_run_inputs(
         economic_bar_price_source=economic_bar_price_source,
         bootstrap_seed=bootstrap_seed,
         cohort=cohort,
+        fee_type_check=fee_type_check,
     )
 
 

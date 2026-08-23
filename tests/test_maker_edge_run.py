@@ -1,5 +1,6 @@
+import inspect
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -11,6 +12,13 @@ import pytest
 from bot.lag.fee_floor import (
     MAKER_RATE_SOURCE as PUBLISHED_MAKER_RATE_SOURCE,
     PUBLISHED_MAKER_RATE,
+)
+from bot.lag.fee_regime import (
+    PLAIN_FEE_TYPE,
+    PLAIN_REGIME,
+    FeeRegimeMoved,
+    pull_fee_regime,
+    read_fee_regime,
 )
 from bot.lag.fill_convention import NO, NO_CONTRACTS, YES, YES_CONTRACTS
 from bot.lag.maker_edge import HORIZONS_S, PRIMARY_HORIZON_S, FillEdge
@@ -75,6 +83,7 @@ from bot.replay.run_scope import (
     Split,
     write_split,
 )
+from tests.test_fee_regime import MAKER_FEE_TYPE, series_body, transport_for
 from tests.test_tape_studies import (
     ADEQUATE_SAMPLES,
     SHORT_SAMPLES,
@@ -117,6 +126,7 @@ NEXT_PLACEMENT = datetime(2026, 8, 11, 7, tzinfo=UTC)
 
 SEED = 20260819
 RUN_ID = "2026-08-19-f1"
+REGIME_OBSERVED_AT = datetime(2026, 8, 19, 17, 30, tzinfo=UTC)
 FREE = Decimal("0")
 YES_BID = "0.4000"
 STEP_BID = "0.4100"
@@ -460,6 +470,11 @@ def scope_dir(
     return directory
 
 
+def fee_regime_at(path: Path, bodies: Mapping[str, dict]) -> Path:
+    pull_fee_regime(sorted(bodies), REGIME_OBSERVED_AT, path, transport_for(bodies))
+    return path
+
+
 def run_paths(tmp_path: Path) -> dict[str, Path]:
     return {
         "preregistration": write_preregistration(tmp_path / "preregistration.md"),
@@ -468,6 +483,10 @@ def run_paths(tmp_path: Path) -> dict[str, Path]:
         "artifacts": artifacts_dir(tmp_path),
         "closes": closes_dir(tmp_path),
         "rtt_samples": write_rtt_samples(tmp_path / "samples.jsonl", ADEQUATE_SAMPLES),
+        "fee_regime": fee_regime_at(
+            tmp_path / "fee_regime.json",
+            {root: series_body(root) for root in (SERIES, LOW_SERIES)},
+        ),
     }
 
 
@@ -1114,3 +1133,90 @@ def test_a_mark_out_running_past_the_day_window_is_out_of_window_and_not_exclude
     assert curve[PRIMARY_HORIZON_S]["out_of_window"] == 0
     assert payload["holdout"]["out_of_window"] == 0
     assert Decimal(payload["discovery"]["edge_cents_per_contract"]).quantize(QUANTUM) == GATING_EDGE
+
+
+def manifest_of(tmp_path: Path) -> dict:
+    return json.loads((tmp_path / "tape_studies" / RUN_ID / MANIFEST_NAME).read_text())
+
+
+def test_the_run_will_not_start_without_the_frozen_fee_regime() -> None:
+    parameter = inspect.signature(execute).parameters["fee_regime"]
+
+    assert parameter.default is inspect.Parameter.empty
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_a_cleared_tripwire_is_recorded_beside_the_rate_it_did_not_set(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    run_at(tmp_path, paths)
+
+    payload = manifest_of(tmp_path)
+    assert payload["fee_type_check"] == PLAIN_REGIME
+    assert payload["fee_type_observed_at"] == REGIME_OBSERVED_AT.isoformat()
+    assert payload["fee_type_sha256"] == read_fee_regime(paths["fee_regime"]).sha256
+
+
+def test_the_tripwire_is_never_a_rate_source(tmp_path: Path, paths: dict[str, Path]) -> None:
+    run = run_at(tmp_path, paths)
+
+    assert MAKER_RATE == Decimal("0")
+    assert run.maker_rate == Decimal("0")
+    assert manifest_of(tmp_path)["fee_maker_rate"] == "0"
+    assert manifest_of(tmp_path)["fee_maker_rate_source"] == MAKER_RATE_SOURCE
+
+
+def test_a_run_whose_tripwire_fires_writes_no_manifest(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    moved = fee_regime_at(
+        tmp_path / "moved.json",
+        {
+            SERIES: series_body(SERIES, fee_type=MAKER_FEE_TYPE),
+            LOW_SERIES: series_body(LOW_SERIES),
+        },
+    )
+
+    with pytest.raises(FeeRegimeMoved, match=SERIES):
+        run_at(tmp_path, paths | {"fee_regime": moved})
+
+    assert not (tmp_path / "tape_studies").exists()
+
+
+def test_a_root_the_frozen_sidecar_never_named_stops_the_run(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    partial = fee_regime_at(tmp_path / "partial.json", {LOW_SERIES: series_body(LOW_SERIES)})
+
+    with pytest.raises(FeeRegimeMoved, match=SERIES):
+        run_at(tmp_path, paths | {"fee_regime": partial})
+
+    assert not (tmp_path / "tape_studies").exists()
+
+
+def test_the_wire_reads_the_roots_the_cohort_sweeps_and_no_others(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    moved = fee_regime_at(
+        tmp_path / "other_ladder.json",
+        {
+            SERIES: series_body(SERIES),
+            LOW_SERIES: series_body(LOW_SERIES, fee_multiplier=2),
+        },
+    )
+
+    run_at(tmp_path, paths | {"fee_regime": moved}, cohort=HIGH)
+
+    assert manifest_of(tmp_path)["fee_type_check"] == PLAIN_REGIME
+
+
+def test_a_tampered_fee_regime_sidecar_stops_the_run(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    path = paths["fee_regime"]
+    path.write_text(path.read_text().replace(PLAIN_FEE_TYPE, MAKER_FEE_TYPE))
+
+    with pytest.raises(ValueError, match="sha256"):
+        run_at(tmp_path, paths)
+
+    assert not (tmp_path / "tape_studies").exists()

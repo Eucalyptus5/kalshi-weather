@@ -9,7 +9,13 @@ from pathlib import Path
 import pytest
 
 from bot.execution import fees
-from bot.lag.fee_floor import MAKER_RATE_SOURCE, PUBLISHED_MAKER_RATE, fee_source
+from bot.lag.fee_floor import (
+    MAKER_RATE_SOURCE,
+    PUBLISHED_MAKER_RATE,
+    economic_bar_cents_per_contract,
+    fee_source,
+)
+from bot.lag.fee_regime import PLAIN_REGIME, FeeRegimeCheck
 from bot.lag.r0_universe import (
     Coverage,
     R0Universe,
@@ -20,6 +26,7 @@ from bot.lag.r0_universe import (
 from bot.lag.read_rtt import (
     FloorSource,
     InadequateSamples,
+    LatencyFloor,
     ReadSample,
     derive_latency_floor,
 )
@@ -30,6 +37,7 @@ from bot.lag.run_manifest import (
     SUPPLIED_FIELDS,
     Exemption,
     ExemptionRefused,
+    GitState,
     Manifest,
     ManifestIncomplete,
     RunInputs,
@@ -61,6 +69,9 @@ ZERO_RATE = Decimal("0")
 ZERO_RATE_SOURCE = "kalshi_series_metadata"
 NO_TAPE = "the statistic reads no ws tape"
 NO_READS = "the statistic places no read against the api"
+OBSERVED_AT = datetime(2026, 8, 19, 17, 30, tzinfo=UTC)
+FROZEN_DIGEST = "2e73ed22bb8e6b90698a84b204da0d54ff332cbb844da78eeaac64ad3a481d41"
+FEE_TYPE_KEYS = ("fee_type_check", "fee_type_observed_at", "fee_type_sha256")
 FLOOR_KEYS = (
     "latency_floor_source",
     "latency_floor_s",
@@ -926,3 +937,70 @@ def test_a_run_naming_a_cohort_records_it_and_moves_the_digest(complete: RunInpu
     assert named["cohort"] == HIGH
     assert set(named) == FIELDS | {"cohort"}
     assert freeze_digest(named) != freeze_digest(manifest_payload(build_manifest(complete)))
+
+
+def _frozen_manifest(fee_type_check: FeeRegimeCheck | None) -> Manifest:
+    return Manifest(
+        run_id=RUN_ID,
+        preregistration=Path("preregistration.md"),
+        preregistration_sha256="0" * 64,
+        accrual_start=ACCRUAL_START,
+        accrual_end=ACCRUAL_END,
+        row_counts=dict(ROW_COUNTS),
+        git=GitState(head="1" * 40, dirty=False),
+        r0_fraction_invalid_max=THRESHOLD,
+        r0_universe_sha256="2" * 64,
+        fee=fee_source(maker_rate=PUBLISHED_MAKER_RATE, maker_rate_source=MAKER_RATE_SOURCE),
+        floor=LatencyFloor(
+            source=FloorSource.SIGNED_READ, floor_s=0.24, t_persist_s=10.0, n_usable=240
+        ),
+        economic_bar_size=BAR_SIZE,
+        economic_bar_price=BAR_PRICE,
+        economic_bar_price_source=BAR_PRICE_SOURCE,
+        economic_bar_cents_per_contract=economic_bar_cents_per_contract(BAR_SIZE, BAR_PRICE),
+        bootstrap_seed=SEED,
+        cohort=None,
+        exemptions=(),
+        fee_type_check=fee_type_check,
+    )
+
+
+def test_a_run_clearing_no_tripwire_writes_the_payload_it_wrote_before(
+    complete: RunInputs,
+) -> None:
+    payload = manifest_payload(build_manifest(complete))
+
+    assert complete.fee_type_check is None
+    assert set(payload).isdisjoint(FEE_TYPE_KEYS)
+    assert set(payload) == FIELDS
+
+
+def test_the_digest_of_a_run_clearing_no_tripwire_has_not_moved() -> None:
+    payload = manifest_payload(_frozen_manifest(None))
+
+    assert set(payload) == FIELDS
+    assert freeze_digest(payload) == FROZEN_DIGEST
+
+
+def test_a_run_clearing_the_tripwire_records_it_and_moves_the_digest() -> None:
+    checked = FeeRegimeCheck(result=PLAIN_REGIME, observed_at=OBSERVED_AT, sha256="3" * 64)
+
+    payload = manifest_payload(_frozen_manifest(checked))
+
+    assert set(payload) == FIELDS | set(FEE_TYPE_KEYS)
+    assert payload["fee_type_check"] == PLAIN_REGIME
+    assert payload["fee_type_observed_at"] == OBSERVED_AT.isoformat()
+    assert payload["fee_type_sha256"] == "3" * 64
+    assert freeze_digest(payload) != FROZEN_DIGEST
+
+
+def test_the_tripwire_is_neither_supplied_by_every_family_nor_exemptible() -> None:
+    assert "fee_type_check" not in dict(SUPPLIED_FIELDS)
+    assert "fee_type_check" not in dict(SUPPLIED_FIELDS).values()
+    assert "fee_type_check" not in EXEMPTIBLE_FIELDS
+
+
+def test_the_tripwire_is_not_a_fee_source_field(complete: RunInputs) -> None:
+    payload = fee_payload(complete.fee)
+
+    assert set(payload).isdisjoint(FEE_TYPE_KEYS)
