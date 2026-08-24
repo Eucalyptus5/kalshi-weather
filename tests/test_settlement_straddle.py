@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -17,6 +18,7 @@ from bot.lag.settlement_straddle import (
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEN = REPO_ROOT / "data" / "tape_studies" / "closes_v2" / "KXHIGHDEN.json"
+NY = REPO_ROOT / "data" / "tape_studies" / "closes_v2" / "KXHIGHNY.json"
 
 ROOT = "KXHIGHDEN"
 STATION = "KDEN"
@@ -28,6 +30,11 @@ EVENT_TICKER = "KXHIGHDEN-26AUG01"
 @pytest.fixture(scope="module")
 def sidecar() -> CloseSidecar:
     return read_sidecar(DEN)
+
+
+@pytest.fixture(scope="module")
+def ny_sidecar() -> CloseSidecar:
+    return read_sidecar(NY)
 
 
 def test_the_event_day_lists_the_six_rows_the_plan_names(sidecar: CloseSidecar) -> None:
@@ -163,6 +170,31 @@ def test_the_rows_partition_the_line(sidecar: CloseSidecar, reading: Decimal, ti
     assert settling_row(sidecar, EVENT_TICKER, reading).ticker == ticker
 
 
+def test_the_boundary_reading_belongs_to_the_between_row(sidecar: CloseSidecar) -> None:
+    assert sidecar.markets["KXHIGHDEN-26AUG01-T88"].cap_strike == 88
+    assert sidecar.markets["KXHIGHDEN-26AUG01-B88.5"].floor_strike == 88
+    assert settling_row(sidecar, EVENT_TICKER, Decimal("88")).ticker == "KXHIGHDEN-26AUG01-B88.5"
+
+    assert sidecar.markets["KXHIGHDEN-26AUG01-T95"].floor_strike == 95
+    assert sidecar.markets["KXHIGHDEN-26AUG01-B94.5"].cap_strike == 95
+    assert settling_row(sidecar, EVENT_TICKER, Decimal("95")).ticker == "KXHIGHDEN-26AUG01-B94.5"
+
+
+def test_two_rows_claiming_one_reading_are_refused(sidecar: CloseSidecar) -> None:
+    stretched = replace(sidecar.markets["KXHIGHDEN-26AUG01-T88"], cap_strike=90)
+    doubled = CloseSidecar(
+        root=sidecar.root,
+        markets={**sidecar.markets, stretched.ticker: stretched},
+        voided=sidecar.voided,
+        sha256=sidecar.sha256,
+    )
+    with pytest.raises(ValueError) as refused:
+        settling_row(doubled, EVENT_TICKER, Decimal("89"))
+    assert "KXHIGHDEN-26AUG01-B88.5" in str(refused.value)
+    assert "KXHIGHDEN-26AUG01-T88" in str(refused.value)
+    assert "89" in str(refused.value)
+
+
 @pytest.mark.parametrize(
     "event_ticker",
     ["KXHIGHDEN-26DEC25", "KXHIGHDEN-26AUG01-B94.5", "KXHIGHNY-26AUG01"],
@@ -216,6 +248,62 @@ def test_two_separating_edges_in_one_city_event_day_count_once(sidecar: CloseSid
     assert other.cell_edges == (95, 97, 99, 101, 103)
     assert city_event_days([record, other]) == 2
     assert city_event_days([]) == 0
+
+
+def test_one_city_event_day_twice_over_still_counts_once(sidecar: CloseSidecar) -> None:
+    first = straddle_of(
+        sidecar,
+        root=ROOT,
+        station=STATION,
+        event_date=date(2026, 8, 2),
+        timezone=ZONE,
+        observed_f=Decimal("96"),
+        acis_f=Decimal("100"),
+    )
+    second = straddle_of(
+        sidecar,
+        root=ROOT,
+        station=STATION,
+        event_date=date(2026, 8, 2),
+        timezone=ZONE,
+        observed_f=Decimal("100"),
+        acis_f=Decimal("96"),
+    )
+    assert first is not None
+    assert second is not None
+    assert first != second
+    assert first.separating_strikes == (97, 99)
+    assert second.separating_strikes == (97, 99)
+    assert city_event_days([first, second]) == 1
+
+
+def test_one_date_across_two_cities_counts_twice(
+    sidecar: CloseSidecar, ny_sidecar: CloseSidecar
+) -> None:
+    den = straddle_of(
+        sidecar,
+        root=ROOT,
+        station=STATION,
+        event_date=date(2026, 8, 2),
+        timezone=ZONE,
+        observed_f=Decimal("96"),
+        acis_f=Decimal("100"),
+    )
+    ny = straddle_of(
+        ny_sidecar,
+        root="KXHIGHNY",
+        station="KNYC",
+        event_date=date(2026, 8, 2),
+        timezone="America/New_York",
+        observed_f=Decimal("82"),
+        acis_f=Decimal("84"),
+    )
+    assert den is not None
+    assert ny is not None
+    assert den.event_date == ny.event_date
+    assert ny.cell_edges == (79, 81, 83, 85, 87)
+    assert ny.separating_strikes == (83,)
+    assert city_event_days([den, ny]) == 2
 
 
 def test_the_seam_carries_integral_edges_and_decimal_readings(sidecar: CloseSidecar) -> None:

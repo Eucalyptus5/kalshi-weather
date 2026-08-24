@@ -67,17 +67,24 @@ def cell_edges(sidecar: CloseSidecar, event_ticker: str) -> tuple[int, ...]:
     return tuple(sorted(edges))
 
 
-# The less row settles strictly below its cap. Under the non-strict form an event-day's rows
-# double-cover the reading sitting on that cap; under this one they partition the whole line.
+# The less row settles strictly below its cap and the greater row strictly above its floor. Under
+# either non-strict form an event-day's rows double-cover the reading sitting on that boundary;
+# under these they partition the whole line. Every match is collected rather than short-circuited
+# so the partition is checked here instead of resting on where the tickers happen to sort.
 def settling_row(sidecar: CloseSidecar, event_ticker: str, reading: Decimal) -> MarketClose:
-    for row in event_day_rows(sidecar, event_ticker):
-        if row.strike_type == BETWEEN and row.floor_strike <= reading <= row.cap_strike:
-            return row
-        if row.strike_type == GREATER and reading > row.floor_strike:
-            return row
-        if row.strike_type == LESS and reading < row.cap_strike:
-            return row
-    raise ValueError(f"no {event_ticker} row settles at {reading}")
+    matched = [
+        row
+        for row in event_day_rows(sidecar, event_ticker)
+        if (row.strike_type == BETWEEN and row.floor_strike <= reading <= row.cap_strike)
+        or (row.strike_type == GREATER and reading > row.floor_strike)
+        or (row.strike_type == LESS and reading < row.cap_strike)
+    ]
+    if len(matched) > 1:
+        claimed = ", ".join(row.ticker for row in matched)
+        raise ValueError(f"{event_ticker} settles at {reading} on more than one row: {claimed}")
+    if not matched:
+        raise ValueError(f"no {event_ticker} row settles at {reading}")
+    return matched[0]
 
 
 def straddle_of(
