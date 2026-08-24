@@ -14,7 +14,7 @@ from bot.lag.ladder_consistency import (
     SUM_BUY,
     SUM_SELL,
 )
-from bot.lag.ladder_run import CLOSED, RESULTS_NAME, UNDECIDABLE
+from bot.lag.ladder_run import CLOSED, NO_ESTIMATE, NO_GATE_ESTIMATE, RESULTS_NAME, UNDECIDABLE
 from bot.lag.run_manifest import BOOTSTRAP_RESAMPLES, MANIFEST_NAME
 from bot.replay.analysis_stations import HIGH, LOW
 from bot.replay.run_scope import DISCOVERY, HOLDOUT, RESUBSCRIBE_BLIND
@@ -253,6 +253,25 @@ def test_a_run_with_no_tradeable_episode_still_writes_a_verdict(
     assert results["discovery"]["n_city_days"] == 0
     assert results["exclusions"]["excluded_fraction"] is None
     assert capsys.readouterr().out == format_report(results) + "\n"
+
+
+def test_a_gate_with_no_estimate_reads_its_own_reason_and_not_the_replications(
+    paths: dict[str, Path], run_root: Path, tmp_path: Path
+) -> None:
+    paths["artifacts"] = quiet_artifacts(tmp_path)
+
+    assert run(args_for(paths, run_root)) == 0
+
+    results = results_of(run_root)
+    lines = format_report(results).splitlines()
+    at = lines.index("== GATE")
+    replication_at = lines.index("== REPLICATION")
+
+    assert results["gate"] is None
+    assert results["replication_skipped"] == NO_ESTIMATE
+    assert lines[at + 1] == f"  not evaluated: {NO_GATE_ESTIMATE}"
+    assert "replicate" not in lines[at + 1]
+    assert lines[replication_at + 1] == f"  not evaluated: {NO_ESTIMATE}"
 
 
 def test_an_excluded_episode_is_reported_against_its_class(

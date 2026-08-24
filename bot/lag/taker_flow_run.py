@@ -92,6 +92,7 @@ PRINT_MIN_HOLDOUT = (PRINT_MIN_DISCOVERY + 1) // 2
 TICKER_MIN_DISCOVERY = 30
 ZERO_ESTIMATE = "a discovery estimate of exactly zero fixes no direction to replicate"
 NO_ESTIMATE = "a split with no usable prints carries no estimate to replicate"
+NO_GATE_ESTIMATE = "a split with no usable prints carries no estimate to test against the bar"
 
 _DAY = timedelta(days=1)
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)

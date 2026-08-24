@@ -15,6 +15,7 @@ from bot.lag.ladder_run import (  # noqa: E402
     ECONOMIC_BAR_SIZE,
     MAKER_RATE,
     MAKER_RATE_SOURCE,
+    NO_GATE_ESTIMATE,
     RESULTS_NAME,
     execute,
     result_payload,
@@ -107,7 +108,7 @@ def format_report(payload: dict) -> str:
         f"n={discovery['n_city_days']} city event-days",
         "",
         "== GATE",
-        *_format_gate(payload["gate"], payload["replication_skipped"]),
+        *_format_gate(payload["gate"]),
         "",
         "== REPLICATION",
         *_format_replication(payload["replication"], payload["replication_skipped"]),
@@ -192,9 +193,9 @@ def _format_distributions(title: str, block: dict) -> list[str]:
     return lines
 
 
-def _format_gate(gate: dict | None, skipped: str) -> list[str]:
+def _format_gate(gate: dict | None) -> list[str]:
     if gate is None:
-        return [f"  not evaluated: {skipped}"]
+        return [f"  not evaluated: {NO_GATE_ESTIMATE}"]
     return [
         f"  estimate={gate['estimate']}  threshold={gate['threshold']}  "
         f"direction={gate['direction']}  p_value={gate['p_value']:.5f}  alpha={gate['alpha']}",

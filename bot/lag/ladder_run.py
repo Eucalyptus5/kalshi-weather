@@ -92,6 +92,7 @@ CLOSED = "CLOSED"
 UNDECIDABLE = "UNDECIDABLE"
 ZERO_ESTIMATE = "a discovery estimate of exactly zero fixes no direction to replicate"
 NO_ESTIMATE = "a split with no surviving tradeable episode carries no estimate to replicate"
+NO_GATE_ESTIMATE = NO_ESTIMATE
 
 TICKS_PER_CENT = PRICE_TICKS // 100
 MICROS_PER_S = 1_000_000
