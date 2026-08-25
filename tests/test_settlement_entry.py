@@ -8,7 +8,7 @@ import pytest
 
 from bot.lag.placement_grid import CloseSidecar, read_sidecar
 from bot.lag.settlement_entry import EntryCounts, StraddleEntry, entry_counts, entry_of
-from bot.lag.settlement_straddle import Straddle, straddle_of
+from bot.lag.settlement_straddle import Straddle, cell_edges, straddle_of
 from bot.markets.observation_window import observation_window
 from bot.observations.metar import StationObservation
 
@@ -87,6 +87,24 @@ def test_the_stamp_sitting_on_the_edge_has_not_crossed_it(sidecar: CloseSidecar)
     truncated = walk(FIRST_STAMP, ("70", "71"))
     with pytest.raises(ValueError) as refused:
         entry_of(straddle, truncated, sidecar)
+    assert STATION in str(refused.value)
+    assert "2026-08-01" in str(refused.value)
+
+
+def test_the_walk_carries_the_running_extreme_not_the_raw_reading(sidecar: CloseSidecar) -> None:
+    straddle = Straddle(
+        root=ROOT,
+        station=STATION,
+        event_date=EVENT_DATE,
+        extreme="max",
+        timezone=ZONE,
+        observed_f=Decimal("92"),
+        acis_f=Decimal("94"),
+        cell_edges=cell_edges(sidecar, EVENT_TICKER),
+        separating_strikes=(93,),
+    )
+    with pytest.raises(ValueError) as refused:
+        entry_of(straddle, walk(FIRST_STAMP, ("94", "92")), sidecar)
     assert STATION in str(refused.value)
     assert "2026-08-01" in str(refused.value)
 
@@ -258,6 +276,25 @@ def test_a_step_across_two_edges_takes_the_lower_one(sidecar: CloseSidecar) -> N
     assert record.instant_class == "crossing"
     assert record.entry_instant == datetime(2026, 8, 1, 15, tzinfo=timezone.utc)
     assert record.strike == 89
+
+
+def test_the_edge_crossed_at_the_instant_is_not_the_lowest_the_straddle_carries(
+    sidecar: CloseSidecar,
+) -> None:
+    straddle = Straddle(
+        root=ROOT,
+        station=STATION,
+        event_date=EVENT_DATE,
+        extreme="max",
+        timezone=ZONE,
+        observed_f=Decimal("88"),
+        acis_f=Decimal("92"),
+        cell_edges=cell_edges(sidecar, EVENT_TICKER),
+        separating_strikes=(89, 91),
+    )
+    record = entry_of(straddle, walk(FIRST_STAMP, ("90", "90")), sidecar)
+    assert straddle.separating_strikes[0] == 89
+    assert record.strike == 91
 
 
 def test_the_window_opens_on_its_first_minute(sidecar: CloseSidecar) -> None:
