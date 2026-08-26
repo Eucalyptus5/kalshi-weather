@@ -37,7 +37,13 @@ def delta_of(straddle: Straddle) -> int:
 # a boundary minute counted twice would credit one reading to two days' coverage.
 def coverage_of(straddle: Straddle, observations: Sequence[StationObservation]) -> int:
     start, end = observation_window(straddle.timezone, straddle.event_date)
-    return sum(1 for observation in observations if start <= observation.valid_time < end)
+    return len(
+        {
+            observation.valid_time.replace(second=0, microsecond=0)
+            for observation in observations
+            if start <= observation.valid_time < end
+        }
+    )
 
 
 def delta_partition(

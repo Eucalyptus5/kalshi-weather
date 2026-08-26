@@ -58,6 +58,10 @@ def mixed_rows() -> tuple[tuple[Straddle, tuple[StationObservation, ...]], ...]:
     )
 
 
+def two_degree_rows() -> tuple[tuple[Straddle, tuple[StationObservation, ...]], ...]:
+    return ((straddle("KBOS", date(2026, 8, 5), "77", "75"), ()),)
+
+
 def narrow_rows() -> tuple[tuple[Straddle, tuple[StationObservation, ...]], ...]:
     return (
         (straddle("KDEN", date(2026, 8, 1), "94", "93"), ()),
@@ -74,6 +78,16 @@ def coverage_walk() -> tuple[StationObservation, ...]:
         reading("KDEN", start + timedelta(hours=12), "94"),
         reading("KDEN", end, "72"),
         reading("KDEN", end + timedelta(minutes=1), "73"),
+    )
+
+
+def duplicated_minute_walk() -> tuple[StationObservation, ...]:
+    start, _ = observation_window(ZONE, date(2026, 8, 1))
+    return (
+        reading("KDEN", start, "70"),
+        reading("KDEN", start + timedelta(seconds=30), "71"),
+        reading("KDEN", start + timedelta(minutes=1), "72"),
+        reading("KDEN", start + timedelta(minutes=1, seconds=20, microseconds=500), "73"),
     )
 
 
@@ -94,6 +108,16 @@ def test_the_wide_row_is_named_rather_than_counted_anonymously() -> None:
     assert partition.abs_delta_gt_1_rows == (("KAUS", date(2026, 8, 4)),)
     assert partition.abs_delta_gt_1_rows[0][0] == "KAUS"
     assert partition.abs_delta_gt_1_rows[0][1] == date(2026, 8, 4)
+
+
+def test_a_two_degree_delta_sits_on_the_wide_side_of_the_split() -> None:
+    rows = two_degree_rows()
+    partition = delta_partition(rows)
+    assert delta_of(rows[0][0]) == 2
+    assert partition.abs_delta_gt_1 == 1
+    assert partition.abs_delta_le_1 == 0
+    assert partition.abs_delta_gt_1_rows == (("KBOS", date(2026, 8, 5)),)
+    assert supported_reading(partition) == "rounding falsified"
 
 
 def test_the_histogram_keeps_the_sign_of_every_delta() -> None:
@@ -134,6 +158,15 @@ def test_the_coverage_is_a_count_of_minutes_under_the_station_and_the_day() -> N
     assert isinstance(count, int)
     assert not isinstance(count, bool)
     assert partition.coverage_minutes[(WIDE_STATION, WIDE_DATE)] == 0
+
+
+def test_two_readings_on_one_minute_cover_that_minute_once() -> None:
+    record = straddle("KDEN", date(2026, 8, 1), "94", "93")
+    walk = duplicated_minute_walk()
+    assert len(walk) == 4
+    assert coverage_of(record, walk) == 2
+    partition = delta_partition(((record, walk),))
+    assert partition.coverage_minutes == {("KDEN", date(2026, 8, 1)): 2}
 
 
 def test_a_fractional_delta_is_refused() -> None:
