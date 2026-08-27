@@ -148,7 +148,7 @@ def read_settlement_sources(path: Path) -> SettlementProvenance:
                 root=row["root"],
                 settlement_source=row["settlement_source"],
                 settlement_source_url=row["settlement_source_url"],
-                last_updated_ts=datetime.fromisoformat(row["last_updated_ts"]),
+                last_updated_ts=_stamp(row["root"], row["last_updated_ts"]),
                 important_info=row["important_info"],
             )
             for row in payload["series"]

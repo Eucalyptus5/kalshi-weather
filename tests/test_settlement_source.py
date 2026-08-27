@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -9,8 +10,10 @@ import httpx
 import pytest
 
 from bot.lag import settlement_source
+from bot.lag.r0_universe import freeze_digest
 from bot.lag.settlement_source import (
     OBSERVATION_SOURCE,
+    SeriesSettlementSource,
     SettlementProvenance,
     SettlementScopeShort,
     SettlementSourceUnreadable,
@@ -18,6 +21,7 @@ from bot.lag.settlement_source import (
     check_settlement_scope,
     pull_settlement_sources,
     read_settlement_sources,
+    settlement_payload,
     source_root_counts,
 )
 
@@ -85,6 +89,15 @@ def frozen(path: Path, bodies: Mapping[str, dict]) -> SettlementProvenance:
 @pytest.fixture
 def moved(tmp_path: Path) -> SettlementProvenance:
     return frozen(tmp_path / "settlement_source.json", moved_bodies())
+
+
+@pytest.fixture
+def host_zone_behind_utc(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setenv("TZ", "America/Los_Angeles")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
 
 
 def test_a_sweep_freezes_the_source_every_root_names(moved: SettlementProvenance) -> None:
@@ -250,10 +263,46 @@ def test_a_stamp_carrying_fractional_seconds_parses_without_loss(tmp_path: Path)
 
 def test_the_earliest_stamp_across_disagreeing_roots_sets_the_boundary(tmp_path: Path) -> None:
     bodies = {
+        DEN: series_body(DEN, last_updated_ts="2026-08-18T19:15:56.178852Z"),
+        NY: series_body(NY, last_updated_ts="2026-08-14T17:48:38Z"),
+    }
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    assert next(iter(provenance.series)) == DEN
+    assert provenance.series[DEN].last_updated_ts > provenance.series[NY].last_updated_ts
+
+    split = boundary_split(provenance, WINDOW)
+
+    assert split.boundary_date == date(2026, 8, 14)
+    assert split.days_before_boundary == 12
+    assert split.days_on_or_after_boundary == 2
+
+
+def test_the_earliest_stamp_sets_the_boundary_when_its_root_also_sorts_first(
+    tmp_path: Path,
+) -> None:
+    bodies = {
         DEN: series_body(DEN, last_updated_ts="2026-08-14T17:48:38Z"),
         NY: series_body(NY, last_updated_ts="2026-08-18T19:15:56.178852Z"),
     }
     provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    assert next(iter(provenance.series)) == DEN
+
+    split = boundary_split(provenance, WINDOW)
+
+    assert split.boundary_date == date(2026, 8, 14)
+    assert split.days_before_boundary == 12
+    assert split.days_on_or_after_boundary == 2
+
+
+def test_the_boundary_takes_the_utc_date_of_the_stamp_not_the_local_one(
+    tmp_path: Path, host_zone_behind_utc: None
+) -> None:
+    bodies = {DEN: series_body(DEN, last_updated_ts="2026-08-14T02:00:00Z")}
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    assert provenance.series[DEN].last_updated_ts.astimezone().date() == date(2026, 8, 13)
 
     split = boundary_split(provenance, WINDOW)
 
@@ -369,3 +418,24 @@ def test_a_series_the_venue_refuses_is_never_frozen(tmp_path: Path) -> None:
         )
 
     assert not path.exists()
+
+
+def test_a_stored_stamp_carrying_an_offset_zone_is_read_back_in_utc(tmp_path: Path) -> None:
+    row = SeriesSettlementSource(
+        root=DEN,
+        settlement_source=WEATHER_COMPANY,
+        settlement_source_url=WEATHER_COMPANY_URL,
+        last_updated_ts=datetime(2026, 8, 13, 19, 0, tzinfo=timezone(timedelta(hours=-7))),
+        important_info=BANNER,
+    )
+    payload = settlement_payload(OBSERVED_AT, [row])
+    path = tmp_path / "settlement_source.json"
+    path.write_text(json.dumps({**payload, "sha256": freeze_digest(payload)}, indent=1))
+    assert payload["series"][0]["last_updated_ts"] == "2026-08-13T19:00:00-07:00"
+
+    stamp = read_settlement_sources(path).series[DEN].last_updated_ts
+
+    assert stamp.utcoffset() == timedelta(0)
+    assert stamp.tzinfo is UTC
+    assert stamp == datetime(2026, 8, 14, 2, 0, tzinfo=UTC)
+    assert stamp.date() == date(2026, 8, 14)
