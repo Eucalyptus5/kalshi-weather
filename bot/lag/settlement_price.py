@@ -39,12 +39,14 @@ class PricedStraddle:
     size: Decimal
     censored: bool
     priced: bool
+    no_row: bool
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PriceCounts:
     n: int
     one_sided_n: int
+    no_row_n: int
     censored_n: int
 
 
@@ -121,8 +123,21 @@ def fee_cents_per_contract(size: Decimal, price: Decimal) -> Decimal:
 
 # The stored ladder is bounded at six levels a side, so a size those levels cannot fill is a
 # censored read rather than a worse price: the walk past the sixth level is not on the tape.
+# Ladder rows land on book updates, so a strike nobody quoted before the instant has no row at all.
+# That reads the same as a one-sided book: no price, so it is counted rather than raised on.
 def price_of(entry: StraddleEntry, table: pa.Table, sidecar: CloseSidecar) -> PricedStraddle:
     row = _row_at(table, entry.ticker, entry.entry_instant)
+    if row is None:
+        return PricedStraddle(
+            entry_price=None,
+            entry_fee_cents=None,
+            entry_tick_cents=TICK_CENTS,
+            net_profit_cents=None,
+            size=SIZE,
+            censored=False,
+            priced=False,
+            no_row=True,
+        )
     censored = sum((Decimal(size) for size in row["no_sizes"]), Decimal(0)) < SIZE
     yes_bid = ticks(Decimal(row["yes_bid"]))
     no_bid = ticks(Decimal(row["no_bid"]))
@@ -140,6 +155,7 @@ def price_of(entry: StraddleEntry, table: pa.Table, sidecar: CloseSidecar) -> Pr
             size=SIZE,
             censored=censored,
             priced=False,
+            no_row=False,
         )
 
     entry_price = Decimal(mid2(yes_bid, no_bid)) / (2 * PRICE_TICKS)
@@ -155,18 +171,20 @@ def price_of(entry: StraddleEntry, table: pa.Table, sidecar: CloseSidecar) -> Pr
         size=SIZE,
         censored=censored,
         priced=True,
+        no_row=False,
     )
 
 
 def price_counts(records: Sequence[PricedStraddle]) -> PriceCounts:
     return PriceCounts(
         n=len(records),
-        one_sided_n=sum(1 for record in records if not record.priced),
+        one_sided_n=sum(1 for record in records if not record.priced and not record.no_row),
+        no_row_n=sum(1 for record in records if record.no_row),
         censored_n=sum(1 for record in records if record.censored),
     )
 
 
-def _row_at(table: pa.Table, ticker: str, instant: datetime) -> Mapping[str, object]:
+def _row_at(table: pa.Table, ticker: str, instant: datetime) -> Mapping[str, object] | None:
     rows = table.filter(
         pc.and_(
             pc.equal(table.column("ticker"), ticker),
@@ -174,6 +192,6 @@ def _row_at(table: pa.Table, ticker: str, instant: datetime) -> Mapping[str, obj
         )
     )
     if not rows.num_rows:
-        raise ValueError(f"{ticker} has no ladder row at or before {instant.isoformat()}")
+        return None
     ordered = rows.sort_by([("received_at", "ascending"), ("id", "ascending")])
     return ordered.slice(ordered.num_rows - 1, 1).to_pylist()[0]

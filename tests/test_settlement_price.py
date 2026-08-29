@@ -50,6 +50,7 @@ from bot.lag.tape_studies import (
 from bot.main import STATIONS
 from bot.markets.observation_window import observation_window
 from bot.replay.artifacts import LADDER_SCHEMA
+from tests.test_tape_studies import seeded_repo, write_preregistration
 
 
 BAR_PRICE = Decimal("0.50")
@@ -68,9 +69,13 @@ SEED = 20260819
 HALF_BOOK = (("0.49", "30"),)
 LEVELS_SHORT = tuple((str(Decimal("0.49") - Decimal("0.01") * step), "4") for step in range(6))
 LEVELS_DEEP = tuple((str(Decimal("0.49") - Decimal("0.01") * step), "5") for step in range(6))
+LEVELS_EXACT = tuple(
+    (str(Decimal("0.49") - Decimal("0.01") * step), "5" if step < 5 else "1") for step in range(6)
+)
 
 needs_tape = pytest.mark.skipif(
-    not FROZEN_SCOPE.exists(), reason="the recorded tape is not on this host"
+    not (FROZEN_SCOPE.exists() and CLOSES.exists()),
+    reason="the recorded tape is not on this host",
 )
 
 
@@ -132,19 +137,19 @@ def test_the_fee_and_the_tick_are_the_one_leg_bar_itself() -> None:
 
 
 def test_a_statistic_that_charges_its_own_fee_states_a_bar_of_zero(tmp_path: Path) -> None:
-    preregistration = tmp_path / "note.md"
-    preregistration.write_text("alpha = 0.0125\n")
-    manifest = build_manifest(run_inputs(preregistration, REPO_ROOT, price=SELF_CHARGED_BAR))
+    preregistration = write_preregistration(tmp_path / "preregistration.md")
+    repo = seeded_repo(tmp_path / "tree")
+    manifest = build_manifest(run_inputs(preregistration, repo, price=SELF_CHARGED_BAR))
     assert manifest.economic_bar_size == Decimal("0")
     assert manifest.economic_bar_price == Decimal("0")
     assert str(manifest.economic_bar_cents_per_contract) == "0"
 
 
 def test_a_stated_size_with_no_stated_price_aborts(tmp_path: Path) -> None:
-    preregistration = tmp_path / "note.md"
-    preregistration.write_text("alpha = 0.0125\n")
+    preregistration = write_preregistration(tmp_path / "preregistration.md")
+    repo = seeded_repo(tmp_path / "tree")
     with pytest.raises(ManifestIncomplete) as refused:
-        build_manifest(run_inputs(preregistration, REPO_ROOT, price=None))
+        build_manifest(run_inputs(preregistration, repo, price=None))
     assert refused.value.fields == ("economic_bar_price",)
     assert "economic_bar_price" in str(refused.value)
 
@@ -249,6 +254,32 @@ def test_the_entry_minute_leaves_every_city_event_day_a_surviving_minute(scope: 
     assert screened.city_event_days == 280
     assert screened.city_event_days_kept == 280
     assert screened.city_event_days_lost == Decimal(0)
+
+
+@needs_tape
+def test_the_screen_drops_more_windows_than_it_excludes(scope: RunScope) -> None:
+    series, event_date = high_days(scope)[0]
+    day = scope.event_days[(series, event_date)]
+    past = day.window_end + timedelta(hours=5)
+    windows = [
+        EvidenceWindow(
+            series=series, event_date=event_date, start=day.window_start, end=day.window_end
+        ),
+        EvidenceWindow(
+            series="KXHIGHNOWHERE",
+            event_date=event_date,
+            start=day.window_start,
+            end=day.window_end,
+        ),
+        EvidenceWindow(series=series, event_date=event_date, start=past, end=past + ENTRY_WINDOW),
+    ]
+
+    screened = screen_entry_minutes(scope, windows)
+
+    assert screened.candidates == 3
+    assert len(screened.kept) == 0
+    assert screened.excluded == 1
+    assert screened.dropped == 3
 
 
 def price(value: str) -> str:
@@ -447,12 +478,35 @@ def test_six_levels_that_fill_the_stated_size_are_not_censored() -> None:
     assert price_counts([record]).censored_n == 0
 
 
+def test_six_levels_that_fill_the_stated_size_exactly_are_not_censored() -> None:
+    table = book([book_row(1, INSTANT, yes=HALF_BOOK, no=LEVELS_EXACT)])
+
+    record = price_of(straddle_entry(), table, closes("yes"))
+
+    assert sum(Decimal(size) for size in table.column("no_sizes")[0].as_py()) == SIZE
+    assert record.censored is False
+    assert price_counts([record]).censored_n == 0
+
+
 def test_the_row_read_is_the_last_one_at_or_before_the_instant() -> None:
     table = book(
         [
             book_row(1, INSTANT - timedelta(seconds=30), yes=(("0.10", "30"),), no=HALF_BOOK),
             book_row(2, INSTANT, yes=(("0.48", "30"),), no=HALF_BOOK),
             book_row(3, INSTANT + timedelta(seconds=1), yes=(("0.90", "30"),), no=HALF_BOOK),
+        ]
+    )
+
+    record = price_of(straddle_entry(), table, closes("yes"))
+
+    assert record.entry_price == Decimal("0.495")
+
+
+def test_two_rows_at_one_instant_read_by_row_id_not_by_arrival() -> None:
+    table = book(
+        [
+            book_row(2, INSTANT, yes=(("0.48", "30"),), no=HALF_BOOK),
+            book_row(1, INSTANT, yes=(("0.10", "30"),), no=HALF_BOOK),
         ]
     )
 
@@ -474,12 +528,18 @@ def test_a_row_for_another_ticker_does_not_price_this_one() -> None:
     assert record.entry_price == Decimal("0.495")
 
 
-def test_a_ticker_with_no_row_at_or_before_the_instant_is_refused() -> None:
+def test_a_ticker_with_no_row_at_or_before_the_instant_yields_no_price() -> None:
     table = book([book_row(1, INSTANT + timedelta(seconds=1), yes=HALF_BOOK, no=HALF_BOOK)])
 
-    with pytest.raises(ValueError) as refused:
-        price_of(straddle_entry(), table, closes("yes"))
-    assert TICKER in str(refused.value)
+    record = price_of(straddle_entry(), table, closes("yes"))
+
+    assert record.priced is False
+    assert record.entry_price is None
+    assert record.entry_fee_cents is None
+    assert record.net_profit_cents is None
+    assert record.censored is False
+    assert price_counts([record]).no_row_n == 1
+    assert price_counts([record]).one_sided_n == 0
 
 
 def test_the_counts_split_the_one_sided_reads_from_the_censored_ones() -> None:
@@ -497,4 +557,28 @@ def test_the_counts_split_the_one_sided_reads_from_the_censored_ones() -> None:
     assert isinstance(counts, PriceCounts)
     assert counts.n == 3
     assert counts.one_sided_n == 1
+    assert counts.censored_n == 2
+    assert counts.no_row_n == 0
+
+
+def test_the_counts_keep_a_book_that_never_quoted_apart_from_a_one_sided_one() -> None:
+    entry = straddle_entry()
+    records = [
+        price_of(entry, book([book_row(1, INSTANT, yes=HALF_BOOK, no=LEVELS_DEEP)]), closes("yes")),
+        price_of(
+            entry, book([book_row(1, INSTANT, yes=HALF_BOOK, no=LEVELS_SHORT)]), closes("yes")
+        ),
+        price_of(entry, book([book_row(1, INSTANT, yes=HALF_BOOK, no=())]), closes("yes")),
+        price_of(
+            entry,
+            book([book_row(1, INSTANT + timedelta(seconds=1), yes=HALF_BOOK, no=HALF_BOOK)]),
+            closes("yes"),
+        ),
+    ]
+
+    counts = price_counts(records)
+
+    assert counts.n == 4
+    assert counts.one_sided_n == 1
+    assert counts.no_row_n == 1
     assert counts.censored_n == 2
