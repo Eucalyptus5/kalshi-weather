@@ -38,7 +38,7 @@ from tests.test_settlement_run import (
     run_paths,
     settles,
 )
-from tests.test_tape_studies import SHORT_SAMPLES, write_rtt_samples
+from tests.test_tape_studies import SHORT_SAMPLES, argument_flags, write_rtt_samples
 
 
 SCRIPT = REPO_ROOT / "scripts" / "f2_report.py"
@@ -241,16 +241,13 @@ def test_the_report_states_the_unidentifiable_instant_once(
 
 
 def test_the_bar_the_alpha_the_size_and_the_seed_are_not_command_line_inputs() -> None:
-    parser = build_parser()
-    named = {action.dest for action in parser._actions} | {
-        option for action in parser._actions for option in action.option_strings
-    }
+    flags = argument_flags(SCRIPT.read_text())
 
-    assert named
+    assert flags
     for forbidden in FORBIDDEN:
-        assert [name for name in named if forbidden in name] == []
-    assert "closes" in named
-    assert "settlement_sources" in named
+        assert [flag for flag in flags if forbidden in flag] == []
+    assert "closes" in flags
+    assert "settlement_sources" in flags
 
 
 @pytest.mark.parametrize("flag", REQUIRED)

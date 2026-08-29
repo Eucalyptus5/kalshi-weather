@@ -28,6 +28,7 @@ from bot.lag.settlement_run import (
     BOOTSTRAP_SEED,
     CI_LEVEL,
     CITY_EVENT_DAYS,
+    CLOSED,
     COHORT,
     DIRECTION,
     DISCOVERY_N_MIN,
@@ -61,6 +62,8 @@ from bot.lag.tape_studies import (
     LADDER,
     SELF_CHARGED_BAR,
     SELF_CHARGED_BAR_SOURCE,
+    TOUCH,
+    TRADES,
     assemble_run_inputs,
     load_run_scope,
 )
@@ -489,7 +492,7 @@ def readout_at(bootstrap: BootstrapResult, *, split: str) -> Readout:
     )
 
 
-# Reruns the gate the run resolved with one flag moved, so the alpha is the only thing that
+# Reruns the gate the run resolved with one flag moved, so that flag is the only thing that
 # differs between the two verdicts.
 def regate(gate: GateVerdict, result: BootstrapResult, **overrides: object) -> GateVerdict:
     arguments = {
@@ -541,6 +544,27 @@ def test_a_panel_whose_replicates_carry_no_spread_is_undecidable() -> None:
     assert gate.undecidable is True
     assert gate.significant is False
     assert gate.passed is False
+
+
+def test_the_strict_gate_is_what_puts_a_zero_edge_below_the_zero_bar() -> None:
+    bootstrap = bootstrap_at(0.001, estimate="0", n_clusters=40)
+    holdout = readout_at(bootstrap_at(0.03, estimate="1.0", n_clusters=20), split=HOLDOUT)
+
+    decision = decide(readout_at(bootstrap, split=DISCOVERY), holdout)
+    gate = decision.gate
+
+    assert SELF_CHARGED_BAR == Decimal("0")
+    assert gate is not None
+    assert gate.estimate == Decimal("0")
+    assert gate.threshold == SELF_CHARGED_BAR
+    assert gate.significant is True
+    assert gate.powered is True
+    assert gate.economic is False
+    assert gate.passed is False
+    assert regate(gate, bootstrap).economic is False
+    assert regate(gate, bootstrap, strict=False).economic is True
+    assert regate(gate, bootstrap, strict=False).passed is True
+    assert decision.verdict == CLOSED
 
 
 def test_a_flat_panel_resamples_without_spread() -> None:
@@ -805,14 +829,19 @@ def test_an_unpriced_straddle_leaves_both_sides_of_the_ratio(
     complete = run_at(tmp_path, paths)
     paths["artifacts"] = artifacts_dir(tmp_path, one_sided=frozenset({WINDOW[0]}), name="one_sided")
     thinned = run_at(tmp_path, paths, run_root=tmp_path / "second")
+    published = result_payload(thinned)["discovery"]
 
     assert len(complete.discovery.clusters) == 9
     assert len(thinned.discovery.clusters) == 8
     assert thinned.discovery.counts.one_sided_n == 1
+    assert thinned.discovery.counts.censored_n == 1
     assert thinned.discovery.priced_n == 8
     assert thinned.discovery.counts.n == 9
     assert thinned.discovery.bootstrap is not None
     assert thinned.discovery.bootstrap.n_clusters == 8
+    assert published["one_sided"] == 1
+    assert published["censored"] == 1
+    assert published["no_row"] == 0
 
 
 def test_every_row_is_unidentifiable_when_its_instant_happens(
@@ -844,6 +873,24 @@ def test_the_results_carry_every_figure_the_report_reads(
     assert payload["gate"]["alpha"] == ALPHA_F2
     assert payload["discovery"]["split"] == DISCOVERY
     assert payload["holdout"]["split"] == HOLDOUT
+
+
+def test_the_results_publish_the_row_counts_the_manifest_states(
+    paths: dict[str, Path], run_root: Path, tmp_path: Path
+) -> None:
+    payload = result_payload(run_at(tmp_path, paths))
+
+    assert payload["row_counts"] == {
+        TOUCH: 0,
+        LADDER: 14,
+        TRADES: 0,
+        "exclusions": 1,
+        "event_days": 14,
+    }
+    assert payload["row_counts"] == manifest_of(run_root)["row_counts"]
+    assert payload["ladder_rows_per_city_day"] == {
+        f"{SERIES} {day.isoformat()}": 1 if day == WINDOW[-1] else 2 for day in WINDOW
+    }
 
 
 def test_the_same_seed_reads_the_same_p_value_twice(paths: dict[str, Path], tmp_path: Path) -> None:
