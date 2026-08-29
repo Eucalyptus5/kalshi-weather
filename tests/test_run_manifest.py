@@ -2,7 +2,7 @@ import json
 import re
 import subprocess
 from dataclasses import fields, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -41,12 +41,18 @@ from bot.lag.run_manifest import (
     Manifest,
     ManifestIncomplete,
     RunInputs,
+    SettlementRecord,
     build_manifest,
     fee_payload,
     git_state,
     manifest_payload,
     resolve_latency_floor,
     write_manifest,
+)
+from bot.lag.settlement_source import (
+    BoundarySplit,
+    SeriesSettlementSource,
+    SettlementProvenance,
 )
 from bot.replay.analysis_stations import HIGH
 
@@ -72,6 +78,19 @@ NO_READS = "the statistic places no read against the api"
 OBSERVED_AT = datetime(2026, 8, 19, 17, 30, tzinfo=UTC)
 FROZEN_DIGEST = "2e73ed22bb8e6b90698a84b204da0d54ff332cbb844da78eeaac64ad3a481d41"
 FEE_TYPE_KEYS = ("fee_type_check", "fee_type_observed_at", "fee_type_sha256")
+SETTLEMENT_KEYS = (
+    "settlement_source",
+    "settlement_source_url",
+    "last_updated_ts",
+    "days_before_boundary",
+    "days_on_or_after_boundary",
+    "boundary_date",
+)
+MOVED_AT = datetime(2026, 8, 14, 17, 48, 38, tzinfo=UTC)
+BOUNDARY_DATE = date(2026, 8, 14)
+WEATHER_COMPANY = "The Weather Company"
+WEATHER_COMPANY_URL = "https://weather.com/kalshi"
+SETTLEMENT_ROOTS = ("KXHIGHNY", "KXHIGHDEN")
 FLOOR_KEYS = (
     "latency_floor_source",
     "latency_floor_s",
@@ -1004,3 +1023,70 @@ def test_the_tripwire_is_not_a_fee_source_field(complete: RunInputs) -> None:
     payload = fee_payload(complete.fee)
 
     assert set(payload).isdisjoint(FEE_TYPE_KEYS)
+
+
+def _settlement() -> SettlementRecord:
+    return SettlementRecord(
+        provenance=SettlementProvenance(
+            observed_at=OBSERVED_AT,
+            observation_source="ACIS",
+            series={
+                root: SeriesSettlementSource(
+                    root=root,
+                    settlement_source=WEATHER_COMPANY,
+                    settlement_source_url=WEATHER_COMPANY_URL,
+                    last_updated_ts=MOVED_AT,
+                    important_info="",
+                )
+                for root in SETTLEMENT_ROOTS
+            },
+            sha256="4" * 64,
+        ),
+        boundary=BoundarySplit(
+            boundary_date=BOUNDARY_DATE, days_before_boundary=12, days_on_or_after_boundary=2
+        ),
+    )
+
+
+def test_a_run_recording_no_settlement_source_writes_the_payload_it_wrote_before() -> None:
+    frozen = _frozen_manifest(None)
+
+    payload = manifest_payload(frozen)
+
+    assert frozen.settlement is None
+    assert set(payload).isdisjoint(SETTLEMENT_KEYS)
+    assert set(payload) == FIELDS
+    assert freeze_digest(payload) == FROZEN_DIGEST
+
+
+def test_a_run_recording_the_settlement_source_keys_it_by_root_and_moves_the_digest() -> None:
+    payload = manifest_payload(replace(_frozen_manifest(None), settlement=_settlement()))
+
+    assert set(payload) == FIELDS | set(SETTLEMENT_KEYS)
+    assert payload["settlement_source"] == dict.fromkeys(SETTLEMENT_ROOTS, WEATHER_COMPANY)
+    assert payload["settlement_source_url"] == dict.fromkeys(SETTLEMENT_ROOTS, WEATHER_COMPANY_URL)
+    assert payload["last_updated_ts"] == dict.fromkeys(SETTLEMENT_ROOTS, MOVED_AT.isoformat())
+    assert list(payload["settlement_source"]) == sorted(SETTLEMENT_ROOTS)
+    assert list(payload["last_updated_ts"]) == sorted(SETTLEMENT_ROOTS)
+    assert payload["boundary_date"] == BOUNDARY_DATE.isoformat()
+    assert payload["days_before_boundary"] == 12
+    assert payload["days_on_or_after_boundary"] == 2
+    assert freeze_digest(payload) != FROZEN_DIGEST
+
+
+def test_the_settlement_source_is_neither_supplied_by_every_family_nor_exemptible() -> None:
+    assert "settlement" not in dict(SUPPLIED_FIELDS)
+    assert "settlement" not in dict(SUPPLIED_FIELDS).values()
+    assert set(SETTLEMENT_KEYS).isdisjoint(dict(SUPPLIED_FIELDS).values())
+    assert "settlement" not in EXEMPTIBLE_FIELDS
+
+
+def test_a_run_that_supplies_the_settlement_source_carries_it_onto_the_manifest(
+    complete: RunInputs,
+) -> None:
+    record = _settlement()
+
+    manifest = build_manifest(replace(complete, settlement=record))
+
+    assert manifest.settlement == record
+    assert build_manifest(complete).settlement is None

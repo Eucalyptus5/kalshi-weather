@@ -18,6 +18,7 @@ from bot.lag.read_rtt import (
     ReadSample,
     derive_latency_floor,
 )
+from bot.lag.settlement_source import BoundarySplit, SettlementProvenance
 
 
 BOOTSTRAP_RESAMPLES = 10_000
@@ -69,6 +70,12 @@ class Exemption:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class SettlementRecord:
+    provenance: SettlementProvenance
+    boundary: BoundarySplit
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class RunInputs:
     run_id: str
     preregistration: Path
@@ -86,6 +93,7 @@ class RunInputs:
     cohort: str | None = None
     exemptions: tuple[Exemption, ...] = ()
     fee_type_check: FeeRegimeCheck | None = None
+    settlement: SettlementRecord | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +123,7 @@ class Manifest:
     cohort: str | None
     exemptions: tuple[Exemption, ...]
     fee_type_check: FeeRegimeCheck | None
+    settlement: SettlementRecord | None = None
 
 
 def preregistration_sha256(path: Path) -> str:
@@ -197,6 +206,7 @@ def build_manifest(inputs: RunInputs) -> Manifest:
         cohort=inputs.cohort,
         exemptions=tuple(sorted(inputs.exemptions, key=lambda exemption: exemption.field)),
         fee_type_check=inputs.fee_type_check,
+        settlement=inputs.settlement,
     )
 
 
@@ -264,6 +274,23 @@ def manifest_payload(manifest: Manifest) -> dict:
         payload["fee_type_check"] = checked.result
         payload["fee_type_observed_at"] = checked.observed_at.isoformat()
         payload["fee_type_sha256"] = checked.sha256
+    # Only the settlement family reads a settlement source, so six null keys would move every
+    # digest frozen before the sidecar existed.
+    settlement = manifest.settlement
+    if settlement is not None:
+        series = dict(sorted(settlement.provenance.series.items()))
+        payload["settlement_source"] = {
+            root: item.settlement_source for root, item in series.items()
+        }
+        payload["settlement_source_url"] = {
+            root: item.settlement_source_url for root, item in series.items()
+        }
+        payload["last_updated_ts"] = {
+            root: item.last_updated_ts.isoformat() for root, item in series.items()
+        }
+        payload["days_before_boundary"] = settlement.boundary.days_before_boundary
+        payload["days_on_or_after_boundary"] = settlement.boundary.days_on_or_after_boundary
+        payload["boundary_date"] = settlement.boundary.boundary_date.isoformat()
     return payload
 
 

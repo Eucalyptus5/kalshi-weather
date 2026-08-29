@@ -1099,6 +1099,7 @@ def test_the_assembled_inputs_carry_every_field_the_manifest_names(paths: dict[s
     assert [field.name for field in fields(RunInputs) if getattr(inputs, field.name) is None] == [
         "cohort",
         "fee_type_check",
+        "settlement",
     ]
     manifest = build_manifest(inputs)
     assert manifest.run_id == RUN_ID
