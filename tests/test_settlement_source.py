@@ -206,6 +206,19 @@ def test_a_window_wholly_before_the_boundary_puts_nothing_on_the_far_side(
     assert split.days_on_or_after_boundary == 0
 
 
+def test_a_day_named_twice_lands_twice_on_its_side_of_the_boundary(tmp_path: Path) -> None:
+    bodies = {DEN: series_body(DEN, last_updated_ts="2026-08-10T17:48:38Z")}
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+    days = [date(2026, 8, 5), date(2026, 8, 12), date(2026, 8, 12), date(2026, 8, 15)]
+
+    split = boundary_split(provenance, days)
+
+    assert len(set(days)) == 3
+    assert split.boundary_date == date(2026, 8, 10)
+    assert split.days_before_boundary == 1
+    assert split.days_on_or_after_boundary == 3
+
+
 def test_twenty_roots_freeze_twenty_rows(tmp_path: Path) -> None:
     provenance = frozen(tmp_path / "settlement_source.json", moved_bodies(TWENTY_ROOTS))
 

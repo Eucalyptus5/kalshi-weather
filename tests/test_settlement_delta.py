@@ -62,6 +62,13 @@ def two_degree_rows() -> tuple[tuple[Straddle, tuple[StationObservation, ...]], 
     return ((straddle("KBOS", date(2026, 8, 5), "77", "75"), ()),)
 
 
+def two_wide_rows() -> tuple[tuple[Straddle, tuple[StationObservation, ...]], ...]:
+    return (
+        (straddle("KDEN", date(2026, 8, 5), "60", "70"), ()),
+        (straddle(WIDE_STATION, WIDE_DATE, "79", "94"), ()),
+    )
+
+
 def narrow_rows() -> tuple[tuple[Straddle, tuple[StationObservation, ...]], ...]:
     return (
         (straddle("KDEN", date(2026, 8, 1), "94", "93"), ()),
@@ -108,6 +115,17 @@ def test_the_wide_row_is_named_rather_than_counted_anonymously() -> None:
     assert partition.abs_delta_gt_1_rows == (("KAUS", date(2026, 8, 4)),)
     assert partition.abs_delta_gt_1_rows[0][0] == "KAUS"
     assert partition.abs_delta_gt_1_rows[0][1] == date(2026, 8, 4)
+
+
+def test_two_wide_rows_come_back_in_the_order_they_were_walked() -> None:
+    partition = delta_partition(two_wide_rows())
+
+    assert partition.abs_delta_gt_1 == 2
+    assert partition.abs_delta_gt_1_rows == (
+        ("KDEN", date(2026, 8, 5)),
+        ("KAUS", date(2026, 8, 4)),
+    )
+    assert list(partition.abs_delta_gt_1_rows) != sorted(partition.abs_delta_gt_1_rows)
 
 
 def test_a_two_degree_delta_sits_on_the_wide_side_of_the_split() -> None:

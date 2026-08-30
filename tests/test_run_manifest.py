@@ -77,6 +77,7 @@ NO_TAPE = "the statistic reads no ws tape"
 NO_READS = "the statistic places no read against the api"
 OBSERVED_AT = datetime(2026, 8, 19, 17, 30, tzinfo=UTC)
 FROZEN_DIGEST = "2e73ed22bb8e6b90698a84b204da0d54ff332cbb844da78eeaac64ad3a481d41"
+EXEMPT_DIGEST = "1a17447f6696469fdbd52072e80e7c5c4ed5c3404c6c9ad8d5a504fe54ad8639"
 FEE_TYPE_KEYS = ("fee_type_check", "fee_type_observed_at", "fee_type_sha256")
 SETTLEMENT_KEYS = (
     "settlement_source",
@@ -837,6 +838,43 @@ def test_a_run_that_reads_no_tape_exempts_both_permitted_fields(
     assert payload["r0_universe_sha256"] is None
     assert [payload[key] for key in FLOOR_KEYS] == [None, None, None, None]
     assert payload["bootstrap_seed"] == SEED
+
+
+def _pinned(manifest: Manifest) -> dict:
+    return manifest_payload(
+        replace(
+            manifest,
+            preregistration=Path("preregistration.md"),
+            preregistration_sha256="0" * 64,
+            git=GitState(head="1" * 40, dirty=False),
+        )
+    )
+
+
+def test_the_order_two_exemptions_arrive_in_does_not_move_the_recorded_digest(
+    complete: RunInputs,
+) -> None:
+    dropped = replace(complete, universe=None, floor=None)
+    declared = (
+        Exemption(field="latency_floor", reason=NO_READS),
+        Exemption(field="r0_fraction_invalid_max", reason=NO_TAPE),
+    )
+    ascending = build_manifest(replace(dropped, exemptions=declared))
+    descending = build_manifest(replace(dropped, exemptions=declared[::-1]))
+
+    payload = _pinned(ascending)
+
+    assert [item.field for item in ascending.exemptions] == [
+        "latency_floor",
+        "r0_fraction_invalid_max",
+    ]
+    assert ascending.exemptions == descending.exemptions
+    assert [item["field"] for item in payload["exemptions"]] == [
+        "latency_floor",
+        "r0_fraction_invalid_max",
+    ]
+    assert freeze_digest(payload) == EXEMPT_DIGEST
+    assert freeze_digest(_pinned(descending)) == EXEMPT_DIGEST
 
 
 @pytest.mark.parametrize(

@@ -1,3 +1,4 @@
+import argparse
 import json
 from collections.abc import Sequence
 from dataclasses import replace
@@ -34,6 +35,7 @@ from bot.lag.settlement_run import (
     DISCOVERY_N_MIN,
     EXEMPTIONS,
     NULL_VALUE,
+    RESULTS_NAME,
     STRICT,
     UNDERPOWERED,
     Readout,
@@ -56,6 +58,7 @@ from bot.lag.tape_stats import (
     BootstrapResult,
     ClusterAggregate,
     GateVerdict,
+    cluster_bootstrap,
     evaluate_gate,
 )
 from bot.lag.tape_studies import (
@@ -80,6 +83,8 @@ from bot.replay.run_scope import (
     Split,
     write_split,
 )
+from scripts import f2_report
+from scripts.q4_report import write_settles_cache
 from tests.test_settlement_source import MOVED_AT, series_body, transport_for
 from tests.test_tape_studies import (
     ADEQUATE_SAMPLES,
@@ -121,6 +126,21 @@ QUIET_END = datetime(2026, 8, 2, 23, 30, tzinfo=UTC)
 
 LADDER_ROW_OFFSET = timedelta(hours=7)
 FIRST_READING_OFFSET = timedelta(hours=6)
+
+SKEWED_HISTOGRAM = {3: 1, -5: 2, 0: 4}
+SKEWED_COVERAGE = {
+    ("KDEN", date(2026, 8, 1)): 5,
+    ("KAUS", date(2026, 8, 3)): 7,
+    ("KNYC", date(2026, 8, 2)): 9,
+}
+SKEWED_CLOSE_GAPS = {300: 2, 60: 1, 900: 3}
+SKEWED_CENSUS = {
+    ("KXHIGHLAX", date(2026, 8, 3)): 4,
+    ("KXHIGHDEN", date(2026, 8, 1)): 5,
+    ("KXHIGHNY", date(2026, 8, 2)): 6,
+    ("KXHIGHCHI", date(2026, 8, 5)): 7,
+    ("KXHIGHMIA", date(2026, 8, 4)): 8,
+}
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FROZEN_SCOPE = REPO_ROOT / "data" / "tape_studies" / "run_scope_v2"
@@ -416,6 +436,42 @@ def run_at(
     )
 
 
+def write_arrivals(path: Path) -> Path:
+    rows = [
+        {
+            "station": item.station,
+            "source": item.source,
+            "obs_time": item.valid_time.isoformat(),
+            "tmpf": str(item.temp_f),
+            "received_at": item.publication_time.isoformat(),
+        }
+        for readings in observations().values()
+        for item in readings
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    return path
+
+
+def report_args(paths: dict[str, Path], tmp_path: Path, run_root: Path) -> argparse.Namespace:
+    settles_path = tmp_path / "acis_settles.json"
+    write_settles_cache(settles_path, settles())
+    return argparse.Namespace(
+        run_id=RUN_ID,
+        preregistration=paths["preregistration"],
+        repo=paths["repo"],
+        run_scope=paths["run_scope"],
+        artifacts=paths["artifacts"],
+        closes=paths["closes"],
+        settlement_sources=paths["settlement_sources"],
+        observations=write_arrivals(tmp_path / "arrivals.jsonl"),
+        settles=settles_path,
+        rtt_samples=paths["rtt_samples"],
+        floor_source=FloorSource.SIGNED_READ.value,
+        cohort=COHORT,
+        run_root=run_root,
+    )
+
+
 @pytest.fixture
 def paths(tmp_path: Path) -> dict[str, Path]:
     return run_paths(tmp_path)
@@ -565,6 +621,33 @@ def test_the_strict_gate_is_what_puts_a_zero_edge_below_the_zero_bar() -> None:
     assert regate(gate, bootstrap, strict=False).economic is True
     assert regate(gate, bootstrap, strict=False).passed is True
     assert decision.verdict == CLOSED
+
+
+def test_the_interval_the_readout_publishes_covers_ninety_five_percent() -> None:
+    clusters = tuple(
+        ClusterAggregate(
+            cluster=f"{SERIES} {index:04d}", total=Decimal(7 * index - 40), weight=SIZE
+        )
+        for index in range(12)
+    )
+
+    published = bootstrap_of(clusters, BOOTSTRAP_SEED)
+    narrower = cluster_bootstrap(
+        clusters,
+        null_value=NULL_VALUE,
+        direction=DIRECTION,
+        resamples=BOOTSTRAP_RESAMPLES,
+        seed=BOOTSTRAP_SEED,
+        ci_level=0.90,
+    )
+
+    assert CI_LEVEL == 0.95
+    assert published.ci_level == 0.95
+    assert published.ci_low == pytest.approx(-0.573718, abs=1e-6)
+    assert published.ci_high == pytest.approx(0.480769, abs=1e-6)
+    assert narrower.estimate == published.estimate
+    assert narrower.ci_low == pytest.approx(-0.483974, abs=1e-6)
+    assert narrower.ci_high == pytest.approx(0.391026, abs=1e-6)
 
 
 def test_a_flat_panel_resamples_without_spread() -> None:
@@ -873,6 +956,9 @@ def test_the_results_carry_every_figure_the_report_reads(
     assert payload["gate"]["alpha"] == ALPHA_F2
     assert payload["discovery"]["split"] == DISCOVERY
     assert payload["holdout"]["split"] == HOLDOUT
+    assert payload["discovery"]["ci_level"] == 0.95
+    assert payload["holdout"]["ci_level"] == 0.95
+    assert CI_LEVEL == 0.95
 
 
 def test_the_results_publish_the_row_counts_the_manifest_states(
@@ -891,6 +977,59 @@ def test_the_results_publish_the_row_counts_the_manifest_states(
     assert payload["ladder_rows_per_city_day"] == {
         f"{SERIES} {day.isoformat()}": 1 if day == WINDOW[-1] else 2 for day in WINDOW
     }
+
+
+def test_the_results_publish_every_map_in_one_order_whatever_order_it_was_built_in(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    run = run_at(tmp_path, paths)
+    shuffled = replace(
+        run,
+        deltas=replace(
+            run.deltas, delta_histogram=SKEWED_HISTOGRAM, coverage_minutes=SKEWED_COVERAGE
+        ),
+        counts=replace(run.counts, close_minus_entry_s=SKEWED_CLOSE_GAPS),
+        census=SKEWED_CENSUS,
+    )
+
+    payload = result_payload(shuffled)
+
+    assert list(SKEWED_HISTOGRAM) != sorted(SKEWED_HISTOGRAM)
+    assert list(SKEWED_COVERAGE) != sorted(SKEWED_COVERAGE)
+    assert list(SKEWED_CLOSE_GAPS) != sorted(SKEWED_CLOSE_GAPS)
+    assert list(SKEWED_CENSUS) != sorted(SKEWED_CENSUS)
+    assert list(payload["deltas"]["delta_histogram"]) == ["-5", "0", "3"]
+    assert list(payload["deltas"]["coverage_minutes"]) == [
+        "KAUS 2026-08-03",
+        "KDEN 2026-08-01",
+        "KNYC 2026-08-02",
+    ]
+    assert list(payload["entries"]["close_minus_entry_s"]) == [60, 300, 900]
+    assert payload["cities"] == [
+        "KXHIGHCHI",
+        "KXHIGHDEN",
+        "KXHIGHLAX",
+        "KXHIGHMIA",
+        "KXHIGHNY",
+    ]
+    assert list(payload["ladder_rows_per_city_day"]) == [
+        "KXHIGHCHI 2026-08-05",
+        "KXHIGHDEN 2026-08-01",
+        "KXHIGHLAX 2026-08-03",
+        "KXHIGHMIA 2026-08-04",
+        "KXHIGHNY 2026-08-02",
+    ]
+
+
+def test_the_report_seeds_every_bootstrap_with_the_one_frozen_seed(
+    paths: dict[str, Path], run_root: Path, tmp_path: Path
+) -> None:
+    assert f2_report.run(report_args(paths, tmp_path, run_root)) == 0
+
+    results = json.loads((run_root / RUN_ID / RESULTS_NAME).read_text())
+    assert BOOTSTRAP_SEED == 20260820
+    assert results["bootstrap_seed"] == 20260820
+    assert manifest_of(run_root)["bootstrap_seed"] == 20260820
 
 
 def test_the_same_seed_reads_the_same_p_value_twice(paths: dict[str, Path], tmp_path: Path) -> None:
