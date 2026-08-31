@@ -15,6 +15,8 @@ from bot.lag.observation_freeze import (
     INDEX_NAME,
     MAX,
     READING_SOURCE,
+    ObservationSidecar,
+    StationDay,
     index_payload,
     pull_observations,
     read_observation_index,
@@ -41,6 +43,7 @@ PHX = "KPHX"
 
 DAY_ONE = date(2026, 8, 2)
 DAY_TWO = date(2026, 8, 3)
+DAY_THREE = date(2026, 8, 4)
 DAYS = (DAY_ONE, DAY_TWO)
 OBSERVED_AT = datetime(2026, 8, 20, 15, 30, tzinfo=UTC)
 DEFAULT_HIGH = "95"
@@ -537,3 +540,57 @@ def test_the_frozen_files_carry_the_indent_the_repos_other_sidecars_carry(tmp_pa
         text = path.read_text()
         assert text == json.dumps(json.loads(text), indent=1)
         assert text.splitlines()[1].startswith(' "')
+
+
+def hand_built_day(event_date: date, minutes: int, acis_f: Decimal | None) -> StationDay:
+    start, end = observation_window(F2_STATIONS[DEN], event_date)
+    return StationDay(
+        station=DEN,
+        event_date=event_date,
+        extreme=MAX,
+        window_start=start,
+        window_end=end,
+        readings=tuple(
+            StationObservation(
+                station=DEN,
+                valid_time=start + timedelta(minutes=offset),
+                publication_time=start + timedelta(minutes=offset),
+                temp_f=Decimal("70.0"),
+                is_special=False,
+                raw="",
+                source=READING_SOURCE,
+            )
+            for offset in range(minutes)
+        ),
+        acis_f=acis_f,
+    )
+
+
+def hand_built_sidecar(order: Sequence[date]) -> ObservationSidecar:
+    minutes = {DAY_ONE: 1, DAY_TWO: 2, DAY_THREE: 3}
+    extremes = {DAY_ONE: None, DAY_TWO: Decimal(DEFAULT_HIGH), DAY_THREE: None}
+    return ObservationSidecar(
+        station=DEN,
+        timezone=F2_STATIONS[DEN],
+        days={day: hand_built_day(day, minutes[day], extremes[day]) for day in order},
+        sha256="0" * 64,
+    )
+
+
+def test_the_order_a_sidecars_days_arrive_in_does_not_move_the_index_payload() -> None:
+    ascending = hand_built_sidecar((DAY_ONE, DAY_TWO, DAY_THREE))
+    shuffled = hand_built_sidecar((DAY_THREE, DAY_ONE, DAY_TWO))
+
+    assert list(ascending.days) != list(shuffled.days)
+
+    ahead = index_payload(OBSERVED_AT, {DEN: ascending})
+    behind = index_payload(OBSERVED_AT, {DEN: shuffled})
+
+    assert behind["stations"][0]["missing_acis"] == [DAY_ONE.isoformat(), DAY_THREE.isoformat()]
+    assert behind["stations"][0]["decoded_minutes"] == {
+        DAY_ONE.isoformat(): 1,
+        DAY_TWO.isoformat(): 2,
+        DAY_THREE.isoformat(): 3,
+    }
+    assert ahead == behind
+    assert freeze_digest(ahead) == freeze_digest(behind)
