@@ -15,11 +15,14 @@ from bot.lag.observation_freeze import (
     INDEX_NAME,
     MAX,
     READING_SOURCE,
+    index_payload,
     pull_observations,
     read_observation_index,
     read_observation_sidecar,
+    sidecar_payload,
     write_observation_index,
 )
+from bot.lag.r0_universe import freeze_digest
 from bot.main import STATIONS
 from bot.markets.observation_window import observation_window
 from bot.observations.basis_check import IEM_1MIN_URL, fetch_iem_1min_asos_archive
@@ -462,3 +465,75 @@ def test_the_index_names_every_station_the_map_carries(tmp_path: Path) -> None:
     assert {row.timezone for row in index.stations.values()} == {
         config.timezone for config in STATIONS.values()
     }
+
+
+def test_the_order_the_days_arrive_in_does_not_move_the_sidecar_payload(tmp_path: Path) -> None:
+    pull_observations([DEN], DAYS, tmp_path, transport_for(two_station_bodies()))
+    sidecar = read_observation_sidecar(tmp_path / f"{DEN}.json")
+    days = [sidecar.days[DAY_ONE], sidecar.days[DAY_TWO]]
+
+    ahead = sidecar_payload(DEN, sidecar.timezone, days)
+    behind = sidecar_payload(DEN, sidecar.timezone, days[::-1])
+
+    assert [row["event_date"] for row in behind["days"]] == [
+        DAY_ONE.isoformat(),
+        DAY_TWO.isoformat(),
+    ]
+    assert ahead == behind
+    assert freeze_digest(ahead) == freeze_digest(behind)
+
+
+def test_the_order_the_sidecars_arrive_in_does_not_move_the_index_payload(tmp_path: Path) -> None:
+    pull_observations([DEN, NYC], DAYS, tmp_path, transport_for(two_station_bodies()))
+    ahead = {
+        station: read_observation_sidecar(tmp_path / f"{station}.json") for station in (DEN, NYC)
+    }
+    behind = {station: ahead[station] for station in (NYC, DEN)}
+
+    assert list(ahead) != list(behind)
+    assert [row["station"] for row in index_payload(OBSERVED_AT, behind)["stations"]] == [DEN, NYC]
+    assert index_payload(OBSERVED_AT, ahead) == index_payload(OBSERVED_AT, behind)
+    assert freeze_digest(index_payload(OBSERVED_AT, ahead)) == freeze_digest(
+        index_payload(OBSERVED_AT, behind)
+    )
+
+
+def test_the_span_the_archive_is_asked_for_is_the_windows_bounds_not_the_ask_order(
+    tmp_path: Path,
+) -> None:
+    seen: list[httpx.Request] = []
+
+    pull_observations([DEN], DAYS[::-1], tmp_path, transport_for(two_station_bodies(), seen=seen))
+
+    archive = [request for request in seen if request.url.host == IEM_HOST]
+    assert [request.url.params["sts"] for request in archive] == ["2026-08-02T00:00Z"]
+    assert [request.url.params["ets"] for request in archive] == ["2026-08-05T00:00Z"]
+    assert sorted(read_observation_sidecar(tmp_path / f"{DEN}.json").days) == list(DAYS)
+
+
+def test_the_stations_are_swept_in_a_settled_order_whatever_order_they_were_asked_for(
+    tmp_path: Path,
+) -> None:
+    seen: list[httpx.Request] = []
+    bodies = {
+        station: iem_body(station, ((stamp(DAY_ONE, 15), "90.0"),)) for station in F2_STATIONS
+    }
+
+    digests = pull_observations(
+        sorted(F2_STATIONS, reverse=True), (DAY_ONE,), tmp_path, transport_for(bodies, seen=seen)
+    )
+
+    assert list(digests) == sorted(F2_STATIONS)
+    assert [
+        "K" + request.url.params["station"] for request in seen if request.url.host == IEM_HOST
+    ] == sorted(F2_STATIONS)
+
+
+def test_the_frozen_files_carry_the_indent_the_repos_other_sidecars_carry(tmp_path: Path) -> None:
+    pull_observations([DEN], DAYS, tmp_path, transport_for(two_station_bodies()))
+    write_observation_index(tmp_path, OBSERVED_AT)
+
+    for path in (tmp_path / f"{DEN}.json", tmp_path / INDEX_NAME):
+        text = path.read_text()
+        assert text == json.dumps(json.loads(text), indent=1)
+        assert text.splitlines()[1].startswith(' "')
