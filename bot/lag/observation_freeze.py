@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 MAX = "max"
 READING_SOURCE = "iem_1min_asos_archive"
 INDEX_NAME = "index.json"
-FETCH_TIMEOUT_SECONDS = 120.0
+_FETCH_TIMEOUT_SECONDS = 120.0
 
 F2_STATIONS: Mapping[str, str] = {config.station: config.timezone for config in STATIONS.values()}
 
@@ -196,7 +196,7 @@ async def _fetch_stations(
     transport: httpx.AsyncBaseTransport | None,
 ) -> dict[str, list[StationDay]]:
     span = sorted(set(event_dates))
-    async with httpx.AsyncClient(transport=transport, timeout=FETCH_TIMEOUT_SECONDS) as client:
+    async with httpx.AsyncClient(transport=transport, timeout=_FETCH_TIMEOUT_SECONDS) as client:
         acis = ACISClient(http_client=client)
         return {
             station: await _fetch_station(station, span, client, acis)
@@ -256,8 +256,8 @@ def write_observation_index(directory: Path, observed_at: datetime) -> str:
     if path.exists():
         raise FileExistsError(f"refusing to overwrite {path}")
     sidecars = {
-        station.stem: read_observation_sidecar(station)
-        for station in sorted(directory.glob("*.json"))
+        sidecar_path.stem: read_observation_sidecar(sidecar_path)
+        for sidecar_path in sorted(directory.glob("*.json"))
     }
     payload = index_payload(observed_at, sidecars)
     digest = freeze_digest(payload)

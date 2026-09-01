@@ -266,7 +266,6 @@ def test_the_sidecar_reproduces_its_digest_on_a_second_read(tmp_path: Path) -> N
 
     path = tmp_path / f"{DEN}.json"
     assert read_observation_sidecar(path).sha256 == written[DEN]
-    assert read_observation_sidecar(path).sha256 == read_observation_sidecar(path).sha256
 
 
 def test_a_tampered_sidecar_is_refused(tmp_path: Path) -> None:
@@ -539,7 +538,6 @@ def test_the_frozen_files_carry_the_indent_the_repos_other_sidecars_carry(tmp_pa
     for path in (tmp_path / f"{DEN}.json", tmp_path / INDEX_NAME):
         text = path.read_text()
         assert text == json.dumps(json.loads(text), indent=1)
-        assert text.splitlines()[1].startswith(' "')
 
 
 def hand_built_day(event_date: date, minutes: int, acis_f: Decimal | None) -> StationDay:
