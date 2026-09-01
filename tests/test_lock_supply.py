@@ -42,11 +42,15 @@ ZERO = Decimal("0")
 
 PAIR = ("T58", "T65")
 RICH = ("T50", "B57.5", "B61.5", "T65")
+TAIL = ("T50", "T65")
 
 WINDOW_OPEN_TEMPS = ("62", "70")
 MID_DAY_TEMPS = ("70", "62")
 RICH_TEMPS = ("63", "60.5", "55")
+TAIL_TEMPS = ("60", "49")
 AMBIGUOUS_TEMPS = ("64.5",)
+
+PUBLICATION_LAG = timedelta(minutes=12)
 
 SPLITS = {DISCOVERY_DAY: DISCOVERY, HOLDOUT_DAY: HOLDOUT}
 
@@ -163,6 +167,43 @@ def test_a_lock_at_a_later_reading_is_a_mid_day_lock(tmp_path: Path) -> None:
 
     (row,) = supply.station_days
     assert (row.clean, row.window_open, row.mid_day) == (1, 0, 1)
+
+
+def test_the_window_open_anchor_is_the_publication_time_not_the_valid_time(tmp_path: Path) -> None:
+    start, _ = observation_window(ZONE, DISCOVERY_DAY)
+    lagged = [
+        StationObservation(
+            station=STATION,
+            valid_time=start + timedelta(hours=index + 1),
+            publication_time=start + timedelta(hours=index + 1) + PUBLICATION_LAG,
+            temp_f=Decimal(temp),
+            is_special=False,
+            raw="",
+            source="tape",
+        )
+        for index, temp in enumerate(WINDOW_OPEN_TEMPS)
+    ]
+
+    supply = survey_lock_supply(
+        scope_for(tmp_path),
+        sidecars_for(tmp_path, {SERIES: {DISCOVERY_DAY: PAIR}}),
+        {(STATION, DISCOVERY_DAY): lagged},
+    )
+
+    (row,) = supply.station_days
+    assert (row.clean, row.window_open, row.mid_day) == (1, 1, 0)
+
+
+def test_the_lowest_tail_leg_locks_on_the_kinds_settled_across_the_ladder(tmp_path: Path) -> None:
+    supply = survey_lock_supply(
+        scope_for(tmp_path),
+        sidecars_for(tmp_path, {SERIES: {DISCOVERY_DAY: TAIL}}),
+        {(STATION, DISCOVERY_DAY): readings_for(DISCOVERY_DAY, TAIL_TEMPS)},
+    )
+
+    (row,) = supply.station_days
+    assert (row.clean, row.ambiguous, row.no_lock) == (2, 0, 0)
+    assert (row.window_open, row.mid_day) == (1, 1)
 
 
 def test_a_clean_lock_and_an_ambiguous_lock_are_counted_apart(tmp_path: Path) -> None:
