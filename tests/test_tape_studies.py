@@ -1266,6 +1266,7 @@ def test_a_tree_with_no_touch_at_all_passes_the_kinds_the_run_declares(
     with pytest.raises(NoRowsConsumed) as refused:
         assemble(paths, kinds=(TOUCH,))
     assert TOUCH in str(refused.value)
+    assert SERIES in str(refused.value)
     assert not isinstance(refused.value, ManifestIncomplete)
     assert not isinstance(refused.value, ValueError)
 
@@ -1278,7 +1279,10 @@ def test_a_run_reading_a_kind_the_tree_lacks_leaves_no_manifest_behind(
 
     with pytest.raises(NoRowsConsumed):
         write_manifest(root, assemble(paths, kinds=(TRADES,)))
+    with pytest.raises(NoRowsConsumed) as refused:
+        write_manifest(root, assemble(paths, kinds=(LADDER, TRADES)))
 
+    assert TRADES in str(refused.value)
     assert not (root / RUN_ID / MANIFEST_NAME).exists()
     assert not root.exists()
 
