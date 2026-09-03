@@ -2,6 +2,7 @@ import ast
 import inspect
 import json
 import re
+import shutil
 import subprocess
 from dataclasses import fields
 from datetime import date, datetime, timedelta, timezone
@@ -46,6 +47,7 @@ from bot.lag.tape_studies import (
     TOUCH,
     TRADES,
     EvidenceWindow,
+    NoRowsConsumed,
     RunScope,
     assemble_run_inputs,
     intersects_exclusion,
@@ -60,7 +62,7 @@ from bot.lag.tape_studies import (
     window_dates,
     within_event_day,
 )
-from bot.replay.analysis_stations import HIGH, LOW
+from bot.replay.analysis_stations import HIGH, LOW, in_cohort
 from bot.replay.artifacts import (
     BOUNDARIES_SCHEMA,
     COVERAGE_SCHEMA,
@@ -135,7 +137,13 @@ CARVED_OUT = LOCK_CARVE_OUT[0]
 EXCLUSION_ROWS = 5
 EVENT_DAY_ROWS = 3
 
-SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPTS = REPO_ROOT / "scripts"
+FROZEN_SCOPE = REPO_ROOT / "data" / "tape_studies" / "run_scope_v2"
+FROZEN_HIGH_ROOTS = 20
+FROZEN_LADDER_DAY = date(2026, 8, 2)
+FROZEN_LADDER_ROWS = 3
+
 KNOWN_FAMILY_SCRIPTS = {
     "tape_report.py",
     "q1_report.py",
@@ -160,6 +168,10 @@ FAMILY_SCRIPTS = family_scripts()
 STATED_BAR = ("economic_bar_size", "economic_bar_price", "economic_bar_price_source")
 DERIVED_BAR = "economic_bar_cents_per_contract"
 STATED_REGIME = ("maker_rate", "maker_rate_source")
+
+needs_tape = pytest.mark.skipif(
+    not FROZEN_SCOPE.exists(), reason="the recorded tape is not on this host"
+)
 
 
 def argument_flags(source: str) -> set[str]:
@@ -482,9 +494,12 @@ def run_input_paths(tmp_path: Path) -> dict[str, Path]:
     }
 
 
-def assemble(paths: dict[str, Path], cohort: str | None = None) -> RunInputs:
+def assemble(
+    paths: dict[str, Path], cohort: str | None = None, kinds: tuple[str, ...] = (TOUCH,)
+) -> RunInputs:
     return assemble_run_inputs(
         run_id=RUN_ID,
+        kinds=kinds,
         floor_source=FloorSource.SIGNED_READ,
         maker_rate=PUBLISHED_MAKER_RATE,
         maker_rate_source=MAKER_RATE_SOURCE,
@@ -532,6 +547,25 @@ def both_ladder_paths(tmp_path: Path) -> dict[str, Path]:
         "preregistration": write_preregistration(tmp_path / "preregistration.md"),
         "repo": seeded_repo(tmp_path / "tree"),
         "run_scope": scope_dir(tmp_path, days=both_ladder_day_table()),
+        "artifacts": root,
+        "rtt_samples": write_rtt_samples(tmp_path / "samples.jsonl", ADEQUATE_SAMPLES),
+    }
+
+
+def frozen_ladder_paths(tmp_path: Path) -> dict[str, Path]:
+    root = tmp_path / "one_root"
+    write_partition(
+        root,
+        FROZEN_LADDER_DAY,
+        1,
+        [ladder_row(index, NOON) for index in range(FROZEN_LADDER_ROWS)],
+        kind=LADDER,
+        schema=KIND_SCHEMAS[LADDER],
+    )
+    return {
+        "preregistration": write_preregistration(tmp_path / "preregistration.md"),
+        "repo": seeded_repo(tmp_path / "tree"),
+        "run_scope": FROZEN_SCOPE,
         "artifacts": root,
         "rtt_samples": write_rtt_samples(tmp_path / "samples.jsonl", ADEQUATE_SAMPLES),
     }
@@ -1192,6 +1226,73 @@ def test_a_partition_outside_the_scopes_city_set_is_not_counted(paths: dict[str,
     assert after == before
 
 
+@needs_tape
+def test_a_cohort_with_no_rows_of_a_kind_the_run_reads_aborts_naming_both(
+    tmp_path: Path,
+) -> None:
+    paths = frozen_ladder_paths(tmp_path)
+
+    with pytest.raises(NoRowsConsumed) as refused:
+        assemble(paths, LOW, kinds=(LADDER,))
+
+    assert LADDER in str(refused.value)
+    assert LOW in str(refused.value)
+
+
+@needs_tape
+def test_a_cohort_carrying_rows_under_one_root_and_none_under_the_rest_still_runs(
+    tmp_path: Path,
+) -> None:
+    paths = frozen_ladder_paths(tmp_path)
+    swept = in_cohort({series for series, _ in load_run_scope(FROZEN_SCOPE).event_days}, HIGH)
+
+    inputs = assemble(paths, HIGH, kinds=(LADDER,))
+
+    assert len(swept) == FROZEN_HIGH_ROOTS
+    assert {path.name.split("-")[0] for path in (paths["artifacts"] / LADDER).iterdir()} == {SERIES}
+    assert inputs.row_counts[LADDER] == FROZEN_LADDER_ROWS
+
+
+def test_a_tree_with_no_touch_at_all_passes_the_kinds_the_run_declares(
+    paths: dict[str, Path],
+) -> None:
+    shutil.rmtree(paths["artifacts"] / TOUCH)
+
+    inputs = assemble(paths, kinds=(LADDER, TRADES))
+
+    assert inputs.row_counts[TOUCH] == 0
+    assert inputs.row_counts[LADDER] == CONSUMED[LADDER]
+    assert inputs.row_counts[TRADES] == CONSUMED[TRADES]
+    with pytest.raises(NoRowsConsumed) as refused:
+        assemble(paths, kinds=(TOUCH,))
+    assert TOUCH in str(refused.value)
+    assert not isinstance(refused.value, ManifestIncomplete)
+    assert not isinstance(refused.value, ValueError)
+
+
+def test_a_run_reading_a_kind_the_tree_lacks_leaves_no_manifest_behind(
+    tmp_path: Path, paths: dict[str, Path]
+) -> None:
+    shutil.rmtree(paths["artifacts"] / TRADES)
+    root = tmp_path / "tape_studies"
+
+    with pytest.raises(NoRowsConsumed):
+        write_manifest(root, assemble(paths, kinds=(TRADES,)))
+
+    assert not (root / RUN_ID / MANIFEST_NAME).exists()
+    assert not root.exists()
+
+
+def test_the_kinds_the_run_declares_reach_no_manifest_field(paths: dict[str, Path]) -> None:
+    narrow = manifest_payload(build_manifest(assemble(paths, kinds=(TOUCH,))))
+    wide = manifest_payload(build_manifest(assemble(paths, kinds=(TOUCH, LADDER, TRADES))))
+
+    assert narrow == wide
+    assert set(narrow["row_counts"]) == {TOUCH, LADDER, TRADES, "exclusions", "event_days"}
+    assert [name for name in narrow if "kind" in name] == []
+    assert [field.name for field in fields(RunInputs) if field.name == "kinds"] == []
+
+
 def test_a_short_read_rtt_sample_set_aborts_naming_the_latency_floor(
     paths: dict[str, Path],
 ) -> None:
@@ -1217,12 +1318,13 @@ def test_the_universe_the_manifest_records_is_the_frozen_one(paths: dict[str, Pa
 def test_the_assembler_states_no_default_bar_or_regime(paths: dict[str, Path]) -> None:
     parameters = inspect.signature(assemble_run_inputs).parameters
 
-    for name in (*STATED_BAR, *STATED_REGIME):
+    for name in (*STATED_BAR, *STATED_REGIME, "kinds"):
         assert parameters[name].default is inspect.Parameter.empty
         assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
     with pytest.raises(TypeError, match="economic_bar_size"):
         assemble_run_inputs(
             run_id=RUN_ID,
+            kinds=(TOUCH,),
             floor_source=FloorSource.SIGNED_READ,
             maker_rate=PUBLISHED_MAKER_RATE,
             maker_rate_source=MAKER_RATE_SOURCE,
@@ -1232,7 +1334,20 @@ def test_the_assembler_states_no_default_bar_or_regime(paths: dict[str, Path]) -
     with pytest.raises(TypeError, match="maker_rate"):
         assemble_run_inputs(
             run_id=RUN_ID,
+            kinds=(TOUCH,),
             floor_source=FloorSource.SIGNED_READ,
+            economic_bar_size=SELF_CHARGED_BAR,
+            economic_bar_price=SELF_CHARGED_BAR,
+            economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,
+            bootstrap_seed=SEED,
+            **paths,
+        )
+    with pytest.raises(TypeError, match="kinds"):
+        assemble_run_inputs(
+            run_id=RUN_ID,
+            floor_source=FloorSource.SIGNED_READ,
+            maker_rate=PUBLISHED_MAKER_RATE,
+            maker_rate_source=MAKER_RATE_SOURCE,
             economic_bar_size=SELF_CHARGED_BAR,
             economic_bar_price=SELF_CHARGED_BAR,
             economic_bar_price_source=SELF_CHARGED_BAR_SOURCE,

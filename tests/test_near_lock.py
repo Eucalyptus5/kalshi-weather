@@ -28,6 +28,8 @@ from bot.lag.taker_flow_run import UNDERPOWERED, readout, sweep_prints
 from bot.lag.tape_studies import (
     SELF_CHARGED_BAR,
     SELF_CHARGED_BAR_SOURCE,
+    TOUCH,
+    TRADES,
     RunScope,
     assemble_run_inputs,
     load_run_scope,
@@ -582,14 +584,10 @@ def test_a_run_paired_with_the_wrong_ladder_writes_no_manifest(tmp_path: Path) -
 
 def test_the_manifest_lands_before_any_statistic_is_read(tmp_path: Path) -> None:
     root = tmp_path / "foreign"
-    unreadable = write_partition(
-        root,
-        DISCOVERY_DAY,
-        1,
-        [],
-        kind="trades",
-        schema=pa.schema([("id", pa.int64()), ("ticker", pa.string())]),
-    )
+    foreign = pa.schema([("id", pa.int64()), ("ticker", pa.string())])
+    stranger = [{"id": 1, "ticker": DAY_TICKER}]
+    write_partition(root, DISCOVERY_DAY, 1, stranger, schema=foreign)
+    unreadable = write_partition(root, DISCOVERY_DAY, 1, stranger, kind="trades", schema=foreign)
     run_root = tmp_path / "tape_studies"
 
     with pytest.raises(ValueError, match=unreadable.name):
@@ -632,6 +630,7 @@ def test_a_full_run_writes_the_manifest_whose_digest_it_returns(tmp_path: Path) 
                     run_id=RUN_ID,
                     run_scope=scope_root,
                     artifacts=artifacts,
+                    kinds=(TOUCH, TRADES),
                     floor_source=FloorSource.SIGNED_READ,
                     maker_rate=PUBLISHED_MAKER_RATE,
                     maker_rate_source=MAKER_RATE_SOURCE,

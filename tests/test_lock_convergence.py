@@ -174,6 +174,8 @@ def trade(
     }
 
 
+RUN_TRADES = [trade(200, ABOVE, at(18, 1))]
+
 LADDER_ROWS = [
     touch(1, ABOVE, at(17, 59), "0.60", "0.62"),
     touch(2, ABOVE, at(18, 0), "0.60", "0.62"),
@@ -610,7 +612,7 @@ def test_a_reading_under_the_station_day_minimum_reports_no_statistic_but_keeps_
 ) -> None:
     run = execute(
         run_id=RUN_ID,
-        artifacts=artifacts_dir(tmp_path, LADDER_ROWS),
+        artifacts=artifacts_dir(tmp_path, LADDER_ROWS, trades=RUN_TRADES),
         observations=ARCHIVE,
         arrivals={},
         settles=SETTLES,
@@ -778,13 +780,10 @@ def test_a_station_day_with_no_recorded_archive_locks_nothing_and_is_counted(
 def test_the_manifest_lands_before_any_statistic_is_read(tmp_path: Path) -> None:
     paths = run_paths(tmp_path)
     root = tmp_path / "foreign"
-    path = write_partition(
-        root,
-        DISCOVERY_DAY,
-        1,
-        [],
-        schema=pa.schema([("id", pa.int64()), ("ticker", pa.string())]),
-    )
+    foreign = pa.schema([("id", pa.int64()), ("ticker", pa.string())])
+    stranger = [{"id": 1, "ticker": ABOVE}]
+    path = write_partition(root, DISCOVERY_DAY, 1, stranger, schema=foreign)
+    write_partition(root, DISCOVERY_DAY, 1, stranger, kind="trades", schema=foreign)
     run_root = tmp_path / "tape_studies"
 
     with pytest.raises(ValueError, match=path.name):
@@ -814,7 +813,7 @@ def test_a_full_run_writes_its_manifest_and_reports_a_json_safe_payload(tmp_path
 
     run = execute(
         run_id=RUN_ID,
-        artifacts=artifacts_dir(tmp_path, LADDER_ROWS),
+        artifacts=artifacts_dir(tmp_path, LADDER_ROWS, trades=RUN_TRADES),
         observations=ARCHIVE,
         arrivals={STATION: [reading(at(18, 4), "72", published=at(18, 5))]},
         settles=SETTLES,
@@ -938,7 +937,7 @@ def test_a_two_ladder_run_naming_no_cohort_writes_no_manifest(tmp_path: Path) ->
     with pytest.raises(ValueError, match="names no cohort"):
         execute(
             run_id=RUN_ID,
-            artifacts=artifacts_dir(tmp_path, LADDER_ROWS),
+            artifacts=artifacts_dir(tmp_path, LADDER_ROWS, trades=RUN_TRADES),
             observations=ARCHIVE,
             arrivals={},
             settles=SETTLES,
@@ -962,7 +961,7 @@ def test_a_two_ladder_run_scans_only_the_cohort_it_names(tmp_path: Path) -> None
 
     run = execute(
         run_id=RUN_ID,
-        artifacts=artifacts_dir(tmp_path, LADDER_ROWS),
+        artifacts=artifacts_dir(tmp_path, LADDER_ROWS, trades=RUN_TRADES),
         observations=ARCHIVE,
         arrivals={},
         settles=SETTLES,

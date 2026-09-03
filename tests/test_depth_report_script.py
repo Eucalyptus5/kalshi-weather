@@ -124,7 +124,7 @@ def test_the_report_leads_with_the_verdict_and_both_headline_figures(
 def test_a_thin_book_reports_the_confirmed_verdict(
     paths: dict[str, Path], run_root: Path, tmp_path: Path
 ) -> None:
-    paths["artifacts"] = ladder_artifacts(tmp_path, THIN_ROWS, name="thin")
+    paths["artifacts"] = ladder_artifacts(tmp_path, THIN_ROWS, name="thin", trades=DEEP_TRADES)
 
     assert run(args_for(paths, run_root)) == 0
 

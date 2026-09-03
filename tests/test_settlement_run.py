@@ -739,6 +739,7 @@ def assembled_inputs(paths: dict[str, Path]) -> RunInputs:
         repo=paths["repo"],
         run_scope=paths["run_scope"],
         artifacts=paths["artifacts"],
+        kinds=(LADDER,),
         rtt_samples=paths["rtt_samples"],
         floor_source=FloorSource.SIGNED_READ,
         maker_rate=PUBLISHED_MAKER_RATE,

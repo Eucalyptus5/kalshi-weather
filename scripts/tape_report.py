@@ -17,8 +17,10 @@ from bot.lag.run_manifest import (  # noqa: E402
     write_manifest,
 )
 from bot.lag.tape_studies import (  # noqa: E402
+    KIND_SCHEMAS,
     SELF_CHARGED_BAR,
     SELF_CHARGED_BAR_SOURCE,
+    NoRowsConsumed,
     assemble_run_inputs,
 )
 
@@ -26,6 +28,7 @@ from bot.lag.tape_studies import (  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RUN_ROOT = REPO_ROOT / "data" / "tape_studies"
 FLOOR_SOURCES = tuple(source.value for source in FloorSource)
+KINDS = tuple(KIND_SCHEMAS)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,6 +46,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--artifacts", type=Path, required=True, help="the forward-pass artifact root"
     )
     parser.add_argument("--rtt-samples", type=Path, required=True, help="the read-RTT sample file")
+    parser.add_argument(
+        "--kind",
+        dest="kinds",
+        action="append",
+        required=True,
+        choices=KINDS,
+        help="an artifact kind the run reads, repeated once per kind",
+    )
     parser.add_argument(
         "--floor-source",
         required=True,
@@ -65,6 +76,7 @@ def run(args: argparse.Namespace) -> int:
             repo=args.repo,
             run_scope=args.run_scope,
             artifacts=args.artifacts,
+            kinds=tuple(args.kinds),
             rtt_samples=args.rtt_samples,
             floor_source=FloorSource(args.floor_source),
             maker_rate=PUBLISHED_MAKER_RATE,
@@ -75,7 +87,7 @@ def run(args: argparse.Namespace) -> int:
             bootstrap_seed=args.seed,
         )
         write_manifest(args.run_root, inputs)
-    except ManifestIncomplete as exc:
+    except (ManifestIncomplete, NoRowsConsumed) as exc:
         print(exc, file=sys.stderr)
         return 1
 

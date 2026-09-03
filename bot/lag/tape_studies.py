@@ -54,6 +54,10 @@ SELF_CHARGED_BAR_SOURCE = "statistic_charges_its_own_fee"
 _DAY = timedelta(days=1)
 
 
+class NoRowsConsumed(RuntimeError):
+    """A kind the run reads carries no rows under the series it swept, so the run aborts."""
+
+
 def window_dates(window_start: datetime, window_end: datetime) -> list[date]:
     day = window_start.astimezone(timezone.utc).date()
     last = window_end.astimezone(timezone.utc).date()
@@ -329,6 +333,7 @@ def assemble_run_inputs(
     repo: Path,
     run_scope: Path,
     artifacts: Path,
+    kinds: tuple[str, ...],
     rtt_samples: Path,
     floor_source: FloorSource,
     maker_rate: Decimal,
@@ -355,6 +360,11 @@ def assemble_run_inputs(
         )
         for kind in KIND_SCHEMAS
     }
+    named = cohort if cohort is not None else ", ".join(sorted(swept))
+    for kind in kinds:
+        if not row_counts[kind]:
+            raise NoRowsConsumed(f"run aborted, the tape holds no {kind} rows for {named}")
+
     row_counts["exclusions"] = pq.ParquetFile(run_scope / "exclusions.parquet").metadata.num_rows
     row_counts["event_days"] = pq.ParquetFile(run_scope / "event_days.parquet").metadata.num_rows
 

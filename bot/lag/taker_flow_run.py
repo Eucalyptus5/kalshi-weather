@@ -452,6 +452,7 @@ def execute(
         repo=repo,
         run_scope=run_scope,
         artifacts=artifacts,
+        kinds=(TOUCH, TRADES),
         rtt_samples=rtt_samples,
         floor_source=floor_source,
         maker_rate=maker_rate,

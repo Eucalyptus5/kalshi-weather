@@ -1,5 +1,6 @@
 import argparse
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from bot.lag.run_manifest import MANIFEST_NAME
 from scripts.tape_report import (
     DEFAULT_RUN_ROOT,
     FLOOR_SOURCES,
+    KINDS,
     REPO_ROOT,
     build_parser,
     format_report,
@@ -17,10 +19,12 @@ from scripts.tape_report import (
 )
 from tests.test_tape_studies import (
     CONSUMED,
+    LADDER,
     RUN_ID,
     SEED,
     SHORT_SAMPLES,
     TOUCH,
+    TRADES,
     run_input_paths,
     write_rtt_samples,
 )
@@ -33,6 +37,7 @@ REQUIRED = (
     "--run-scope",
     "--artifacts",
     "--rtt-samples",
+    "--kind",
     "--floor-source",
     "--seed",
 )
@@ -44,6 +49,7 @@ def argv_for(
     *,
     run_id: str = RUN_ID,
     floor_source: str = "RTT_read",
+    kinds: tuple[str, ...] = (TOUCH,),
 ) -> list[str]:
     return [
         "--run-id",
@@ -56,6 +62,7 @@ def argv_for(
         str(paths["artifacts"]),
         "--rtt-samples",
         str(paths["rtt_samples"]),
+        *[flag for kind in kinds for flag in ("--kind", kind)],
         "--floor-source",
         floor_source,
         "--seed",
@@ -67,7 +74,9 @@ def argv_for(
     ]
 
 
-def args_for(paths: dict[str, Path], run_root: Path, **overrides: str) -> argparse.Namespace:
+def args_for(
+    paths: dict[str, Path], run_root: Path, **overrides: str | tuple[str, ...]
+) -> argparse.Namespace:
     return build_parser().parse_args(argv_for(paths, run_root, **overrides))
 
 
@@ -190,6 +199,39 @@ def test_the_run_root_and_repo_default_to_the_tree_the_script_ships_in(
     assert args.run_root == DEFAULT_RUN_ROOT
     assert args.repo == REPO_ROOT
     assert DEFAULT_RUN_ROOT == REPO_ROOT / "data" / "tape_studies"
+
+
+def test_the_kinds_the_run_reads_are_named_on_the_command_line(
+    paths: dict[str, Path], run_root: Path
+) -> None:
+    args = args_for(paths, run_root, kinds=(TOUCH, LADDER, TRADES))
+
+    assert KINDS == (TOUCH, LADDER, TRADES)
+    assert args.kinds == [TOUCH, LADDER, TRADES]
+    assert run(args) == 0
+
+
+def test_a_run_reading_a_kind_the_tree_lacks_returns_one(
+    paths: dict[str, Path], run_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    shutil.rmtree(paths["artifacts"] / TRADES)
+
+    assert run(args_for(paths, run_root, kinds=(TRADES,))) == 1
+
+    captured = capsys.readouterr()
+    assert TRADES in captured.err
+    assert captured.out == ""
+    assert not run_root.exists()
+
+
+def test_a_kind_outside_the_three_the_tape_carries_is_refused(
+    paths: dict[str, Path], run_root: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as excinfo:
+        args_for(paths, run_root, kinds=("inventory",))
+
+    assert excinfo.value.code != 0
+    assert "--kind" in capsys.readouterr().err
 
 
 def test_the_seed_reaches_the_manifest_as_an_integer(

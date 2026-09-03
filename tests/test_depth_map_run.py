@@ -650,7 +650,7 @@ def test_the_replenish_median_is_the_crossing_and_is_declined_under_censoring() 
 def test_a_thin_book_confirms_the_small_capacity_reading(tmp_path: Path) -> None:
     run = execute(
         run_id=RUN_ID,
-        artifacts=ladder_artifacts(tmp_path, THIN_ROWS),
+        artifacts=ladder_artifacts(tmp_path, THIN_ROWS, trades=DEEP_TRADES),
         floor_source=FloorSource.SIGNED_READ,
         seed=SEED,
         run_root=tmp_path / "tape_studies",
@@ -693,7 +693,7 @@ def test_a_deep_book_that_replenishes_refutes_the_small_capacity_reading(tmp_pat
 def test_the_reading_carries_no_inference_field(tmp_path: Path) -> None:
     run = execute(
         run_id=RUN_ID,
-        artifacts=ladder_artifacts(tmp_path, THIN_ROWS),
+        artifacts=ladder_artifacts(tmp_path, THIN_ROWS, trades=DEEP_TRADES),
         floor_source=FloorSource.SIGNED_READ,
         seed=SEED,
         run_root=tmp_path / "tape_studies",
