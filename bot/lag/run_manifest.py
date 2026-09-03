@@ -274,7 +274,7 @@ def manifest_payload(manifest: Manifest) -> dict:
         payload["fee_type_check"] = checked.result
         payload["fee_type_observed_at"] = checked.observed_at.isoformat()
         payload["fee_type_sha256"] = checked.sha256
-    # Only the settlement family reads a settlement source, so six null keys would move every
+    # Only the settlement family reads a settlement source, so seven null keys would move every
     # digest frozen before the sidecar existed.
     settlement = manifest.settlement
     if settlement is not None:
@@ -291,6 +291,7 @@ def manifest_payload(manifest: Manifest) -> dict:
         payload["days_before_boundary"] = settlement.boundary.days_before_boundary
         payload["days_on_or_after_boundary"] = settlement.boundary.days_on_or_after_boundary
         payload["boundary_date"] = settlement.boundary.boundary_date.isoformat()
+        payload["boundary_source"] = settlement.boundary.boundary_source
     return payload
 
 

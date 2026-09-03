@@ -47,6 +47,7 @@ from bot.lag.settlement_run import (
     result_payload,
 )
 from bot.lag.settlement_source import (
+    BOUNDARY_SOURCE,
     SettlementScopeShort,
     boundary_split,
     pull_settlement_sources,
@@ -85,7 +86,7 @@ from bot.replay.run_scope import (
 )
 from scripts import f2_report
 from scripts.q4_report import write_settles_cache
-from tests.test_settlement_source import MOVED_AT, series_body, transport_for
+from tests.test_settlement_source import series_body, transport_for
 from tests.test_tape_studies import (
     ADEQUATE_SAMPLES,
     exclusion_row,
@@ -892,7 +893,7 @@ def test_the_boundary_split_counts_the_days_read_under_the_moved_source(
     assert run.boundary.boundary_date == BOUNDARY_DATE
     assert run.boundary.days_on_or_after_boundary == ON_OR_AFTER
     assert run.boundary.days_before_boundary == 12
-    assert MOVED_AT.startswith(BOUNDARY_DATE.isoformat())
+    assert run.boundary.boundary_source == BOUNDARY_SOURCE
 
 
 def test_the_manifest_records_the_settlement_source_it_read_under(
@@ -903,6 +904,7 @@ def test_the_manifest_records_the_settlement_source_it_read_under(
     manifest = manifest_of(run_root)
     assert manifest["settlement_source"] == {SERIES: "The Weather Company"}
     assert manifest["boundary_date"] == BOUNDARY_DATE.isoformat()
+    assert manifest["boundary_source"] == BOUNDARY_SOURCE
     assert manifest["days_on_or_after_boundary"] == ON_OR_AFTER
     assert manifest["last_updated_ts"][SERIES].startswith(BOUNDARY_DATE.isoformat())
 
@@ -944,6 +946,8 @@ def test_the_results_carry_every_figure_the_report_reads(
 
     assert payload["deltas"]["abs_delta_gt_1"] == 1
     assert payload["settlement_source"]["days_on_or_after_boundary"] == ON_OR_AFTER
+    assert payload["settlement_source"]["boundary_source"] == BOUNDARY_SOURCE
+    assert payload["settlement_source"]["distinct_notice_bodies"] == 1
     assert payload["entries"]["open_at_first_reading_n"] == 1
     assert payload["entries"]["entry_at_close_n"] == 0
     assert payload["alpha"] == ALPHA_F2

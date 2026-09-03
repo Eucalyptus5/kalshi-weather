@@ -33,6 +33,7 @@ from bot.lag.settlement_source import (
     SettlementProvenance,
     boundary_split,
     check_settlement_scope,
+    distinct_notice_bodies,
     read_settlement_sources,
     source_root_counts,
 )
@@ -537,7 +538,9 @@ def _settlement_payload(provenance: SettlementProvenance, boundary: BoundarySpli
         "observation_source": provenance.observation_source,
         "sha256": provenance.sha256,
         "roots_per_source": dict(sorted(source_root_counts(provenance).items())),
+        "distinct_notice_bodies": distinct_notice_bodies(provenance),
         "boundary_date": boundary.boundary_date.isoformat(),
+        "boundary_source": boundary.boundary_source,
         "days_before_boundary": boundary.days_before_boundary,
         "days_on_or_after_boundary": boundary.days_on_or_after_boundary,
     }

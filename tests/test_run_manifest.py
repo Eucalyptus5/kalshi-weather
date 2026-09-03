@@ -50,6 +50,7 @@ from bot.lag.run_manifest import (
     write_manifest,
 )
 from bot.lag.settlement_source import (
+    BOUNDARY_SOURCE,
     BoundarySplit,
     SeriesSettlementSource,
     SettlementProvenance,
@@ -86,6 +87,7 @@ SETTLEMENT_KEYS = (
     "days_before_boundary",
     "days_on_or_after_boundary",
     "boundary_date",
+    "boundary_source",
 )
 MOVED_AT = datetime(2026, 8, 14, 17, 48, 38, tzinfo=UTC)
 BOUNDARY_DATE = date(2026, 8, 14)
@@ -1081,7 +1083,10 @@ def _settlement() -> SettlementRecord:
             sha256="4" * 64,
         ),
         boundary=BoundarySplit(
-            boundary_date=BOUNDARY_DATE, days_before_boundary=12, days_on_or_after_boundary=2
+            boundary_date=BOUNDARY_DATE,
+            days_before_boundary=12,
+            days_on_or_after_boundary=2,
+            boundary_source=BOUNDARY_SOURCE,
         ),
     )
 
@@ -1107,6 +1112,7 @@ def test_a_run_recording_the_settlement_source_keys_it_by_root_and_moves_the_dig
     assert list(payload["settlement_source"]) == sorted(SETTLEMENT_ROOTS)
     assert list(payload["last_updated_ts"]) == sorted(SETTLEMENT_ROOTS)
     assert payload["boundary_date"] == BOUNDARY_DATE.isoformat()
+    assert payload["boundary_source"] == "product_metadata.important_info.markdown"
     assert payload["days_before_boundary"] == 12
     assert payload["days_on_or_after_boundary"] == 2
     assert freeze_digest(payload) != FROZEN_DIGEST

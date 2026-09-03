@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
 import json
+import os
 import time
 from collections.abc import Iterator, Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
@@ -12,13 +15,18 @@ import pytest
 from bot.lag import settlement_source
 from bot.lag.r0_universe import freeze_digest
 from bot.lag.settlement_source import (
+    BOUNDARY_SOURCE,
     OBSERVATION_SOURCE,
+    BoundaryOutsideWindow,
     SeriesSettlementSource,
+    SettlementNoticeMisdated,
+    SettlementNoticeUnreadable,
     SettlementProvenance,
     SettlementScopeShort,
     SettlementSourceUnreadable,
     boundary_split,
     check_settlement_scope,
+    distinct_notice_bodies,
     pull_settlement_sources,
     read_settlement_sources,
     settlement_payload,
@@ -38,13 +46,38 @@ BANNER = (
     "will transition their settlement source from the National Weather Service (NWS) to "
     "The Weather Company."
 )
+LIVE_BANNER = (
+    "**Important information:** \n\nEffective Friday, August 14th, daily temperature markets "
+    "will transition their settlement source from the National Weather Service (NWS) to "
+    "The Weather Company. The Weather Company utilizes NWS as its primary underlying source, "
+    "and official settlement data will be accessible at https://weather.com/kalshi."
+)
+LIVE_BANNER_SHA256 = "8479086f1ed3267b42acdd6a9aa3a14bd9d7e271573be96a5c433d1f43e2c865"
+BULK_INFO_ID = "GLOBALTEMPERATURE-bulk-2026-08-11"
+LAX_INFO_ID = "KXHIGHLAX-2026-08-11"
+RATCHETED_AT = "2026-08-20T21:30:00Z"
 DEN = "KXHIGHDEN"
 NY = "KXHIGHNY"
 SFO = "KXHIGHTSFO"
 MIA = "KXLOWTMIA"
+LOWT_DEN = "KXLOWTDEN"
+LAX = "KXHIGHLAX"
 ROOTS = (DEN, NY, SFO, MIA)
+LIVE_ROOTS = (DEN, LOWT_DEN, LAX)
+LIVE_STAMPS = {
+    DEN: "2026-08-20T21:30:00.537864Z",
+    LOWT_DEN: "2026-08-20T21:30:00.599192Z",
+}
 TWENTY_ROOTS = tuple(f"KXHIGH{index:02d}" for index in range(20))
 WINDOW = tuple(date(2026, 8, 2) + timedelta(days=offset) for offset in range(14))
+LIVE_ONLY = pytest.mark.skipif(
+    os.environ.get("KW_LIVE_SERIES") != "1",
+    reason="set KW_LIVE_SERIES=1 to read the live series endpoint",
+)
+
+
+def banner_dated(named: str) -> str:
+    return BANNER.replace("Friday, August 14th", named)
 
 
 def series_body(
@@ -53,6 +86,7 @@ def series_body(
     url: str = WEATHER_COMPANY_URL,
     last_updated_ts: str = MOVED_AT,
     markdown: str = BANNER,
+    info_id: str = BULK_INFO_ID,
 ) -> dict:
     return {
         "series": {
@@ -62,7 +96,7 @@ def series_body(
             "fee_multiplier": 1,
             "last_updated_ts": last_updated_ts,
             "settlement_sources": [{"name": name, "url": url}],
-            "product_metadata": {"important_info": {"markdown": markdown}},
+            "product_metadata": {"important_info": {"id": info_id, "markdown": markdown}},
         }
     }
 
@@ -197,17 +231,18 @@ def test_the_two_sides_of_the_boundary_are_separate_counts_not_a_ratio(
     assert isinstance(split.boundary_date, date)
 
 
-def test_a_window_wholly_before_the_boundary_puts_nothing_on_the_far_side(
+def test_a_window_wholly_before_the_boundary_is_refused_not_reported_clean(
     moved: SettlementProvenance,
 ) -> None:
-    split = boundary_split(moved, WINDOW[:12])
+    with pytest.raises(BoundaryOutsideWindow) as excinfo:
+        boundary_split(moved, WINDOW[:12])
 
-    assert split.days_before_boundary == 12
-    assert split.days_on_or_after_boundary == 0
+    assert excinfo.value.boundary == date(2026, 8, 14)
+    assert (excinfo.value.first, excinfo.value.last) == (WINDOW[0], WINDOW[11])
 
 
 def test_a_day_named_twice_lands_twice_on_its_side_of_the_boundary(tmp_path: Path) -> None:
-    bodies = {DEN: series_body(DEN, last_updated_ts="2026-08-10T17:48:38Z")}
+    bodies = {DEN: series_body(DEN, markdown=banner_dated("Monday, August 10th"))}
     provenance = frozen(tmp_path / "settlement_source.json", bodies)
     days = [date(2026, 8, 5), date(2026, 8, 12), date(2026, 8, 12), date(2026, 8, 15)]
 
@@ -253,7 +288,43 @@ def test_one_root_left_on_the_old_source_is_recorded_and_counted(tmp_path: Path)
     assert source_root_counts(provenance) == {WEATHER_COMPANY: 19, NWS: 1}
     assert provenance.series[roots[7]].settlement_source == NWS
     assert provenance.series[roots[7]].settlement_source_url == NWS_URL
+    assert boundary_split(provenance, WINDOW).boundary_date == date(2026, 8, 14)
     check_settlement_scope(provenance, roots)
+
+
+def test_one_root_carrying_a_different_notice_body_is_recorded_and_counted(
+    tmp_path: Path,
+) -> None:
+    roots = TWENTY_ROOTS
+    bodies = moved_bodies(roots) | {roots[7]: series_body(roots[7], markdown=LIVE_BANNER)}
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    split = boundary_split(provenance, WINDOW)
+
+    assert distinct_notice_bodies(provenance) == 2
+    assert provenance.series[roots[7]].important_info == LIVE_BANNER
+    assert split.boundary_date == date(2026, 8, 14)
+    assert split.days_before_boundary == 12
+    assert split.days_on_or_after_boundary == 2
+
+
+def test_two_roots_whose_notice_ids_differ_carry_one_body_and_one_boundary(
+    tmp_path: Path,
+) -> None:
+    bodies = {
+        DEN: series_body(DEN, markdown=LIVE_BANNER, info_id=BULK_INFO_ID),
+        LAX: series_body(LAX, markdown=LIVE_BANNER, info_id=LAX_INFO_ID),
+    }
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    split = boundary_split(provenance, WINDOW)
+
+    ids = {body["series"]["product_metadata"]["important_info"]["id"] for body in bodies.values()}
+    assert ids == {BULK_INFO_ID, LAX_INFO_ID}
+    assert distinct_notice_bodies(provenance) == 1
+    assert split.boundary_date == date(2026, 8, 14)
+    assert split.days_before_boundary == 12
+    assert split.days_on_or_after_boundary == 2
 
 
 def test_the_stamp_lands_as_a_tz_aware_utc_datetime(moved: SettlementProvenance) -> None:
@@ -274,15 +345,15 @@ def test_a_stamp_carrying_fractional_seconds_parses_without_loss(tmp_path: Path)
     assert stamp.utcoffset() == timedelta(0)
 
 
-def test_the_earliest_stamp_across_disagreeing_roots_sets_the_boundary(tmp_path: Path) -> None:
+def test_the_earliest_notice_across_disagreeing_roots_sets_the_boundary(tmp_path: Path) -> None:
     bodies = {
-        DEN: series_body(DEN, last_updated_ts="2026-08-18T19:15:56.178852Z"),
-        NY: series_body(NY, last_updated_ts="2026-08-14T17:48:38Z"),
+        DEN: series_body(DEN, markdown=banner_dated("Thursday, August 20th")),
+        NY: series_body(NY),
     }
     provenance = frozen(tmp_path / "settlement_source.json", bodies)
 
     assert next(iter(provenance.series)) == DEN
-    assert provenance.series[DEN].last_updated_ts > provenance.series[NY].last_updated_ts
+    assert distinct_notice_bodies(provenance) == 2
 
     split = boundary_split(provenance, WINDOW)
 
@@ -291,12 +362,12 @@ def test_the_earliest_stamp_across_disagreeing_roots_sets_the_boundary(tmp_path:
     assert split.days_on_or_after_boundary == 2
 
 
-def test_the_earliest_stamp_sets_the_boundary_when_its_root_also_sorts_first(
+def test_the_earliest_notice_sets_the_boundary_when_its_root_also_sorts_first(
     tmp_path: Path,
 ) -> None:
     bodies = {
-        DEN: series_body(DEN, last_updated_ts="2026-08-14T17:48:38Z"),
-        NY: series_body(NY, last_updated_ts="2026-08-18T19:15:56.178852Z"),
+        DEN: series_body(DEN),
+        NY: series_body(NY, markdown=banner_dated("Thursday, August 20th")),
     }
     provenance = frozen(tmp_path / "settlement_source.json", bodies)
 
@@ -309,7 +380,7 @@ def test_the_earliest_stamp_sets_the_boundary_when_its_root_also_sorts_first(
     assert split.days_on_or_after_boundary == 2
 
 
-def test_the_boundary_takes_the_utc_date_of_the_stamp_not_the_local_one(
+def test_the_boundary_is_the_notice_date_whatever_zone_the_host_keeps(
     tmp_path: Path, host_zone_behind_utc: None
 ) -> None:
     bodies = {DEN: series_body(DEN, last_updated_ts="2026-08-14T02:00:00Z")}
@@ -393,14 +464,167 @@ def test_a_series_carrying_no_banner_freezes_an_empty_string(tmp_path: Path) -> 
     assert provenance.series[DEN].important_info == ""
 
 
-def test_the_banner_text_is_carried_and_never_read(moved: SettlementProvenance) -> None:
-    source = Path(settlement_source.__file__).read_text()
-    readers = ("strptime", "fromisoformat", "re.search", "re.match", "split", "August")
+def test_the_boundary_is_read_from_the_notice_and_never_from_the_stamp() -> None:
+    body = inspect.getsource(settlement_source.boundary_split)
 
-    assert "import re" not in source
-    for line in source.splitlines():
-        if "important_info" in line:
-            assert not [reader for reader in readers if reader in line]
+    assert BOUNDARY_SOURCE == "product_metadata.important_info.markdown"
+    assert "important_info" in body
+    assert "last_updated_ts" not in body
+
+
+def test_the_split_names_the_field_the_boundary_was_read_from(
+    moved: SettlementProvenance,
+) -> None:
+    assert boundary_split(moved, WINDOW).boundary_source == BOUNDARY_SOURCE
+
+
+def test_the_byte_exact_live_notice_derives_the_same_three_literals(tmp_path: Path) -> None:
+    bodies = {
+        root: series_body(root, last_updated_ts=stamp, markdown=LIVE_BANNER)
+        for root, stamp in LIVE_STAMPS.items()
+    }
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    split = boundary_split(provenance, WINDOW)
+
+    assert hashlib.sha256(LIVE_BANNER.encode()).hexdigest() == LIVE_BANNER_SHA256
+    assert LIVE_BANNER != BANNER
+    assert split.boundary_date == date(2026, 8, 14)
+    assert split.days_before_boundary == 12
+    assert split.days_on_or_after_boundary == 2
+
+
+@LIVE_ONLY
+def test_a_sidecar_pulled_from_the_live_endpoint_derives_the_same_three_literals(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settlement_source.json"
+    pull_settlement_sources(LIVE_ROOTS, OBSERVED_AT, path)
+    provenance = read_settlement_sources(path)
+
+    split = boundary_split(provenance, WINDOW)
+
+    assert sorted(provenance.series) == sorted(LIVE_ROOTS)
+    assert distinct_notice_bodies(provenance) == 1
+    assert split.boundary_date == date(2026, 8, 14)
+    assert split.days_before_boundary == 12
+    assert split.days_on_or_after_boundary == 2
+
+
+def test_a_stamp_six_days_past_the_change_still_derives_the_notice_date(tmp_path: Path) -> None:
+    bodies = {root: series_body(root, last_updated_ts=RATCHETED_AT) for root in ROOTS}
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    split = boundary_split(provenance, WINDOW)
+
+    assert {item.last_updated_ts for item in provenance.series.values()} == {
+        datetime(2026, 8, 20, 21, 30, tzinfo=UTC)
+    }
+    assert split.boundary_date == date(2026, 8, 14)
+    assert split.days_before_boundary == 12
+    assert split.days_on_or_after_boundary == 2
+
+
+def test_the_stamp_the_old_derivation_read_lands_past_the_window(tmp_path: Path) -> None:
+    bodies = {root: series_body(root, last_updated_ts=RATCHETED_AT) for root in ROOTS}
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    ratcheted = min(item.last_updated_ts for item in provenance.series.values()).date()
+    before = sum(1 for day in WINDOW if day < ratcheted)
+
+    assert ratcheted == date(2026, 8, 20)
+    assert before == 14
+    assert len(WINDOW) - before == 0
+    assert boundary_split(provenance, WINDOW).boundary_date == date(2026, 8, 14)
+
+
+@pytest.mark.parametrize(
+    ("named", "boundary"),
+    (("Thursday, August 20th", "2026-08-20"), ("Sunday, August 2nd", "2026-08-02")),
+)
+def test_a_boundary_outside_the_window_is_refused_not_reported_clean(
+    tmp_path: Path, named: str, boundary: str
+) -> None:
+    bodies = {DEN: series_body(DEN, markdown=banner_dated(named))}
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    with pytest.raises(BoundaryOutsideWindow) as excinfo:
+        boundary_split(provenance, WINDOW)
+
+    message = str(excinfo.value)
+    assert boundary in message
+    assert "2026-08-02" in message
+    assert "2026-08-15" in message
+    assert excinfo.value.boundary == date.fromisoformat(boundary)
+    assert (excinfo.value.first, excinfo.value.last) == (WINDOW[0], WINDOW[-1])
+
+
+@pytest.mark.parametrize(
+    ("named", "boundary", "before", "after"),
+    (
+        ("Monday, August 3rd", date(2026, 8, 3), 1, 13),
+        ("Saturday, August 15th", date(2026, 8, 15), 13, 1),
+    ),
+)
+def test_a_boundary_on_either_admissible_extreme_still_splits_the_window(
+    tmp_path: Path, named: str, boundary: date, before: int, after: int
+) -> None:
+    bodies = {DEN: series_body(DEN, markdown=banner_dated(named))}
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    split = boundary_split(provenance, WINDOW)
+
+    assert split.boundary_date == boundary
+    assert split.days_before_boundary == before
+    assert split.days_on_or_after_boundary == after
+
+
+def test_a_notice_whose_weekday_misses_its_date_in_the_sidecars_year_is_refused(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "settlement_source.json"
+    bodies = {DEN: series_body(DEN, markdown=LIVE_BANNER)}
+    pull_settlement_sources(
+        [DEN], datetime(2025, 8, 19, 17, 30, tzinfo=UTC), path, transport_for(bodies)
+    )
+    provenance = read_settlement_sources(path)
+
+    with pytest.raises(SettlementNoticeMisdated) as excinfo:
+        boundary_split(provenance, WINDOW)
+
+    assert excinfo.value.root == DEN
+    assert excinfo.value.named == "Friday"
+    assert excinfo.value.moment == date(2025, 8, 14)
+    assert "Thursday" in str(excinfo.value)
+
+
+def test_a_sidecar_whose_notices_name_no_effective_date_derives_no_boundary(
+    tmp_path: Path,
+) -> None:
+    bodies = {
+        DEN: series_body(DEN, markdown=""),
+        NY: series_body(NY, markdown="settlement moves to The Weather Company"),
+    }
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    with pytest.raises(SettlementNoticeUnreadable) as excinfo:
+        boundary_split(provenance, WINDOW)
+
+    assert excinfo.value.roots == (DEN, NY)
+    assert DEN in str(excinfo.value)
+    assert NY in str(excinfo.value)
+
+
+def test_a_root_carrying_no_notice_contributes_nothing_to_the_boundary(tmp_path: Path) -> None:
+    bodies = {DEN: series_body(DEN, markdown=""), NY: series_body(NY)}
+    provenance = frozen(tmp_path / "settlement_source.json", bodies)
+
+    split = boundary_split(provenance, WINDOW)
+
+    assert distinct_notice_bodies(provenance) == 2
+    assert split.boundary_date == date(2026, 8, 14)
+    assert split.days_before_boundary == 12
+    assert split.days_on_or_after_boundary == 2
 
 
 def test_the_observation_side_comparison_value_is_frozen_alongside(
