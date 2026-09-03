@@ -34,6 +34,7 @@ DECLARED = (
 )
 RUN_NAMES = [module.__name__ for module, _ in DECLARED]
 UNREAD = "unread"
+ASSEMBLER = "assemble_run_inputs"
 
 
 class Reached(Exception):
@@ -43,8 +44,10 @@ class Reached(Exception):
 def calls_the_assembler(source: str) -> bool:
     return any(
         isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "assemble_run_inputs"
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id == ASSEMBLER)
+            or (isinstance(node.func, ast.Attribute) and node.func.attr == ASSEMBLER)
+        )
         for node in ast.walk(ast.parse(source))
     )
 

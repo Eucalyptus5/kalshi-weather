@@ -1,4 +1,5 @@
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -786,7 +787,7 @@ def test_the_manifest_lands_before_any_statistic_is_read(tmp_path: Path) -> None
     write_partition(root, DISCOVERY_DAY, 1, stranger, kind="trades", schema=foreign)
     run_root = tmp_path / "tape_studies"
 
-    with pytest.raises(ValueError, match=path.name):
+    with pytest.raises(ValueError, match=re.escape(str(path))):
         execute(
             run_id=RUN_ID,
             artifacts=root,
