@@ -3,7 +3,7 @@ import re
 import subprocess
 from dataclasses import fields, replace
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 
 import pytest
@@ -79,6 +79,7 @@ NO_READS = "the statistic places no read against the api"
 OBSERVED_AT = datetime(2026, 8, 19, 17, 30, tzinfo=UTC)
 FROZEN_DIGEST = "2e73ed22bb8e6b90698a84b204da0d54ff332cbb844da78eeaac64ad3a481d41"
 EXEMPT_DIGEST = "1a17447f6696469fdbd52072e80e7c5c4ed5c3404c6c9ad8d5a504fe54ad8639"
+AMBIENT_PRECISIONS = (20, 28, 50)
 FEE_TYPE_KEYS = ("fee_type_check", "fee_type_observed_at", "fee_type_sha256")
 SETTLEMENT_KEYS = (
     "settlement_source",
@@ -128,6 +129,49 @@ FIELDS = {
     "economic_bar_cents_per_contract",
     "bootstrap_resamples",
     "bootstrap_seed",
+}
+
+# The f1-20260820 run computed this digest on the recorder host before the bar context was pinned.
+# Held as a literal so a later precision change has to move this test rather than silently
+# invalidate a finished run's manifest.
+F1_DIGEST = "26221572c18f4fd9687ebae8cc3a728eea63b02818a8cc4d0fbf2a2b84b27515"
+F1_MANIFEST_PAYLOAD = {
+    "accrual_end": "2026-08-16T08:00:00+00:00",
+    "accrual_start": "2026-08-02T05:00:00+00:00",
+    "bootstrap_resamples": 10000,
+    "bootstrap_seed": 20260820,
+    "cohort": "high",
+    "economic_bar_cents_per_contract": "0",
+    "economic_bar_price": "0",
+    "economic_bar_price_source": "statistic_charges_its_own_fee",
+    "economic_bar_size": "0",
+    "fee_maker_rate": "0",
+    "fee_maker_rate_source": "series_api_fee_type_quadratic_2026-08-19",
+    "fee_module": "bot.execution.fees.taker_fee",
+    "fee_module_corrected": True,
+    "fee_module_quantum": "0.01",
+    "fee_threshold_source": "published_formula",
+    "fee_type_check": "plain_quadratic",
+    "fee_type_observed_at": "2026-08-20T00:20:16+00:00",
+    "fee_type_sha256": "130b0e9dfd69109fca1b044b1b218e42b5a1ddafc9c92f1864d42bc298792ff0",
+    "git_dirty": False,
+    "git_head": "b20ee297de43e07406800c8be773ea570d1384fb",
+    "latency_floor_s": 0.14643257297575474,
+    "latency_floor_samples": 200,
+    "latency_floor_source": "RTT_read",
+    "preregistration_path": "improvements/active/f1_preregistration.md",
+    "preregistration_sha256": "b5159a022dea06b191cfe0e44525acc11c1c4d9db841557d6bab39ecf27c9268",
+    "r0_fraction_invalid_max": "0.5",
+    "r0_universe_sha256": "19840051b99cb602612814105503fdcd2c3b86058eb2087f742215bd6692918c",
+    "row_counts": {
+        "event_days": 1320,
+        "exclusions": 361,
+        "ladder": 113284469,
+        "touch": 0,
+        "trades": 1315459,
+    },
+    "run_id": "f1-20260820",
+    "t_persist_s": 10.0,
 }
 
 
@@ -1039,6 +1083,43 @@ def test_the_digest_of_a_run_clearing_no_tripwire_has_not_moved() -> None:
 
     assert set(payload) == FIELDS
     assert freeze_digest(payload) == FROZEN_DIGEST
+
+
+@pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
+def test_the_recorded_digest_does_not_move_with_the_ambient_precision(prec: int) -> None:
+    with localcontext(prec=prec):
+        payload = manifest_payload(_frozen_manifest(None))
+        digest = freeze_digest(payload)
+
+    assert payload["economic_bar_size"] == "26"
+    assert payload["economic_bar_cents_per_contract"] == "2.769230769230769230769230769"
+    assert digest == FROZEN_DIGEST
+
+
+@pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
+def test_the_exemption_digest_does_not_move_with_the_ambient_precision(
+    complete: RunInputs, prec: int
+) -> None:
+    dropped = replace(complete, universe=None, floor=None)
+    declared = (
+        Exemption(field="latency_floor", reason=NO_READS),
+        Exemption(field="r0_fraction_invalid_max", reason=NO_TAPE),
+    )
+
+    with localcontext(prec=prec):
+        digest = freeze_digest(_pinned(build_manifest(replace(dropped, exemptions=declared))))
+
+    assert digest == EXEMPT_DIGEST
+
+
+@pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
+def test_the_completed_run_keeps_the_digest_it_recorded(prec: int) -> None:
+    with localcontext(prec=prec):
+        digest = freeze_digest(F1_MANIFEST_PAYLOAD)
+
+    assert F1_MANIFEST_PAYLOAD["economic_bar_size"] == "0"
+    assert F1_MANIFEST_PAYLOAD["economic_bar_cents_per_contract"] == "0"
+    assert digest == F1_DIGEST
 
 
 def test_a_run_clearing_the_tripwire_records_it_and_moves_the_digest() -> None:

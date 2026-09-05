@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import ROUND_CEILING, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_EVEN, Context, Decimal
 
 from bot.execution import fees
 
@@ -13,6 +13,11 @@ TICK_CENTS: Decimal = Decimal("1")
 THRESHOLD_SOURCE = "published_formula"
 FEE_MODULE = "bot.execution.fees.taker_fee"
 MAKER_RATE_SOURCE = "published_formula"
+# The bar divides by a size the quotient does not terminate over, and the manifest serialises
+# the result, so an unpinned quotient makes every recorded digest a function of the ambient
+# precision. Half-even is what the default context already rounds to, so pinning it preserves
+# the digests already recorded at every input rather than only where the roundings coincide.
+BAR_CONTEXT: Context = Context(prec=28, rounding=ROUND_HALF_EVEN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +50,8 @@ def published_maker_fee(contracts: Decimal, price: Decimal, rate: Decimal) -> De
 def economic_bar_cents_per_contract(size: Decimal, price: Decimal) -> Decimal:
     if size == 0:
         return Decimal("0")
-    return Decimal(100) * published_taker_fee(size, price) / size + TICK_CENTS
+    aggregate = BAR_CONTEXT.multiply(Decimal(100), published_taker_fee(size, price))
+    return BAR_CONTEXT.add(BAR_CONTEXT.divide(aggregate, size), TICK_CENTS)
 
 
 def quantum_is_corrected(quantum: Decimal) -> bool:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 import pytest
 
@@ -29,6 +29,8 @@ BAR_SIZE = Decimal("26")
 STATED_REGIME = ("maker_rate", "maker_rate_source")
 ZERO_RATE = Decimal("0")
 ZERO_RATE_SOURCE = "kalshi_series_metadata"
+AMBIENT_PRECISIONS = (20, 28, 50)
+PINNED_BAR = Decimal("2.769230769230769230769230769")
 
 
 def _per_contract_cents(contracts: Decimal, price: Decimal, rate: Decimal) -> Decimal:
@@ -427,3 +429,24 @@ def test_the_bar_is_symmetric_across_the_price_grid() -> None:
 def test_a_stated_zero_size_derives_a_bar_of_zero_with_no_tick() -> None:
     assert economic_bar_cents_per_contract(Decimal("0"), Decimal("0")) == Decimal("0")
     assert economic_bar_cents_per_contract(Decimal("0"), HALF) == Decimal("0")
+
+
+def _bar_at(prec: int, size: Decimal, price: Decimal) -> Decimal:
+    with localcontext(prec=prec):
+        return economic_bar_cents_per_contract(size, price)
+
+
+@pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
+def test_the_bar_reads_the_same_figure_at_every_ambient_precision(prec: int) -> None:
+    bar = _bar_at(prec, BAR_SIZE, HALF)
+
+    assert bar == PINNED_BAR
+    assert str(bar) == str(PINNED_BAR)
+
+
+@pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
+def test_the_stated_zero_size_bar_reads_the_same_at_every_ambient_precision(prec: int) -> None:
+    bar = _bar_at(prec, Decimal("0"), HALF)
+
+    assert bar == Decimal("0")
+    assert str(bar) == "0"
