@@ -1077,6 +1077,7 @@ def _settlement() -> SettlementRecord:
                     settlement_source_url=WEATHER_COMPANY_URL,
                     last_updated_ts=MOVED_AT,
                     important_info="",
+                    important_info_id="",
                 )
                 for root in SETTLEMENT_ROOTS
             },

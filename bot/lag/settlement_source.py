@@ -103,6 +103,7 @@ class SeriesSettlementSource:
     settlement_source_url: str
     last_updated_ts: datetime
     important_info: str
+    important_info_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +149,7 @@ async def fetch_series_settlement_source(
         settlement_source_url=named["url"],
         last_updated_ts=_stamp(root, series.get("last_updated_ts")),
         important_info=info.get("markdown") or "",
+        important_info_id=info.get("id") or "",
     )
 
 
@@ -169,6 +171,7 @@ def settlement_payload(observed_at: datetime, series: Sequence[SeriesSettlementS
                 "settlement_source_url": item.settlement_source_url,
                 "last_updated_ts": item.last_updated_ts.isoformat(),
                 "important_info": item.important_info,
+                "important_info_id": item.important_info_id,
             }
             for item in sorted(series, key=lambda item: item.root)
         ],
@@ -207,6 +210,7 @@ def read_settlement_sources(path: Path) -> SettlementProvenance:
                 settlement_source_url=row["settlement_source_url"],
                 last_updated_ts=_stamp(row["root"], row["last_updated_ts"]),
                 important_info=row["important_info"],
+                important_info_id=row["important_info_id"],
             )
             for row in payload["series"]
         },

@@ -149,6 +149,15 @@ def test_the_sidecar_reproduces_its_digest_on_a_second_read(tmp_path: Path) -> N
         sorted(bodies), OBSERVED_AT, path, transport=transport_for(bodies)
     )
 
+    payload = json.loads(path.read_text())
+    payload.pop("sha256")
+    without_ids = {
+        **payload,
+        "series": [row | {"important_info_id": ""} for row in payload["series"]],
+    }
+
+    assert {row["important_info_id"] for row in payload["series"]} == {BULK_INFO_ID}
+    assert freeze_digest(without_ids) != written
     assert read_settlement_sources(path).sha256 == written
     assert read_settlement_sources(path).sha256 == read_settlement_sources(path).sha256
 
@@ -319,8 +328,8 @@ def test_two_roots_whose_notice_ids_differ_carry_one_body_and_one_boundary(
 
     split = boundary_split(provenance, WINDOW)
 
-    ids = {body["series"]["product_metadata"]["important_info"]["id"] for body in bodies.values()}
-    assert ids == {BULK_INFO_ID, LAX_INFO_ID}
+    assert provenance.series[DEN].important_info_id == BULK_INFO_ID
+    assert provenance.series[LAX].important_info_id == LAX_INFO_ID
     assert distinct_notice_bodies(provenance) == 1
     assert split.boundary_date == date(2026, 8, 14)
     assert split.days_before_boundary == 12
@@ -462,6 +471,16 @@ def test_a_series_carrying_no_banner_freezes_an_empty_string(tmp_path: Path) -> 
     provenance = frozen(tmp_path / "settlement_source.json", {DEN: body})
 
     assert provenance.series[DEN].important_info == ""
+    assert provenance.series[DEN].important_info_id == ""
+
+
+def test_a_notice_carrying_no_id_freezes_an_empty_string(tmp_path: Path) -> None:
+    body = series_body(DEN)
+    body["series"]["product_metadata"]["important_info"].pop("id")
+    provenance = frozen(tmp_path / "settlement_source.json", {DEN: body})
+
+    assert provenance.series[DEN].important_info_id == ""
+    assert provenance.series[DEN].important_info == BANNER
 
 
 def test_the_boundary_is_read_from_the_notice_and_never_from_the_stamp() -> None:
@@ -615,6 +634,23 @@ def test_a_sidecar_whose_notices_name_no_effective_date_derives_no_boundary(
     assert NY in str(excinfo.value)
 
 
+@pytest.mark.parametrize("named", ("Friday, Smarch 14th", "Blursday, August 14th"))
+def test_a_notice_naming_no_real_month_or_weekday_contributes_nothing(
+    tmp_path: Path, named: str
+) -> None:
+    unreadable = series_body(DEN, markdown=banner_dated(named))
+    beside = frozen(tmp_path / "beside.json", {DEN: unreadable, NY: series_body(NY)})
+    alone = frozen(tmp_path / "alone.json", {DEN: unreadable})
+
+    split = boundary_split(beside, WINDOW)
+
+    assert split.boundary_date == date(2026, 8, 14)
+    assert split.days_before_boundary == 12
+    assert split.days_on_or_after_boundary == 2
+    with pytest.raises(SettlementNoticeUnreadable, match=DEN):
+        boundary_split(alone, WINDOW)
+
+
 def test_a_root_carrying_no_notice_contributes_nothing_to_the_boundary(tmp_path: Path) -> None:
     bodies = {DEN: series_body(DEN, markdown=""), NY: series_body(NY)}
     provenance = frozen(tmp_path / "settlement_source.json", bodies)
@@ -664,6 +700,7 @@ def test_a_stored_stamp_carrying_an_offset_zone_is_read_back_in_utc(tmp_path: Pa
         settlement_source_url=WEATHER_COMPANY_URL,
         last_updated_ts=datetime(2026, 8, 13, 19, 0, tzinfo=timezone(timedelta(hours=-7))),
         important_info=BANNER,
+        important_info_id=BULK_INFO_ID,
     )
     payload = settlement_payload(OBSERVED_AT, [row])
     path = tmp_path / "settlement_source.json"
