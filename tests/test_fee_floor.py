@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import inspect
-from decimal import Decimal, localcontext
+from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 
 import pytest
 
 from bot.execution import fees
 from bot.execution.fees import FEE_QUANTUM, taker_fee
 from bot.lag.fee_floor import (
+    BAR_CONTEXT,
     CENT,
     MAKER_RATE_SOURCE,
     PUBLISHED_MAKER_RATE,
@@ -31,6 +32,11 @@ ZERO_RATE = Decimal("0")
 ZERO_RATE_SOURCE = "kalshi_series_metadata"
 AMBIENT_PRECISIONS = (20, 28, 50)
 PINNED_BAR = Decimal("2.769230769230769230769230769")
+# Half-even and round-down agree on the bar at size 26 / price 0.50, so that case says nothing
+# about which rounding is pinned. This pair is one of the ~8k inputs where the two part.
+SPLIT_SIZE = Decimal("3")
+SPLIT_PRICE = Decimal("0.06")
+SPLIT_BAR = Decimal("1.666666666666666666666666667")
 
 
 def _per_contract_cents(contracts: Decimal, price: Decimal, rate: Decimal) -> Decimal:
@@ -450,3 +456,15 @@ def test_the_stated_zero_size_bar_reads_the_same_at_every_ambient_precision(prec
 
     assert bar == Decimal("0")
     assert str(bar) == "0"
+
+
+@pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
+def test_the_bar_rounds_half_even_where_the_roundings_part(prec: int) -> None:
+    bar = _bar_at(prec, SPLIT_SIZE, SPLIT_PRICE)
+
+    assert bar == SPLIT_BAR
+    assert str(bar) == str(SPLIT_BAR)
+
+
+def test_the_bar_context_carries_the_ambient_default_rounding() -> None:
+    assert BAR_CONTEXT.rounding == ROUND_HALF_EVEN
