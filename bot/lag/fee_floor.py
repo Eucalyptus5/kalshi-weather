@@ -14,7 +14,7 @@ THRESHOLD_SOURCE = "published_formula"
 FEE_MODULE = "bot.execution.fees.taker_fee"
 MAKER_RATE_SOURCE = "published_formula"
 # The bar divides by a size the quotient does not terminate over, and the manifest serialises
-# the result, so an unpinned quotient makes every recorded digest a function of the ambient
+# the result, so an unpinned quotient makes any digest that reaches it a function of the ambient
 # precision. Half-even is what the default context already rounds to, so pinning it preserves
 # the digests already recorded at every input rather than only where the roundings coincide.
 BAR_CONTEXT: Context = Context(prec=28, rounding=ROUND_HALF_EVEN)

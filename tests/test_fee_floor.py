@@ -33,7 +33,7 @@ ZERO_RATE_SOURCE = "kalshi_series_metadata"
 AMBIENT_PRECISIONS = (20, 28, 50)
 PINNED_BAR = Decimal("2.769230769230769230769230769")
 # Half-even and round-down agree on the bar at size 26 / price 0.50, so that case says nothing
-# about which rounding is pinned. This pair is one of the ~8k inputs where the two part.
+# about which rounding is pinned. This pair is one of the inputs where the two part.
 SPLIT_SIZE = Decimal("3")
 SPLIT_PRICE = Decimal("0.06")
 SPLIT_BAR = Decimal("1.666666666666666666666666667")
@@ -450,12 +450,10 @@ def test_the_bar_reads_the_same_figure_at_every_ambient_precision(prec: int) -> 
     assert str(bar) == str(PINNED_BAR)
 
 
-@pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
-def test_the_stated_zero_size_bar_reads_the_same_at_every_ambient_precision(prec: int) -> None:
-    bar = _bar_at(prec, Decimal("0"), HALF)
-
-    assert bar == Decimal("0")
-    assert str(bar) == "0"
+# manifest_payload serialises the bar with str(), so a Decimal("0.00") would compare equal to
+# Decimal("0") here and still move the digest.
+def test_the_stated_zero_size_bar_serialises_as_a_bare_zero() -> None:
+    assert str(economic_bar_cents_per_contract(Decimal("0"), HALF)) == "0"
 
 
 @pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
@@ -466,5 +464,9 @@ def test_the_bar_rounds_half_even_where_the_roundings_part(prec: int) -> None:
     assert str(bar) == str(SPLIT_BAR)
 
 
+# The value tests above pin the rounding only to the half-* family: swapping the context to
+# ROUND_HALF_UP or ROUND_HALF_DOWN leaves every other test in the suite green, since separating
+# those from half-even needs an exact tie at the 28th significant digit that no input here reaches.
+# This assertion is the only thing holding half-even.
 def test_the_bar_context_carries_the_ambient_default_rounding() -> None:
     assert BAR_CONTEXT.rounding == ROUND_HALF_EVEN

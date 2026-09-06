@@ -132,8 +132,10 @@ FIELDS = {
 }
 
 # The f1-20260820 run computed this digest on the recorder host before the bar context was pinned.
-# Held as a literal so a later precision change has to move this test rather than silently
-# invalidate a finished run's manifest.
+# Held as a literal so a change to the canonical serialisation freeze_digest performs has to move
+# this test rather than silently invalidate a finished run's stored digest. Precision was never in
+# play here: that run charged its own fee, so it recorded economic_bar_size "0", took the early
+# return and never divided.
 F1_DIGEST = "26221572c18f4fd9687ebae8cc3a728eea63b02818a8cc4d0fbf2a2b84b27515"
 F1_MANIFEST_PAYLOAD = {
     "accrual_end": "2026-08-16T08:00:00+00:00",
@@ -1112,14 +1114,8 @@ def test_the_exemption_digest_does_not_move_with_the_ambient_precision(
     assert digest == EXEMPT_DIGEST
 
 
-@pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
-def test_the_completed_run_keeps_the_digest_it_recorded(prec: int) -> None:
-    with localcontext(prec=prec):
-        digest = freeze_digest(F1_MANIFEST_PAYLOAD)
-
-    assert F1_MANIFEST_PAYLOAD["economic_bar_size"] == "0"
-    assert F1_MANIFEST_PAYLOAD["economic_bar_cents_per_contract"] == "0"
-    assert digest == F1_DIGEST
+def test_the_completed_run_keeps_the_digest_it_recorded() -> None:
+    assert freeze_digest(F1_MANIFEST_PAYLOAD) == F1_DIGEST
 
 
 def test_a_run_clearing_the_tripwire_records_it_and_moves_the_digest() -> None:
