@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 
 import pyarrow as pa
@@ -8,6 +8,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from bot.lag.fee_floor import (
+    BAR_CONTEXT,
     MAKER_RATE_SOURCE,
     PUBLISHED_MAKER_RATE,
     TICK_CENTS,
@@ -55,6 +56,9 @@ from tests.test_tape_studies import seeded_repo, write_preregistration
 
 BAR_PRICE = Decimal("0.50")
 FEE_PER_CONTRACT = Decimal("1.769230769230769230769230769")
+PAID_PROFIT_CENTS = Decimal("47.23076923076923076923076923")
+UNPAID_PROFIT_CENTS = Decimal("-52.76923076923076923076923077")
+AMBIENT_PRECISIONS = (20, 28, 50)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_ID = "2026-08-19-settlement"
 ACCRUAL_START = datetime(2026, 8, 2, 5, tzinfo=timezone.utc)
@@ -128,7 +132,7 @@ def test_the_entry_leg_costs_what_the_published_formula_charges() -> None:
 
 
 def test_the_fee_and_the_tick_are_the_one_leg_bar_itself() -> None:
-    assert fee_cents_per_contract(Decimal(26), BAR_PRICE) + TICK_CENTS == (
+    assert BAR_CONTEXT.add(fee_cents_per_contract(Decimal(26), BAR_PRICE), TICK_CENTS) == (
         economic_bar_cents_per_contract(Decimal(26), BAR_PRICE)
     )
     assert economic_bar_cents_per_contract(Decimal(26), BAR_PRICE) == Decimal(
@@ -434,7 +438,7 @@ def test_the_settlement_sides_profit_is_signed_by_whether_it_paid() -> None:
     assert unpaid.net_profit_cents == Decimal("-52.76923076923076923076923077")
     assert paid.entry_fee_cents == FEE_PER_CONTRACT
     assert paid.entry_tick_cents == TICK_CENTS
-    assert paid.entry_fee_cents + paid.entry_tick_cents == (
+    assert BAR_CONTEXT.add(paid.entry_fee_cents, paid.entry_tick_cents) == (
         economic_bar_cents_per_contract(Decimal(26), BAR_PRICE)
     )
 
@@ -582,3 +586,33 @@ def test_the_counts_keep_a_book_that_never_quoted_apart_from_a_one_sided_one() -
     assert counts.one_sided_n == 1
     assert counts.no_row_n == 1
     assert counts.censored_n == 2
+
+
+def _fee_at(prec: int) -> Decimal:
+    with localcontext(prec=prec):
+        return fee_cents_per_contract(Decimal(26), BAR_PRICE)
+
+
+def _profit_at(prec: int, result: str) -> Decimal | None:
+    table = book([book_row(1, INSTANT, yes=HALF_BOOK, no=HALF_BOOK)])
+    with localcontext(prec=prec):
+        return price_of(straddle_entry(), table, closes(result)).net_profit_cents
+
+
+@pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
+def test_the_entry_fee_reads_the_same_figure_at_every_ambient_precision(prec: int) -> None:
+    fee = _fee_at(prec)
+
+    assert fee == FEE_PER_CONTRACT
+    assert str(fee) == str(FEE_PER_CONTRACT)
+
+
+@pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
+def test_the_profit_reads_the_same_figure_at_every_ambient_precision(prec: int) -> None:
+    paid = _profit_at(prec, "yes")
+    unpaid = _profit_at(prec, "no")
+
+    assert paid == PAID_PROFIT_CENTS
+    assert str(paid) == str(PAID_PROFIT_CENTS)
+    assert unpaid == UNPAID_PROFIT_CENTS
+    assert str(unpaid) == str(UNPAID_PROFIT_CENTS)

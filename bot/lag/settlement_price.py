@@ -7,7 +7,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from bot.lag.fee_floor import TICK_CENTS, published_taker_fee
+from bot.lag.fee_floor import BAR_CONTEXT, TICK_CENTS, published_taker_fee
 from bot.lag.ladder_consistency import PRICE_TICKS
 from bot.lag.mid import mid2, ticks, two_sided
 from bot.lag.placement_grid import CloseSidecar
@@ -118,7 +118,8 @@ def ladder_census(
 # The published formula prices a whole order in dollars while the statistic is stated in cents per
 # contract, so the size the order was priced at divides back out here.
 def fee_cents_per_contract(size: Decimal, price: Decimal) -> Decimal:
-    return _CENTS * published_taker_fee(size, price) / size
+    aggregate = BAR_CONTEXT.multiply(_CENTS, published_taker_fee(size, price))
+    return BAR_CONTEXT.divide(aggregate, size)
 
 
 # The stored ladder is bounded at six levels a side, so a size those levels cannot fill is a
@@ -163,11 +164,12 @@ def price_of(entry: StraddleEntry, table: pa.Table, sidecar: CloseSidecar) -> Pr
     settled = (
         Decimal(1) if sidecar.markets[entry.ticker].result == entry.settlement_side else Decimal(0)
     )
+    gross = BAR_CONTEXT.multiply(_CENTS, BAR_CONTEXT.subtract(settled, entry_price))
     return PricedStraddle(
         entry_price=entry_price,
         entry_fee_cents=fee,
         entry_tick_cents=TICK_CENTS,
-        net_profit_cents=_CENTS * (settled - entry_price) - fee - TICK_CENTS,
+        net_profit_cents=BAR_CONTEXT.subtract(BAR_CONTEXT.subtract(gross, fee), TICK_CENTS),
         size=SIZE,
         censored=censored,
         priced=True,
