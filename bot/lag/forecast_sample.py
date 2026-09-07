@@ -12,6 +12,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from bot.lag.fee_floor import BAR_CONTEXT
 from bot.main import STATIONS
 from bot.markets.parser import parse_ticker, resolve_event_kinds
 
@@ -44,15 +45,16 @@ PRE_WEEKLY_ERA = "0010"
 SIDECAR_SUFFIX = ".sha256.json"
 
 _MICROS_PER_MINUTE = Decimal(60_000_000)
+_MARKET_COLUMNS = ["ticker", "series_ticker", "result", "close_time"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SamplePlan:
-    candidate_days: list[date]
-    sampled_days: list[date]
-    unread_days: list[date]
-    discovery_days: list[date]
-    holdout_days: list[date]
+    candidate_days: tuple[date, ...]
+    sampled_days: tuple[date, ...]
+    unread_days: tuple[date, ...]
+    discovery_days: tuple[date, ...]
+    holdout_days: tuple[date, ...]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -87,18 +89,18 @@ class TickTape:
 
 def read_sample_plan(path: Path) -> SamplePlan:
     payload = json.loads(path.read_text())
-    candidate = [date.fromisoformat(day) for day in payload["candidate_days"]]
-    sampled = [date.fromisoformat(day) for day in payload["sampled_days"]]
+    candidate = tuple(date.fromisoformat(day) for day in payload["candidate_days"])
+    sampled = tuple(date.fromisoformat(day) for day in payload["sampled_days"])
     if candidate[::4] != sampled:
         raise ValueError(f"{path} sampled_days is not candidate_days[::4]")
     read = set(sampled)
-    unread = [day for day in candidate if day not in read]
+    unread = tuple(day for day in candidate if day not in read)
     return SamplePlan(
         candidate_days=candidate,
         sampled_days=sampled,
         unread_days=unread,
-        discovery_days=[day for day in unread if day < SPLIT_BOUNDARY],
-        holdout_days=[day for day in unread if day >= SPLIT_BOUNDARY],
+        discovery_days=tuple(day for day in unread if day < SPLIT_BOUNDARY),
+        holdout_days=tuple(day for day in unread if day >= SPLIT_BOUNDARY),
     )
 
 
@@ -109,11 +111,11 @@ def era_caps(era_report_path: Path) -> dict[str, timedelta | None]:
         if "cap_minutes" not in row:
             continue
         minutes = row["cap_minutes"]
-        caps[era] = (
-            None
-            if minutes is None
-            else timedelta(microseconds=int(Decimal(minutes) * _MICROS_PER_MINUTE))
-        )
+        if minutes is None:
+            caps[era] = None
+            continue
+        micros = BAR_CONTEXT.multiply(Decimal(minutes), _MICROS_PER_MINUTE)
+        caps[era] = timedelta(microseconds=int(micros))
     return caps
 
 
@@ -165,7 +167,7 @@ def build_sample(
     lead = timedelta(hours=lead_hours)
 
     ladders: dict[tuple[str, date], list[dict]] = {}
-    for row in pq.read_table(markets_path).to_pylist():
+    for row in pq.read_table(markets_path, columns=_MARKET_COLUMNS).to_pylist():
         if row["series_ticker"] not in F4_SERIES:
             continue
         parsed = parse_ticker(row["ticker"])
@@ -208,7 +210,7 @@ def build_sample(
                     close_time=row["close_time"],
                     as_of=as_of,
                     entry_price=tape.yes_price[int(positions[last])].as_py(),
-                    staleness_minutes=Decimal(micros) / _MICROS_PER_MINUTE,
+                    staleness_minutes=BAR_CONTEXT.divide(Decimal(micros), _MICROS_PER_MINUTE),
                     era=era,
                     trailing_prints=last + 1 - first,
                     trailing_contracts=Decimal(int(tape.count[positions[first : last + 1]].sum())),

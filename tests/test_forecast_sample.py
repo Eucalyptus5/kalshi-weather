@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 
 import pyarrow as pa
@@ -31,10 +32,23 @@ from bot.lag.forecast_sample import (
 )
 from bot.main import STATIONS
 from bot.markets.parser import parse_ticker, resolve_event_kinds
-from scripts.freeze_f4_sample import ERA_REPORT, INGEST_REPORT, MARKETS, SAMPLE_PLAN, TICKS
+from scripts.freeze_f4_sample import (
+    DEFAULT_OUT,
+    ERA_REPORT,
+    FREEZE_NAME,
+    INGEST_REPORT,
+    MARKETS,
+    SAMPLE_PLAN,
+    TICKS,
+)
 
 
 UTC = timezone.utc
+AMBIENT_PRECISIONS = (20, 28, 50)
+
+FROZEN_SAMPLE = DEFAULT_OUT / FREEZE_NAME
+FROZEN_LEGS = 20782
+FROZEN_SHA256 = "c5bfac9a4f9267ce1887c9f25119fadff2f12815521532163030ce0bcebb0e2b"
 
 CAP_MINUTES = {
     "0010": Decimal("575.0"),
@@ -58,6 +72,9 @@ TOP = "KXHIGHMIA-24OCT24-T83"
 RUNGS = (BOTTOM, "KXHIGHMIA-24OCT24-B81.5", "KXHIGHMIA-24OCT24-B82.5", TOP)
 
 POISON_STRIKE = 999
+OFF_SERIES = "KXHIGHTATL-24OCT24-T80"
+STALENESS_MICROS = 40601
+PINNED_STALENESS = "0.0006766833333333333333333333333"
 
 _MARKET_SCHEMA = pa.schema(
     [
@@ -157,11 +174,11 @@ def tick_row(ticker: str, created: datetime, price: str, count: int) -> dict[str
 
 def one_day_plan(day: date) -> SamplePlan:
     return SamplePlan(
-        candidate_days=[day],
-        sampled_days=[],
-        unread_days=[day],
-        discovery_days=[day],
-        holdout_days=[],
+        candidate_days=(day,),
+        sampled_days=(),
+        unread_days=(day,),
+        discovery_days=(day,),
+        holdout_days=(),
     )
 
 
@@ -213,6 +230,40 @@ def test_sample_plan_holes(plan: SamplePlan) -> None:
     assert date(2025, 11, 25) in unread
 
 
+def test_unread_days_hold_the_file_order(plan: SamplePlan) -> None:
+    positions = [plan.candidate_days.index(day) for day in plan.unread_days]
+
+    assert positions == sorted(positions)
+    assert len(set(positions)) == len(plan.unread_days)
+    assert len(plan.unread_days) + len(plan.sampled_days) == len(plan.candidate_days)
+
+
+def test_unread_days_follow_the_file_and_not_the_calendar(tmp_path: Path) -> None:
+    candidate = [
+        "2025-03-02",
+        "2025-03-01",
+        "2025-03-05",
+        "2025-03-04",
+        "2025-03-03",
+        "2025-03-02",
+        "2025-03-06",
+        "2025-03-08",
+    ]
+    path = tmp_path / "sample_plan.json"
+    path.write_text(json.dumps({"candidate_days": candidate, "sampled_days": candidate[::4]}))
+    plan = read_sample_plan(path)
+
+    assert plan.unread_days == (
+        date(2025, 3, 1),
+        date(2025, 3, 5),
+        date(2025, 3, 4),
+        date(2025, 3, 6),
+        date(2025, 3, 8),
+    )
+    assert plan.discovery_days == plan.unread_days
+    assert plan.holdout_days == ()
+
+
 def test_era_caps_are_read_never_derived(caps: Mapping[str, timedelta | None]) -> None:
     minutes = {
         era: None
@@ -227,6 +278,12 @@ def test_a_null_cap_is_unbounded(tmp_path: Path) -> None:
     path = tmp_path / "era_report.json"
     path.write_text(json.dumps({"eras": {"0009": {"cap_minutes": None}, "0010": {"n_markets": 0}}}))
     assert era_caps(path) == {"0009": None}
+
+
+def test_a_zero_market_era_carries_no_cap(tmp_path: Path) -> None:
+    path = tmp_path / "era_report.json"
+    path.write_text(json.dumps({"eras": {"0009": {"n_markets": 0}, "0010": {"cap_minutes": 1.5}}}))
+    assert era_caps(path) == {"0010": timedelta(minutes=1, seconds=30)}
 
 
 def test_era_of_reproduces_the_weekly_order(eras: Sequence[tuple[str, datetime]]) -> None:
@@ -354,19 +411,24 @@ def test_tagging_runs_over_the_full_ladder(
 def test_trailing_depth_window(
     tmp_path: Path, caps: Mapping[str, timedelta | None], eras: Sequence[tuple[str, datetime]]
 ) -> None:
+    edge = LADDER_AS_OF - timedelta(hours=6)
     ticks = [
-        tick_row(BOTTOM, LADDER_AS_OF - DEPTH_WINDOW, "0.10", 100),
-        tick_row(BOTTOM, LADDER_AS_OF - DEPTH_WINDOW + timedelta(microseconds=1), "0.20", 7),
+        tick_row(BOTTOM, edge, "0.10", 100),
+        tick_row(BOTTOM, edge + timedelta(microseconds=1), "0.20", 7),
         tick_row(BOTTOM, LADDER_AS_OF - timedelta(minutes=30), "0.30", 11),
         tick_row(BOTTOM, LADDER_AS_OF, "0.44", 5),
         tick_row(BOTTOM, LADDER_AS_OF + timedelta(microseconds=1), "0.99", 900),
     ]
     built = {leg.ticker: leg for leg in ladder_sample(tmp_path, caps, eras, ticks)}
     leg = built[BOTTOM]
+    assert DEPTH_WINDOW == timedelta(hours=6)
     assert leg.entry_price == Decimal("0.44")
     assert leg.staleness_minutes == Decimal(0)
     assert leg.trailing_prints == 3
     assert leg.trailing_contracts == Decimal(23)
+    assert isinstance(leg.trailing_contracts, Decimal)
+    assert isinstance(leg.entry_price, Decimal)
+    assert isinstance(leg.staleness_minutes, Decimal)
 
 
 def test_tagging_the_survivors_disagrees_on_233_ladders(
@@ -412,6 +474,74 @@ def test_freeze_refuses_a_stale_sidecar(
 ) -> None:
     path = tmp_path / "sample.jsonl"
     write_sample_freeze(legs[24][:3], path)
-    path.write_text(path.read_text().replace('"entry_price": "', '"entry_price": "0.', 1))
+    first = json.loads(path.read_text().splitlines()[0])
+    prints = first["trailing_prints"]
+    path.write_text(
+        path.read_text().replace(
+            f'"trailing_prints": {prints}', f'"trailing_prints": {prints + 1}', 1
+        )
+    )
+
+    assert json.loads(path.read_text().splitlines()[0])["trailing_prints"] == prints + 1
     with pytest.raises(ValueError, match="does not match the sha256 it carries"):
         read_sample_freeze(path)
+
+
+def test_the_cap_boundary_keeps_a_tick_at_the_cap(
+    tmp_path: Path, caps: Mapping[str, timedelta | None], eras: Sequence[tuple[str, datetime]]
+) -> None:
+    cap = caps[PRE_WEEKLY_ERA]
+    at_cap = ladder_sample(tmp_path, caps, eras, [tick_row(BOTTOM, LADDER_AS_OF - cap, "0.40", 3)])
+    past_cap = ladder_sample(
+        tmp_path,
+        caps,
+        eras,
+        [tick_row(BOTTOM, LADDER_AS_OF - cap - timedelta(microseconds=1), "0.40", 3)],
+    )
+
+    assert [leg.ticker for leg in at_cap] == [BOTTOM]
+    assert at_cap[0].staleness_minutes == Decimal(575)
+    assert past_cap == []
+
+
+def test_the_eligibility_screen_drops_the_unscored_rungs(
+    tmp_path: Path, caps: Mapping[str, timedelta | None], eras: Sequence[tuple[str, datetime]]
+) -> None:
+    rows = [
+        market_row(BOTTOM, LADDER_CLOSE),
+        {**market_row("KXHIGHMIA-24OCT24-B81.5", LADDER_CLOSE), "result": ""},
+        {**market_row("KXHIGHMIA-24OCT24-B82.5", LADDER_CLOSE), "close_time": None},
+        market_row(OFF_SERIES, LADDER_CLOSE),
+    ]
+    markets = write_markets(tmp_path / "markets.parquet", rows)
+    ticks = [
+        tick_row(str(row["ticker"]), LADDER_AS_OF - timedelta(minutes=5), "0.40", 3) for row in rows
+    ]
+    tape = read_tick_tape(write_ticks(tmp_path / "ticks.parquet", ticks))
+    built = build_sample(markets, tape, one_day_plan(LADDER_DAY), caps, eras, 24)
+
+    assert [leg.ticker for leg in built] == [BOTTOM]
+
+
+@pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
+def test_the_staleness_reads_the_same_figure_at_every_ambient_precision(
+    prec: int,
+    tmp_path: Path,
+    caps: Mapping[str, timedelta | None],
+    eras: Sequence[tuple[str, datetime]],
+) -> None:
+    ticks = [tick_row(BOTTOM, LADDER_AS_OF - timedelta(microseconds=STALENESS_MICROS), "0.40", 3)]
+    with localcontext(prec=prec):
+        built = ladder_sample(tmp_path, caps, eras, ticks)
+
+    assert str(built[0].staleness_minutes) == PINNED_STALENESS
+
+
+def test_the_published_freeze_matches_its_recorded_digest(
+    legs: Mapping[int, list[SampleLeg]],
+) -> None:
+    frozen = read_sample_freeze(FROZEN_SAMPLE)
+
+    assert hashlib.sha256(FROZEN_SAMPLE.read_bytes()).hexdigest() == FROZEN_SHA256
+    assert len(frozen) == FROZEN_LEGS
+    assert frozen == legs[24] + legs[36]
