@@ -35,6 +35,7 @@ from bot.lag.settlement_run import (
     DISCOVERY_N_MIN,
     EXEMPTIONS,
     NULL_VALUE,
+    PRE_BOUNDARY_REPORTED_ONLY,
     RESULTS_NAME,
     STRICT,
     UNDERPOWERED,
@@ -112,6 +113,9 @@ SCOPE_START = datetime(2026, 8, 2, 7, tzinfo=UTC)
 SCOPE_END = datetime(2026, 8, 16, 7, tzinfo=UTC)
 BOUNDARY_DATE = date(2026, 8, 14)
 ON_OR_AFTER = 2
+PRE_BOUNDARY_DAYS = HOLDOUT_DAYS[:2]
+LONG_WINDOW = tuple(FIRST_DAY + timedelta(days=offset) for offset in range(22))
+LATE_HOLDOUT_WINDOW = (*WINDOW[:10], *WINDOW[12:])
 
 ACIS_F = Decimal("93")
 SETTLING_STRIKE = "B92.5"
@@ -894,6 +898,79 @@ def test_the_boundary_split_counts_the_days_read_under_the_moved_source(
     assert run.boundary.days_on_or_after_boundary == ON_OR_AFTER
     assert run.boundary.days_before_boundary == 12
     assert run.boundary.boundary_source == BOUNDARY_SOURCE
+
+
+def test_the_pre_boundary_holdout_stops_at_the_day_the_source_moved(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    run = run_at(tmp_path, paths)
+    payload = result_payload(run)
+    restricted = payload["holdout_pre_boundary"]
+    covered = [item.cluster for item in run.holdout_pre_boundary.clusters]
+    settled_on_the_boundary = f"{SERIES} {BOUNDARY_DATE.isoformat()}"
+
+    assert payload["holdout"]["city_event_days"] == 4
+    assert payload["holdout"]["straddles"] == 4
+    assert restricted["city_event_days"] == 2
+    assert restricted["straddles"] == 2
+    assert restricted["split"] == HOLDOUT
+    assert covered == [f"{SERIES} {day.isoformat()}" for day in PRE_BOUNDARY_DAYS]
+    assert BOUNDARY_DATE in HOLDOUT_DAYS
+    assert settled_on_the_boundary in [item.cluster for item in run.holdout.clusters]
+    assert settled_on_the_boundary not in covered
+
+
+def test_the_replication_reads_the_whole_holdout_and_not_the_restricted_one(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    paths["run_scope"] = scope_dir(tmp_path, days=LONG_WINDOW, name="long")
+    paths["artifacts"] = artifacts_dir(tmp_path, days=LONG_WINDOW, name="long_artifacts")
+    paths["closes"] = closes_dir(tmp_path, days=LONG_WINDOW, name="long_closes")
+
+    payload = result_payload(run_at(tmp_path, paths, days=LONG_WINDOW))
+    replication = payload["replication"]
+    restricted = payload["holdout_pre_boundary"]
+
+    assert replication["holdout_n"] == 12
+    assert replication["holdout_estimate"] == "48.48076923076923076923076923"
+    assert replication["holdout_estimate"] == payload["holdout"]["net_profit_cents_per_contract"]
+    assert restricted["city_event_days"] == 2
+    assert restricted["net_profit_cents_per_contract"] == "50.98076923076923076923076923"
+    assert restricted["net_profit_cents_per_contract"] != replication["holdout_estimate"]
+
+
+def test_the_restricted_holdout_publishes_that_it_gates_nothing(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    payload = result_payload(run_at(tmp_path, paths))
+    restricted = payload["holdout_pre_boundary"]
+
+    assert restricted["gates_nothing"] is True
+    assert restricted["reported_only"] == PRE_BOUNDARY_REPORTED_ONLY
+    assert "gates nothing" in restricted["reported_only"]
+    assert "no multiplicity correction" in restricted["reported_only"]
+    assert restricted["boundary_date"] == BOUNDARY_DATE.isoformat()
+    assert restricted["boundary_date"] == payload["settlement_source"]["boundary_date"]
+
+
+def test_a_holdout_that_begins_on_the_boundary_leaves_the_restricted_figure_empty(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    paths["run_scope"] = scope_dir(tmp_path, days=LATE_HOLDOUT_WINDOW, name="late")
+    paths["artifacts"] = artifacts_dir(tmp_path, days=LATE_HOLDOUT_WINDOW, name="late_artifacts")
+
+    payload = result_payload(run_at(tmp_path, paths, days=LATE_HOLDOUT_WINDOW))
+    restricted = payload["holdout_pre_boundary"]
+
+    assert payload["holdout"]["city_event_days"] == 2
+    assert restricted["city_event_days"] == 0
+    assert restricted["straddles"] == 0
+    assert restricted["priced"] == 0
+    assert restricted["net_profit_cents_per_contract"] is None
+    assert restricted["ci_low"] is None
+    assert restricted["p_value"] is None
+    assert restricted["degenerate"] is None
+    assert restricted["gates_nothing"] is True
 
 
 def test_the_manifest_records_the_settlement_source_it_read_under(

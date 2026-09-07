@@ -12,6 +12,7 @@ from bot.lag.settlement_run import (
     ALPHA_F2,
     BOOTSTRAP_SEED,
     DISCOVERY_N_MIN,
+    PRE_BOUNDARY_REPORTED_ONLY,
     RESULTS_NAME,
     UNDERPOWERED,
 )
@@ -54,6 +55,7 @@ REQUIRED = (
     "--rtt-samples",
     "--floor-source",
 )
+PRE_BOUNDARY_SECTION = "== HOLDOUT BEFORE THE BOUNDARY (reported only, gates nothing)"
 SECTIONS = (
     "== STRADDLES",
     "== ENTRIES",
@@ -61,6 +63,7 @@ SECTIONS = (
     "== SETTLEMENT SOURCE",
     "== DISCOVERY",
     "== HOLDOUT",
+    PRE_BOUNDARY_SECTION,
     "== GATE",
     "== REPLICATION",
     "== SCREEN",
@@ -225,6 +228,24 @@ def test_a_report_missing_one_of_those_figures_cannot_be_written(
 
     with pytest.raises(KeyError, match=key):
         format_report(results)
+
+
+def test_the_report_prints_the_pre_boundary_holdout_as_deciding_nothing(
+    paths: dict[str, Path], run_root: Path
+) -> None:
+    assert run(args_for(paths, run_root)) == 0
+
+    results = results_of(run_root)
+    restricted = results["holdout_pre_boundary"]
+    lines = format_report(results).splitlines()
+    at = lines.index(PRE_BOUNDARY_SECTION)
+
+    assert "reported only" in PRE_BOUNDARY_SECTION
+    assert "gates nothing" in PRE_BOUNDARY_SECTION
+    assert lines[at - 4] == "== HOLDOUT"
+    assert lines[at + 1] == f"  {PRE_BOUNDARY_REPORTED_ONLY}"
+    assert f"city_event_days={restricted['city_event_days']}" in lines[at + 2]
+    assert f"straddles={restricted['straddles']}" in lines[at + 3]
 
 
 def test_the_report_states_the_unidentifiable_instant_once(

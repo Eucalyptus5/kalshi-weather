@@ -122,6 +122,7 @@ def format_report(payload: dict) -> str:
     deltas = payload["deltas"]
     source = payload["settlement_source"]
     screen = payload["screen"]
+    pre_boundary = payload["holdout_pre_boundary"]
     lines = [
         f"== F2 SETTLEMENT LAG  run_id={payload['run_id']}  verdict={payload['verdict']}",
         f"manifest={payload['manifest']}  sha256={payload['manifest_sha256']}",
@@ -159,6 +160,10 @@ def format_report(payload: dict) -> str:
         "",
         "== HOLDOUT",
         *_format_readout(payload["holdout"]),
+        "",
+        "== HOLDOUT BEFORE THE BOUNDARY (reported only, gates nothing)",
+        f"  {pre_boundary['reported_only']}",
+        *_format_readout(pre_boundary),
         "",
         "== GATE",
         *_format_gate(payload["gate"]),

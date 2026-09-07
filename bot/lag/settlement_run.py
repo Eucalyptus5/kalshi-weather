@@ -90,6 +90,11 @@ UNDERPOWERED = "UNDERPOWERED"
 ZERO_ESTIMATE = "a discovery estimate of exactly zero fixes no direction to replicate"
 NO_ESTIMATE = "a split with no priced straddle carries no estimate to replicate"
 NO_GATE_ESTIMATE = "a split with no priced straddle carries no estimate to test against the bar"
+PRE_BOUNDARY_REPORTED_ONLY = (
+    "the holdout restricted to its days before the settlement source moved is reported only: it "
+    "gates nothing, carries no multiplicity correction, and a figure here is not evidence of an "
+    "edge"
+)
 
 EXEMPTIONS = (
     Exemption(
@@ -157,6 +162,7 @@ class SettlementRun:
     row_counts: Mapping[str, int]
     discovery: Readout
     holdout: Readout
+    holdout_pre_boundary: Readout
     decision: Decision
 
 
@@ -427,6 +433,16 @@ def execute(
     priced = price_entries(scope, artifacts, closes, sweep)
     discovery = readout(scope, priced, split=DISCOVERY, seed=seed)
     holdout = readout(scope, priced, split=HOLDOUT, seed=seed)
+    # Reported beside the holdout and never gated on: decide reads the full holdout below.
+    before_boundary = replace(
+        priced,
+        rows=tuple(
+            (straddle, entry, record)
+            for straddle, entry, record in priced.rows
+            if straddle.event_date < boundary.boundary_date
+        ),
+    )
+    holdout_pre_boundary = readout(scope, before_boundary, split=HOLDOUT, seed=seed)
     run = SettlementRun(
         run_id=run_id,
         manifest=run_root / run_id / MANIFEST_NAME,
@@ -444,6 +460,7 @@ def execute(
         row_counts=inputs.row_counts,
         discovery=discovery,
         holdout=holdout,
+        holdout_pre_boundary=holdout_pre_boundary,
         decision=decide(discovery, holdout),
     )
     bootstrap = discovery.bootstrap
@@ -501,6 +518,12 @@ def result_payload(run: SettlementRun) -> dict:
         },
         "discovery": _readout_payload(run.discovery),
         "holdout": _readout_payload(run.holdout),
+        "holdout_pre_boundary": _readout_payload(run.holdout_pre_boundary)
+        | {
+            "gates_nothing": True,
+            "reported_only": PRE_BOUNDARY_REPORTED_ONLY,
+            "boundary_date": run.boundary.boundary_date.isoformat(),
+        },
         "gate": _gate_payload(run.decision.gate),
         "replication": _replication_payload(run.decision.replication),
         "replication_skipped": run.decision.skipped,
