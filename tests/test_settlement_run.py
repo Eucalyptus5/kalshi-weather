@@ -113,9 +113,10 @@ SCOPE_START = datetime(2026, 8, 2, 7, tzinfo=UTC)
 SCOPE_END = datetime(2026, 8, 16, 7, tzinfo=UTC)
 BOUNDARY_DATE = date(2026, 8, 14)
 ON_OR_AFTER = 2
-PRE_BOUNDARY_DAYS = HOLDOUT_DAYS[:2]
+PRE_BOUNDARY_DAYS = tuple(day for day in HOLDOUT_DAYS if day < BOUNDARY_DATE)
 LONG_WINDOW = tuple(FIRST_DAY + timedelta(days=offset) for offset in range(22))
 LATE_HOLDOUT_WINDOW = (*WINDOW[:10], *WINDOW[12:])
+DISCOVERY_ACROSS_BOUNDARY = (*DISCOVERY_DAYS, *WINDOW[12:])
 
 ACIS_F = Decimal("93")
 SETTLING_STRIKE = "B92.5"
@@ -334,13 +335,15 @@ def event_day_row(series: str, event_date: date, day_index: int, split: str) -> 
     }
 
 
-def event_day_table(series: Sequence[str], days: Sequence[date]) -> pa.Table:
+def event_day_table(
+    series: Sequence[str], days: Sequence[date], discovery: Sequence[date]
+) -> pa.Table:
     rows = [
         event_day_row(
             name,
             event_date,
             index,
-            DISCOVERY if event_date in DISCOVERY_DAYS else HOLDOUT,
+            DISCOVERY if event_date in discovery else HOLDOUT,
         )
         for name in series
         for index, event_date in enumerate(days, start=1)
@@ -353,6 +356,7 @@ def scope_dir(
     *,
     series: Sequence[str] = (SERIES,),
     days: Sequence[date] = WINDOW,
+    discovery: Sequence[date] = DISCOVERY_DAYS,
     bands: Sequence[tuple[str, datetime, datetime]] = ((QUIET_BAND, QUIET_START, QUIET_END),),
     name: str = "scope",
 ) -> Path:
@@ -368,13 +372,13 @@ def scope_dir(
         ),
         directory / "exclusions.parquet",
     )
-    pq.write_table(event_day_table(series, days), directory / "event_days.parquet")
+    pq.write_table(event_day_table(series, days, discovery), directory / "event_days.parquet")
     write_split(
         directory / "split.json",
         Split(
             cities=tuple(series),
-            discovery_days=tuple(day for day in days if day in DISCOVERY_DAYS),
-            holdout_days=tuple(day for day in days if day not in DISCOVERY_DAYS),
+            discovery_days=tuple(day for day in days if day in discovery),
+            holdout_days=tuple(day for day in days if day not in discovery),
             boundary_event_day=HOLDOUT_DAYS[0],
             scope_start=SCOPE_START,
             scope_end=SCOPE_END,
@@ -915,9 +919,10 @@ def test_the_pre_boundary_holdout_stops_at_the_day_the_source_moved(
     assert restricted["straddles"] == 2
     assert restricted["split"] == HOLDOUT
     assert covered == [f"{SERIES} {day.isoformat()}" for day in PRE_BOUNDARY_DAYS]
-    assert BOUNDARY_DATE in HOLDOUT_DAYS
     assert settled_on_the_boundary in [item.cluster for item in run.holdout.clusters]
     assert settled_on_the_boundary not in covered
+    assert run.holdout_pre_boundary.bootstrap is not None
+    assert run.holdout_pre_boundary.bootstrap.seed == BOOTSTRAP_SEED
 
 
 def test_the_replication_reads_the_whole_holdout_and_not_the_restricted_one(
@@ -945,7 +950,7 @@ def test_the_restricted_holdout_publishes_that_it_gates_nothing(
     payload = result_payload(run_at(tmp_path, paths))
     restricted = payload["holdout_pre_boundary"]
 
-    assert restricted["gates_nothing"] is True
+    assert restricted["gating"] is False
     assert restricted["reported_only"] == PRE_BOUNDARY_REPORTED_ONLY
     assert "gates nothing" in restricted["reported_only"]
     assert "no multiplicity correction" in restricted["reported_only"]
@@ -970,7 +975,25 @@ def test_a_holdout_that_begins_on_the_boundary_leaves_the_restricted_figure_empt
     assert restricted["ci_low"] is None
     assert restricted["p_value"] is None
     assert restricted["degenerate"] is None
-    assert restricted["gates_nothing"] is True
+    assert restricted["gating"] is False
+
+
+def test_the_gate_reads_the_discovery_days_that_sit_past_the_boundary(
+    paths: dict[str, Path], tmp_path: Path
+) -> None:
+    paths["run_scope"] = scope_dir(tmp_path, discovery=DISCOVERY_ACROSS_BOUNDARY, name="spanning")
+
+    run = run_at(tmp_path, paths)
+    payload = result_payload(run)
+    discovery = payload["discovery"]
+    settled_on_the_boundary = f"{SERIES} {BOUNDARY_DATE.isoformat()}"
+
+    assert settled_on_the_boundary in [item.cluster for item in run.discovery.clusters]
+    assert payload["holdout"]["city_event_days"] == 2
+    assert payload["gate"]["n"] == 11
+    assert payload["gate"]["estimate"] == "53.34615384615384615384615385"
+    assert payload["gate"]["estimate"] == discovery["net_profit_cents_per_contract"]
+    assert discovery["replicate_spread"] == pytest.approx(0.6281, abs=1e-4)
 
 
 def test_the_manifest_records_the_settlement_source_it_read_under(

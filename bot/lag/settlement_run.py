@@ -91,9 +91,8 @@ ZERO_ESTIMATE = "a discovery estimate of exactly zero fixes no direction to repl
 NO_ESTIMATE = "a split with no priced straddle carries no estimate to replicate"
 NO_GATE_ESTIMATE = "a split with no priced straddle carries no estimate to test against the bar"
 PRE_BOUNDARY_REPORTED_ONLY = (
-    "the holdout restricted to its days before the settlement source moved is reported only: it "
-    "gates nothing, carries no multiplicity correction, and a figure here is not evidence of an "
-    "edge"
+    "this figure is reported only: it gates nothing, carries no multiplicity correction, and is "
+    "not evidence of an edge"
 )
 
 EXEMPTIONS = (
@@ -433,7 +432,6 @@ def execute(
     priced = price_entries(scope, artifacts, closes, sweep)
     discovery = readout(scope, priced, split=DISCOVERY, seed=seed)
     holdout = readout(scope, priced, split=HOLDOUT, seed=seed)
-    # Reported beside the holdout and never gated on: decide reads the full holdout below.
     before_boundary = replace(
         priced,
         rows=tuple(
@@ -520,7 +518,7 @@ def result_payload(run: SettlementRun) -> dict:
         "holdout": _readout_payload(run.holdout),
         "holdout_pre_boundary": _readout_payload(run.holdout_pre_boundary)
         | {
-            "gates_nothing": True,
+            "gating": False,
             "reported_only": PRE_BOUNDARY_REPORTED_ONLY,
             "boundary_date": run.boundary.boundary_date.isoformat(),
         },
