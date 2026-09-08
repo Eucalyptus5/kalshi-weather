@@ -70,7 +70,7 @@ MIAMI_GEOMETRY = (
 )
 MIAMI_EVENT = "KXHIGHMIA-24OCT24"
 GEOMETRY_HIGH = Decimal("86")
-AMBIENT_PRECISIONS = (20, 28, 50)
+AMBIENT_PRECISIONS = (12, 20, 28, 50)
 SUMMER = date(2025, 7, 15)
 WINTER = date(2025, 1, 15)
 
@@ -82,6 +82,7 @@ def leg(
     station: str = "KMIA",
     tz: str = "America/New_York",
     event_date: date = date(2024, 10, 24),
+    split: str = "discovery",
     lead_hours: int = 24,
     kind: str = "bracket",
     strike_lo: Decimal = Decimal("86"),
@@ -96,7 +97,7 @@ def leg(
         station=station,
         timezone=tz,
         event_date=event_date,
-        split="discovery",
+        split=split,
         lead_hours=lead_hours,
         close_time=close_time,
         as_of=close_time - timedelta(hours=lead_hours),
@@ -225,7 +226,7 @@ def test_the_one_degree_kernel_floor_is_the_smoothing() -> None:
     cdf = class_cdf(GEOMETRY_HIGH, Decimal("0"))
 
     assert cdf.cdf(86.0) == 0.5
-    assert cdf.cdf(83.0) == 0.0013498980316300922
+    assert cdf.cdf(83.0) == pytest.approx(0.0013498980316300922, rel=1e-15)
     assert effective_sigma(Decimal("0")) == Decimal(1)
 
 
@@ -247,6 +248,15 @@ def test_the_sensitivity_band_is_derived_from_the_effective_sigma_identity() -> 
     assert band[Decimal("0.5")] == Decimal("0.5381876835172151082472405429")
     assert band[Decimal("1")] == Decimal(1)
     assert band[Decimal("2")] == Decimal("1.959953078326492906240366607")
+
+    early = sensitivity_band(Decimal("3.0148021921951225"))
+
+    assert effective_sigma(Decimal("3.0148021921951225")) == Decimal(
+        "3.176323701713116698798731371"
+    )
+    assert early[Decimal("0.5")] == Decimal("0.5695069364447214526482044378")
+    assert early[Decimal("1")] == Decimal(1)
+    assert early[Decimal("2")] == Decimal("1.924226441291510784606958017")
 
 
 def test_the_sensitivity_at_one_is_the_stated_probability() -> None:
@@ -300,6 +310,46 @@ def test_class_a_takes_the_external_calibration_for_every_record() -> None:
     assert row.sigma_f == BUCKET_SIGMA
     assert row.window_basis == LST_FULL_LESS_LAST_HOUR
     assert row.key == ("KXHIGHMIA-24OCT24-B86.5", 24, CLASS_A, "ecmwf_ifs025")
+
+
+def test_the_seam_carries_the_leg_identity_m4_would_otherwise_rejoin_for() -> None:
+    subject = leg(
+        series="KXHIGHNY",
+        station="KNYC",
+        split="holdout",
+        kind="below",
+        strike_lo=Decimal("80"),
+        strike_hi=None,
+        result="yes",
+    )
+
+    row = probability_for(subject, record(), CALIBRATION)
+
+    assert (
+        row.series,
+        row.station,
+        row.split,
+        row.kind,
+        row.strike_lo,
+        row.strike_hi,
+        row.result,
+        row.entry_price,
+        row.event_date,
+    ) == (
+        subject.series,
+        subject.station,
+        subject.split,
+        subject.kind,
+        subject.strike_lo,
+        subject.strike_hi,
+        subject.result,
+        subject.entry_price,
+        subject.event_date,
+    )
+    assert row.outcome == 1
+    assert row.class_probability == event_probability(
+        "below", Decimal("80"), None, class_cdf(GEOMETRY_HIGH, Decimal("2.0"))
+    )
 
 
 @pytest.mark.parametrize("lead_hours", [24, 36])
@@ -375,7 +425,9 @@ def test_the_baseline_is_the_entry_price_exactly() -> None:
     assert baseline_brier(rows) == brier_score(
         [Decimal("0.31"), Decimal("0.07"), Decimal("0.62")], [1, 0, 1]
     )
-    assert class_brier(rows) == brier_score([row.class_probability for row in rows], [1, 0, 1])
+    assert baseline_brier(rows) == Decimal("0.208467")
+    assert class_brier(rows) == Decimal("0.337321")
+    assert brier_skill(class_brier(rows), baseline_brier(rows)) == Decimal("-0.618103")
 
 
 def test_the_brier_skill_score_is_the_ratio_against_the_baseline() -> None:
@@ -416,6 +468,29 @@ def test_the_realised_sigma_source_split_over_the_frozen_corpus() -> None:
 
     assert split[CLASS_A] == Counter({EXTERNAL_CALIBRATION: 12490})
     assert split[CLASS_B] == Counter({NATIVE_XND: 4505})
+
+
+@needs_corpus
+def test_a_spring_forward_leg_is_priced_off_the_earlier_bucket_sigma() -> None:
+    legs = [
+        row
+        for row in read_sample_freeze(SAMPLE)
+        if row.event_date == date(2025, 3, 9) and row.lead_hours == 24
+    ]
+    records = {
+        (row.station, row.event_date, row.lead_hours): row
+        for row in read_class_freeze(CLASS_A_FREEZE)
+    }
+
+    rows = [
+        probability_for(row, records[(row.station, row.event_date, row.lead_hours)], CALIBRATION)
+        for row in legs
+    ]
+
+    assert len(rows) == 37
+    assert {row.sigma_f for row in rows} == {Decimal("3.0148021921951225")}
+    assert {row.sigma_source for row in rows} == {EXTERNAL_CALIBRATION}
+    assert {row.effective_sigma_f for row in rows} == {Decimal("3.176323701713116698798731371")}
 
 
 @needs_corpus

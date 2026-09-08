@@ -86,6 +86,9 @@ class SigmaSourceTally:
     external_calibration: int
 
 
+# scripts/build_spread_calibration.py built the buckets under day_end_utc(valid_date, tz) minus
+# issuance, so measuring the lead from close_time instead would query a table never indexed that
+# way, and the 60 seconds between the two lands on the 8-24h/24-72h boundary at the 24h leg.
 def decision_lead(leg: SampleLeg) -> timedelta:
     return day_end_utc(leg.event_date, leg.timezone) - leg.as_of
 
