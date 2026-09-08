@@ -20,8 +20,8 @@ CALIBRATION_PATH = (
     Path(__file__).resolve().parents[2] / "tests" / "data" / "gfs_seamless_spread_calibration.json"
 )
 
-_MEMBER_Z = norm.ppf(np.arange(1, 32) / 32)
-_MEMBER_Z_STD = float(np.std(_MEMBER_Z, ddof=1))
+MEMBER_Z = norm.ppf(np.arange(1, 32) / 32)
+MEMBER_Z_STD = float(np.std(MEMBER_Z, ddof=1))
 
 
 class SpreadCalibration:
@@ -85,7 +85,7 @@ class HistoricalOpenMeteoForecastReplay:
         times = [datetime.fromisoformat(t).replace(tzinfo=timezone.utc) for t in times_raw]
         matrix = np.asarray([temps], dtype=np.float64)
         det_high = float(daily_high_members(times, matrix, station.timezone, valid_date)[0])
-        members = det_high + sigma * _MEMBER_Z / _MEMBER_Z_STD
+        members = det_high + sigma * MEMBER_Z / MEMBER_Z_STD
         return EnsembleCDF.from_members(members, smoothing=1.0)
 
 
