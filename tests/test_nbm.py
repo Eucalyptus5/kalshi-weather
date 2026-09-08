@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -22,10 +23,16 @@ from bot.lag.forecast_classes import CLASS_B_MEMBER
 UTC = timezone.utc
 RUN_FIXTURE = Path(__file__).parent / "data" / "nbs_knyc_20250128_01z.csv"
 DUPLICATE_FIXTURE = Path(__file__).parent / "data" / "nbs_knyc_20251014_07z_duplicated.csv"
+MISSING_RUN_FIXTURE = Path(__file__).parent / "data" / "nbs_knyc_20250620_no_07z.csv"
 SPAN = (date(2024, 10, 20), date(2026, 1, 30))
 RUN = datetime(2025, 1, 28, 1, tzinfo=UTC)
 HIGH_FTIME = datetime(2025, 1, 29, tzinfo=UTC)
 LOW_FTIME = datetime(2025, 1, 29, 12, tzinfo=UTC)
+
+LIVE_ONLY = pytest.mark.skipif(
+    os.environ.get("KW_LIVE_F4") != "1",
+    reason="set KW_LIVE_F4=1 to read the live forecast endpoints",
+)
 
 
 @pytest.fixture(scope="module")
@@ -111,6 +118,32 @@ def test_daily_high_row_never_reads_a_run_issued_after_the_decision_instant(
     )
 
 
+def test_a_run_issued_exactly_at_the_decision_instant_is_still_readable(
+    worked_run: tuple[MosRow, ...],
+) -> None:
+    picked = daily_high_row(worked_run, event_date=date(2025, 1, 28), as_of=RUN)
+
+    assert picked is not None
+    assert picked.runtime == RUN
+    assert picked.ftime == HIGH_FTIME
+    assert picked.txn == Decimal("38.0")
+
+
+def test_the_selection_reaches_back_past_a_run_the_archive_never_published() -> None:
+    rows = parse_mos_csv(MISSING_RUN_FIXTURE.read_text())
+
+    picked = daily_high_row(
+        rows, event_date=date(2025, 6, 20), as_of=datetime(2025, 6, 20, 9, tzinfo=UTC)
+    )
+
+    assert {f"{row.runtime:%H}" for row in rows} == {"01", "13", "19"}
+    assert picked is not None
+    assert picked.runtime == datetime(2025, 6, 20, 1, tzinfo=UTC)
+    assert picked.ftime == datetime(2025, 6, 21, tzinfo=UTC)
+    assert picked.txn == Decimal("84.0")
+    assert picked.runtime < datetime(2025, 6, 20, 9, tzinfo=UTC) - timedelta(hours=6)
+
+
 def test_the_duplicated_run_collapses_to_one_row_per_ftime() -> None:
     text = DUPLICATE_FIXTURE.read_text()
 
@@ -144,6 +177,7 @@ async def test_fetch_asks_iem_for_one_station_over_the_whole_span() -> None:
     assert len(archive.rows) == 23
 
 
+@LIVE_ONLY
 def test_the_live_csv_carries_four_runs_a_day_with_no_missing_runtime_day(knyc_csv: str) -> None:
     raw = [line.split(",") for line in knyc_csv.splitlines()[1:]]
     days = {line[0][:10] for line in raw}
@@ -165,6 +199,7 @@ def test_the_live_csv_carries_four_runs_a_day_with_no_missing_runtime_day(knyc_c
     }
 
 
+@LIVE_ONLY
 def test_the_live_archive_publishes_a_sigma_beside_every_twelve_hour_extreme(
     knyc_archive: tuple[MosRow, ...],
 ) -> None:
@@ -177,6 +212,7 @@ def test_the_live_archive_publishes_a_sigma_beside_every_twelve_hour_extreme(
     assert sum(1 for row in extremes if row.xnd is None) == 0
 
 
+@LIVE_ONLY
 def test_the_archive_skips_one_run_and_duplicates_another(
     knyc_csv: str, knyc_archive: tuple[MosRow, ...]
 ) -> None:

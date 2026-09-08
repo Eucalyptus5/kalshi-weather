@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -33,17 +34,27 @@ from scripts.freeze_f4_sample import DEFAULT_OUT, FREEZE_NAME
 UTC = timezone.utc
 MESSAGE = (Path(__file__).parent / "data" / "hrrr_tmp2m_f024.grib2").read_bytes()
 IDX_URL = f"{HRRR_BUCKET}/hrrr.20250615/conus/hrrr.t00z.wrfsfcf24.grib2.idx"
+FROZEN_SAMPLE = DEFAULT_OUT / FREEZE_NAME
 COUNTED_DAY = date(2025, 1, 15)
+RECORD_BYTES = 1269328
 EXPECTED = {
     "KNYC": ((698, 1553), Decimal("62.49")),
     "KLAX": ((433, 260), Decimal("71.72")),
     "KMIA": ((109, 1483), Decimal("83.08")),
 }
 
+LIVE_ONLY = pytest.mark.skipif(
+    os.environ.get("KW_LIVE_F4") != "1",
+    reason="set KW_LIVE_F4=1 to read the live forecast endpoints",
+)
+needs_tape = pytest.mark.skipif(
+    not FROZEN_SAMPLE.exists(), reason="the recorded tape is not on this host"
+)
+
 
 @pytest.fixture(scope="module")
 def legs() -> list[SampleLeg]:
-    return read_sample_freeze(DEFAULT_OUT / FREEZE_NAME)
+    return read_sample_freeze(FROZEN_SAMPLE)
 
 
 @pytest.fixture(scope="module")
@@ -154,6 +165,7 @@ def test_the_run_is_the_latest_extended_cycle_behind_the_publication_allowance(
     assert PUBLICATION_ALLOWANCE == timedelta(hours=4)
 
 
+@needs_tape
 def test_every_run_the_freeze_needs_is_an_extended_cycle(legs: list[SampleLeg]) -> None:
     runs = {choose_run(leg.as_of) for leg in legs}
 
@@ -161,6 +173,7 @@ def test_every_run_the_freeze_needs_is_an_extended_cycle(legs: list[SampleLeg]) 
     assert all(choose_run(leg.as_of) <= leg.as_of - PUBLICATION_ALLOWANCE for leg in legs)
 
 
+@needs_tape
 def test_the_freeze_needs_disjoint_field_sets_inside_the_published_horizon(
     legs: list[SampleLeg],
 ) -> None:
@@ -215,6 +228,7 @@ async def test_a_transient_reset_is_retried_against_the_same_url() -> None:
     assert len(set(idx_attempts)) == 1
 
 
+@needs_tape
 async def test_the_cache_key_downloads_each_field_once_for_all_seven_cities(
     legs: list[SampleLeg], tmp_path: Path
 ) -> None:
@@ -301,6 +315,11 @@ async def test_a_missing_field_is_counted_rather_than_substituted() -> None:
     }
 
 
+def test_the_recorded_message_is_the_whole_tmp_record() -> None:
+    assert len(MESSAGE) == RECORD_BYTES
+
+
+@LIVE_ONLY
 def test_the_live_idx_and_record_sizes_are_the_measured_bytes() -> None:
     with httpx.Client(timeout=60.0) as client:
         idx = client.get(IDX_URL)
@@ -308,5 +327,4 @@ def test_the_live_idx_and_record_sizes_are_the_measured_bytes() -> None:
     start, end = tmp2m_byte_range(idx.text, 24)
     assert idx.status_code == 200
     assert len(idx.content) == 10551
-    assert end - start + 1 == 1269328
-    assert len(MESSAGE) == 1269328
+    assert end - start + 1 == RECORD_BYTES

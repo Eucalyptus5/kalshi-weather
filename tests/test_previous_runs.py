@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -30,13 +32,24 @@ from scripts.freeze_f4_sample import DEFAULT_OUT, FREEZE_NAME
 UTC = timezone.utc
 ECMWF_FIXTURE = Path(__file__).parent / "data" / "previous_runs_knyc_ecmwf.json"
 UKMO_GAP_FIXTURE = Path(__file__).parent / "data" / "previous_runs_knyc_ukmo_gap.json"
+REFUSED_FIXTURE = Path(__file__).parent / "data" / "single_runs_refused_20260127.json"
+FROZEN_SAMPLE = DEFAULT_OUT / FREEZE_NAME
 KNYC = (40.7790, -73.9692)
 SPAN = (date(2024, 10, 24), date(2026, 1, 29))
+SAMPLE_LAST_DAY = date(2026, 1, 27)
+
+LIVE_ONLY = pytest.mark.skipif(
+    os.environ.get("KW_LIVE_F4") != "1",
+    reason="set KW_LIVE_F4=1 to read the live forecast endpoints",
+)
+needs_tape = pytest.mark.skipif(
+    not FROZEN_SAMPLE.exists(), reason="the recorded tape is not on this host"
+)
 
 
 @pytest.fixture(scope="module")
 def legs() -> list[SampleLeg]:
-    return read_sample_freeze(DEFAULT_OUT / FREEZE_NAME)
+    return read_sample_freeze(FROZEN_SAMPLE)
 
 
 def triples(legs: list[SampleLeg], lead_hours: int) -> dict[tuple[str, date], SampleLeg]:
@@ -113,6 +126,7 @@ async def test_fetch_asks_the_previous_runs_route_for_both_variables() -> None:
     assert series.source_url == str(url)
 
 
+@needs_tape
 def test_reading_day1_at_the_36h_lead_leaks_and_day2_does_not(legs: list[SampleLeg]) -> None:
     basis = window_basis_for(CLASS_A, 36)
     day1 = Counter()
@@ -132,6 +146,7 @@ def test_reading_day1_at_the_36h_lead_leaks_and_day2_does_not(legs: list[SampleL
     assert slack == timedelta(hours=10, minutes=59)
 
 
+@needs_tape
 def test_dropping_the_last_hour_clears_all_but_the_seven_early_close_days(
     legs: list[SampleLeg],
 ) -> None:
@@ -157,28 +172,51 @@ def test_dropping_the_last_hour_clears_all_but_the_seven_early_close_days(
     assert sorted(set(still_leaking)) == [("KMDW", -7260)]
 
 
-def test_the_single_runs_route_cliff_is_two_days_after_the_sample_ends() -> None:
-    with httpx.Client(timeout=60.0) as client:
-        params = {
-            "latitude": KNYC[0],
-            "longitude": KNYC[1],
-            "hourly": "temperature_2m",
-            "temperature_unit": "fahrenheit",
-            "timezone": "UTC",
-            "models": "ecmwf_ifs025",
-        }
-        refused = client.get(SINGLE_RUNS_URL, params={**params, "run": "2026-04-01T00:00"})
-        served = client.get(SINGLE_RUNS_URL, params={**params, "run": "2026-04-02T00:00"})
+def single_runs_params(run: date) -> dict:
+    return {
+        "latitude": KNYC[0],
+        "longitude": KNYC[1],
+        "hourly": "temperature_2m",
+        "temperature_unit": "fahrenheit",
+        "timezone": "UTC",
+        "models": "ecmwf_ifs025",
+        "run": f"{run.isoformat()}T00:00",
+    }
 
+
+def test_the_single_runs_route_refuses_the_last_day_of_the_sample() -> None:
+    recorded = json.loads(REFUSED_FIXTURE.read_bytes())
+
+    assert recorded["error"] is True
+    assert "The requested model run is not available" in recorded["reason"]
+    assert f"run: {SAMPLE_LAST_DAY.isoformat()}T00:00Z" in recorded["reason"]
+    assert "ecmwf_ifs025" in recorded["reason"]
+    assert SAMPLE_LAST_DAY <= SPAN[1]
+
+
+@needs_tape
+def test_the_recorded_refusal_names_the_last_day_the_sample_carries(legs: list[SampleLeg]) -> None:
+    assert max(leg.event_date for leg in legs) == SAMPLE_LAST_DAY
+
+
+@LIVE_ONLY
+def test_the_single_runs_route_still_refuses_the_sample_and_serves_after_the_cliff() -> None:
+    with httpx.Client(timeout=60.0) as client:
+        refused_sample = client.get(SINGLE_RUNS_URL, params=single_runs_params(SAMPLE_LAST_DAY))
+        refused = client.get(SINGLE_RUNS_URL, params=single_runs_params(date(2026, 4, 1)))
+        served = client.get(SINGLE_RUNS_URL, params=single_runs_params(date(2026, 4, 2)))
+
+    assert refused_sample.status_code == 400
+    assert refused_sample.json()["reason"] == json.loads(REFUSED_FIXTURE.read_bytes())["reason"]
     assert refused.status_code == 400
     assert "The requested model run is not available" in refused.json()["reason"]
     assert served.status_code == 200
     values = served.json()["hourly"]["temperature_2m"]
     assert len(values) == 168
     assert sum(1 for value in values if value is not None) == 168
-    assert SPAN[1] < date(2026, 4, 2)
 
 
+@LIVE_ONLY
 async def test_the_previous_runs_route_covers_the_whole_sample_span() -> None:
     counts = {}
     grids = {}
@@ -208,6 +246,7 @@ async def test_the_previous_runs_route_covers_the_whole_sample_span() -> None:
     )
 
 
+@LIVE_ONLY
 async def test_ukmo_gaps_are_scattered_runs_rather_than_a_retention_start() -> None:
     async with httpx.AsyncClient(timeout=180.0) as client:
         series = await fetch_previous_runs(

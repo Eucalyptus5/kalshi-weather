@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from bot.lag.forecast_sample import SIDECAR_SUFFIX, SampleLeg
+from bot.lag.forecast_sample import SampleLeg, sidecar_path
 from bot.markets.observation_window import observation_window
 
 
@@ -72,10 +72,6 @@ def lst_window_hours(timezone: str, event_date: date, basis: str) -> tuple[datet
 
 def class_freeze_path(directory: Path, forecast_class: str) -> Path:
     return directory / f"class_{forecast_class}.jsonl"
-
-
-def sidecar_path(path: Path) -> Path:
-    return path.with_name(path.name + SIDECAR_SUFFIX)
 
 
 def leg_index(legs: Sequence[SampleLeg]) -> dict[LegKey, SampleLeg]:

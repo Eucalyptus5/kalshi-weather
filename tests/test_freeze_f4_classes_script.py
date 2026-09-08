@@ -17,14 +17,15 @@ from bot.lag.forecast_classes import (
 )
 from bot.lag.forecast_sample import SampleLeg, write_sample_freeze
 from scripts.freeze_f4_classes import (
+    DEFAULT_CONCURRENCY,
     DEFAULT_OUT,
     DEFAULT_SAMPLE,
-    DEFAULT_THREADS,
     REPO_ROOT,
     build_parser,
     main,
 )
-from tests.test_hrrr import MESSAGE, bucket_handler, idx_body
+from scripts.freeze_f4_sample import FREEZE_NAME
+from tests.test_hrrr import MESSAGE, bucket_handler, coordinates, idx_body
 
 
 UTC = timezone.utc
@@ -113,11 +114,11 @@ def test_the_parser_defaults_match_the_frozen_sample_layout() -> None:
 
     assert parsed.out == DEFAULT_OUT
     assert parsed.sample == DEFAULT_SAMPLE
-    assert parsed.threads == DEFAULT_THREADS
+    assert parsed.concurrency == DEFAULT_CONCURRENCY
     assert parsed.leads is None
     assert parsed.cache is None
     assert DEFAULT_OUT == REPO_ROOT / "data" / "tape_studies" / "f4_inputs"
-    assert DEFAULT_SAMPLE == DEFAULT_OUT / "sample.jsonl"
+    assert DEFAULT_SAMPLE == DEFAULT_OUT / FREEZE_NAME
 
 
 def test_the_parser_takes_a_repeated_lead() -> None:
@@ -150,6 +151,8 @@ def test_class_a_freezes_one_record_per_member_and_lead(
     }
     assert summary["per_basis"] == {LST_FULL: 3, LST_FULL_LESS_LAST_HOUR: 3}
     assert summary["refused"] == 0
+    assert {(row.grid_latitude, row.grid_longitude) for row in records} == {(40.75, -74.0)}
+    assert (40.75, -74.0) != coordinates("KNYC")
     assert {row.daily_high_f for row in records if row.lead_hours == 24} == {Decimal("40.5")}
     assert {row.daily_high_f for row in records if row.lead_hours == 36} == {Decimal("41.5")}
 
@@ -197,7 +200,7 @@ def test_class_c_downloads_each_field_once_and_resumes_from_the_cache(
         "24",
         "--cache",
         str(cache),
-        "--threads",
+        "--concurrency",
         "4",
     ]
 

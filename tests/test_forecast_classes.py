@@ -26,11 +26,10 @@ from bot.lag.forecast_classes import (
     leg_index,
     lst_window_hours,
     read_class_freeze,
-    sidecar_path,
     window_basis_for,
     write_class_freeze,
 )
-from bot.lag.forecast_sample import SampleLeg
+from bot.lag.forecast_sample import SampleLeg, sidecar_path
 from bot.markets.observation_window import observation_window
 
 
@@ -192,6 +191,8 @@ def test_class_b_record_is_station_granularity_and_utc_anchored() -> None:
 
     assert built.forecast_class == CLASS_B
     assert built.member == "nbm_nbs"
+    assert built.daily_high_f == Decimal("88.0")
+    assert isinstance(built.daily_high_f, Decimal)
     assert built.window_basis == UTC_12Z_00Z
     assert built.issue_rule == MODEL_RUN
     assert built.issue_time == runtime
@@ -244,6 +245,17 @@ def test_freeze_refuses_to_overwrite(tmp_path: Path) -> None:
     write_class_freeze([record()], path, leg_index([leg]))
 
     with pytest.raises(FileExistsError):
+        write_class_freeze([record()], path, leg_index([leg]))
+
+
+def test_freeze_refuses_when_only_the_sidecar_survives(tmp_path: Path) -> None:
+    leg = sample_leg()
+    path = tmp_path / "class_a.jsonl"
+    write_class_freeze([record()], path, leg_index([leg]))
+    path.unlink()
+
+    assert sidecar_path(path).exists()
+    with pytest.raises(FileExistsError, match=sidecar_path(path).name):
         write_class_freeze([record()], path, leg_index([leg]))
 
 
