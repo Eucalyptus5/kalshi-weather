@@ -1,6 +1,6 @@
 import ast
 import inspect
-from decimal import Decimal
+from decimal import Context, Decimal, localcontext
 
 import pytest
 
@@ -36,7 +36,7 @@ def even_weights() -> BlendWeights:
     return weights_of({ALPHA: "0.5", BETA: "0.5"})
 
 
-def test_weights_are_a_required_leading_positional():
+def test_weights_are_a_required_leading_positional() -> None:
     signature = inspect.signature(blend_probability, eval_str=True)
     parameters = list(signature.parameters.values())
     first = parameters[0]
@@ -47,7 +47,7 @@ def test_weights_are_a_required_leading_positional():
     assert parameters[1].name == "per_class"
 
 
-def test_the_scorer_cannot_reach_the_fit():
+def test_the_scorer_cannot_reach_the_fit() -> None:
     tree = ast.parse(inspect.getsource(blend_score))
     from_blend: list[str] = []
     for node in ast.walk(tree):
@@ -61,31 +61,38 @@ def test_the_scorer_cannot_reach_the_fit():
     assert from_blend == ["BlendWeights"]
 
 
-def test_an_even_blend_of_two_members(even_weights):
+def test_an_even_blend_of_two_members(even_weights: BlendWeights) -> None:
     result = blend_probability(even_weights, {ALPHA: Decimal("0.4"), BETA: Decimal("0.6")})
     assert isinstance(result, Decimal)
     assert result == Decimal("0.5")
 
 
-def test_the_blend_is_order_independent(even_weights):
+def test_the_blend_is_order_independent(even_weights: BlendWeights) -> None:
     forward = blend_probability(even_weights, {ALPHA: Decimal("0.31"), BETA: Decimal("0.77")})
     backward = blend_probability(even_weights, {BETA: Decimal("0.77"), ALPHA: Decimal("0.31")})
     assert forward == backward
 
 
-def test_a_lopsided_blend(even_weights):
+def test_a_lopsided_blend() -> None:
     weights = weights_of({ALPHA: "0.25", BETA: "0.75"})
     result = blend_probability(weights, {ALPHA: Decimal("0.20"), BETA: Decimal("0.60")})
     assert result == Decimal("0.5")
 
 
-def test_a_missing_member_raises(even_weights):
+def test_the_blend_holds_under_a_low_ambient_precision() -> None:
+    weights = weights_of({ALPHA: "0.333333333334", BETA: "0.666666666666"})
+    with localcontext(Context(prec=5)):
+        result = blend_probability(weights, {ALPHA: Decimal("0.4"), BETA: Decimal("0.4")})
+    assert str(result) == "0.4000000000000"
+
+
+def test_a_missing_member_raises(even_weights: BlendWeights) -> None:
     with pytest.raises(ValueError) as excinfo:
         blend_probability(even_weights, {ALPHA: Decimal("0.4")})
     assert BETA in str(excinfo.value)
 
 
-def test_an_unfitted_member_raises(even_weights):
+def test_an_unfitted_member_raises(even_weights: BlendWeights) -> None:
     with pytest.raises(ValueError) as excinfo:
         blend_probability(
             even_weights,

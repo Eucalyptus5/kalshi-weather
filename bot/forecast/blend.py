@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from types import MappingProxyType
 
 import numpy as np
 from scipy.optimize import nnls
@@ -100,7 +101,7 @@ def fit_weights(records: Sequence[ClassScore]) -> BlendWeights:
         "fitted_on_split": DISCOVERY,
     }
     return BlendWeights(
-        weights=weights,
+        weights=MappingProxyType(weights),
         members=members,
         fitted_on_event_days=event_days,
         fitted_on_split=DISCOVERY,
