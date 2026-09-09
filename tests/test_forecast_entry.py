@@ -1,3 +1,4 @@
+from dataclasses import FrozenInstanceError
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 from pathlib import Path
@@ -21,6 +22,7 @@ from bot.lag.forecast_entry import (
     entry_of,
     entry_side,
     fee_cents_per_contract,
+    quantile,
     screen_depth,
 )
 from bot.lag.forecast_sample import SampleLeg, read_sample_freeze
@@ -124,10 +126,13 @@ def test_a_yes_entry_pays_the_settlement_less_its_own_entry_cost(
 
     assert traded.traded is True
     assert traded.side == YES
+    assert traded.probability == Decimal("0.80")
     assert traded.executed_price == BAR_PRICE
     assert traded.entry_fee_cents == FEE_PER_CONTRACT
     assert traded.entry_tick_cents == TICK_CENTS
     assert traded.size == SIZE
+    assert traded.trailing_prints == 40
+    assert traded.trailing_contracts == Decimal(400)
     assert traded.net_profit_cents == expected
 
 
@@ -155,6 +160,15 @@ def test_a_no_entry_executes_against_the_complement_of_the_quoted_price() -> Non
     assert traded.net_profit_cents == Decimal("27.50")
 
 
+def test_the_walked_fee_is_priced_at_the_walked_price_not_the_executed_one() -> None:
+    traded = entry_of(leg(entry_price=Decimal("0.30"), result="no"), Decimal("0.20"))
+
+    assert traded.walked_executed_price == Decimal("0.71")
+    assert traded.entry_fee_cents == Decimal("1.50")
+    assert traded.walked_entry_fee_cents == Decimal("1.461538461538461538461538462")
+    assert traded.walked_net_profit_cents == Decimal("26.53846153846153846153846154")
+
+
 def test_the_walk_at_the_ceiling_prices_a_zero_fee() -> None:
     traded = entry_of(leg(entry_price=Decimal("0.99"), result="yes"), Decimal("0.995"))
 
@@ -162,6 +176,7 @@ def test_the_walk_at_the_ceiling_prices_a_zero_fee() -> None:
     assert traded.walked_executed_price == Decimal("1.00")
     assert published_taker_fee(SIZE, traded.walked_executed_price) == Decimal("0.00")
     assert traded.walked_entry_fee_cents == Decimal("0.00")
+    assert traded.walked_net_profit_cents == Decimal("-1.00")
 
 
 def test_a_price_the_forecast_agrees_with_is_carried_untraded() -> None:
@@ -176,8 +191,11 @@ def test_a_price_the_forecast_agrees_with_is_carried_untraded() -> None:
     assert traded.walked_entry_fee_cents is None
     assert traded.walked_net_profit_cents is None
     assert traded.entry_tick_cents == TICK_CENTS
+    assert traded.size == SIZE
     assert traded.probability == BAR_PRICE
     assert traded.entry_price == BAR_PRICE
+    assert traded.trailing_prints == 40
+    assert traded.trailing_contracts == Decimal(400)
 
 
 def test_the_untraded_legs_are_tallied_apart_from_the_traded_ones() -> None:
@@ -193,6 +211,13 @@ def test_the_untraded_legs_are_tallied_apart_from_the_traded_ones() -> None:
     assert counts.traded_n == 2
     assert counts.untraded_n == 1
     assert counts.traded_n + counts.untraded_n == counts.n
+
+
+def test_a_priced_leg_cannot_be_rewritten_after_it_is_built() -> None:
+    traded = entry_of(leg(entry_price=BAR_PRICE, result="yes"), Decimal("0.80"))
+
+    with pytest.raises(FrozenInstanceError):
+        traded.side = NO
 
 
 @pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
@@ -242,6 +267,7 @@ def test_a_leg_with_no_trailing_prints_reaches_the_report_in_its_own_tally() -> 
 
     assert traded.traded is True
     assert traded.trailing_prints == 0
+    assert traded.trailing_contracts == Decimal(0)
     assert distribution.prints_at_zero == 1
     assert distribution.contracts_at_zero == 1
     assert distribution.prints_below_size == 1
@@ -250,7 +276,7 @@ def test_a_leg_with_no_trailing_prints_reaches_the_report_in_its_own_tally() -> 
 
 @pytest.mark.parametrize(
     ("contracts", "kept"),
-    [(Decimal(26), True), (Decimal("25.99"), False), (Decimal(27), True)],
+    [(Decimal(26), True), (Decimal(25), False), (Decimal(27), True)],
 )
 def test_the_depth_screen_keeps_a_leg_that_traded_exactly_the_size(
     contracts: Decimal, kept: bool
@@ -258,6 +284,14 @@ def test_the_depth_screen_keeps_a_leg_that_traded_exactly_the_size(
     screened = leg(entry_price=BAR_PRICE, result="yes", trailing_contracts=contracts)
 
     assert depth_ok(screened) is kept
+
+
+def test_the_quantile_truncates_the_index_rather_than_rounding_it() -> None:
+    values = [0, 10, 20, 30, 40, 50, 60]
+
+    assert quantile(values, Decimal("0.10")) == 0
+    assert quantile(values, Decimal("0.25")) == 10
+    assert quantile(values, Decimal("1")) == 60
 
 
 @pytest.mark.parametrize(
@@ -279,6 +313,10 @@ def test_entry_side_takes_the_forecast_side_and_skips_the_tie(
 def test_the_tick_charged_is_the_published_constant() -> None:
     assert forecast_entry.TICK_CENTS is TICK_CENTS
     assert forecast_entry.TICK_CENTS == Decimal("1")
+
+
+def test_the_fee_charged_is_the_oracle_the_fee_module_is_checked_against() -> None:
+    assert forecast_entry.published_taker_fee is published_taker_fee
 
 
 def test_the_size_is_the_externally_stated_one() -> None:
