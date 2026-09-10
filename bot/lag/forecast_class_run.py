@@ -239,7 +239,7 @@ class ForecastClassRun:
 
 
 def read_class_records(classes: Path) -> list[ClassRecord]:
-    found = {}
+    found: dict[str, list[ClassRecord]] = {}
     for forecast_class in CLASSES:
         path = class_freeze_path(classes, forecast_class)
         found[forecast_class] = read_class_freeze(path) if path.is_file() else []
@@ -267,8 +267,9 @@ def read_event_ladders(
 
 
 # The cluster unit is the event-day: one cluster pools the whole cohort's ladders for that date.
-# A leg the entry rule never traded leaves both sides of the ratio rather than entering at weight
-# 26 and total 0, which would dilute the estimate towards zero on a rule nobody registered.
+# A leg the entry rule never traded leaves both sides of the ratio rather than entering at SIZE
+# weight against a zero total, which would dilute the estimate towards zero on a rule nobody
+# registered.
 def cluster_aggregates(rows: Sequence[TradedLeg], *, walked: bool) -> list[ClusterAggregate]:
     totals: dict[str, Decimal] = {}
     weights: dict[str, Decimal] = {}
@@ -327,7 +328,7 @@ def sigma_band(
     lead_hours: int,
     entries: Sequence[tuple[SampleLeg, Mapping[Decimal, Decimal]]],
 ) -> SigmaBand:
-    points = []
+    points: list[SigmaPoint] = []
     for multiplier in SIGMA_MULTIPLIERS:
         rows = [entry_of(leg, band[multiplier]) for leg, band in entries]
         clusters = cluster_aggregates(rows, walked=False)
@@ -469,7 +470,7 @@ def lead_run(
     )
 
     named = sorted({row.member for row in priced})
-    panels = []
+    panels: list[ClassPanel] = []
     bands = [
         sigma_band(
             BLEND_LABEL,

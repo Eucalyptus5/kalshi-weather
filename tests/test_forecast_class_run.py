@@ -47,6 +47,7 @@ from bot.lag.forecast_class_run import (
     read_class_records,
     read_event_ladders,
     result_payload,
+    sigma_band,
 )
 from bot.lag.forecast_classes import (
     CLASS_A,
@@ -71,6 +72,7 @@ from bot.lag.forecast_entry import (
 )
 from bot.lag.forecast_probability import (
     SIGMA_MULTIPLIERS,
+    ClassProbability,
     baseline_brier,
     brier_skill,
     class_brier,
@@ -81,7 +83,7 @@ from bot.lag.forecast_probability import (
     sigma_for,
 )
 from bot.lag.forecast_sample import F4_LEADS, SampleLeg, read_sample_freeze, write_sample_freeze
-from bot.lag.r0_universe import Coverage, freeze_universe
+from bot.lag.r0_universe import Coverage, R0Universe, freeze_universe
 from bot.lag.run_manifest import (
     BOOTSTRAP_RESAMPLES,
     MANIFEST_NAME,
@@ -97,6 +99,7 @@ from bot.lag.tape_stats import (
     BootstrapResult,
     ClusterAggregate,
     GateVerdict,
+    HoldoutVerdict,
     cluster_bootstrap,
     evaluate_gate,
 )
@@ -137,6 +140,9 @@ SHALLOW_CONTRACTS = Decimal(10)
 DEEP_CONTRACTS = Decimal(40)
 
 AMBIENT_PRECISIONS = (20, 28, 50)
+# Under the bar context's own 28 digits, so a ratio taken at the ambient context rather than the
+# pinned one rounds where the pinned one does not.
+NARROWED_PRECISION = 6
 MARKETS_SCHEMA = pa.schema([("ticker", pa.string()), ("series_ticker", pa.string())])
 CALIBRATION_BODY = {
     "model": "fixture",
@@ -389,7 +395,7 @@ def screened_rows(paths: dict[str, Path], lead_hours: int = GATING_LEAD) -> list
 
 
 def refit_weights(paths: dict[str, Path]) -> BlendWeights:
-    per_leg: dict[str, dict[str, object]] = {}
+    per_leg: dict[str, dict[str, ClassProbability]] = {}
     for row in screened_rows(paths):
         per_leg.setdefault(row.ticker, {})[row.member] = row
     return fit_weights(
@@ -410,7 +416,7 @@ def refit_weights(paths: dict[str, Path]) -> BlendWeights:
     )
 
 
-def f4_inputs(paths: dict[str, Path], **overrides: object) -> RunInputs:
+def f4_inputs(paths: dict[str, Path], **overrides: Decimal | R0Universe | None) -> RunInputs:
     legs = [leg for leg in read_sample_freeze(paths["sample"]) if leg.lead_hours == GATING_LEAD]
     inputs = RunInputs(
         run_id=RUN_ID,
@@ -474,7 +480,7 @@ def readout_at(bootstrap: BootstrapResult, *, split: str) -> Readout:
 
 # Reruns the gate the run resolved with one flag moved, so that flag is the only thing that
 # differs between the two verdicts.
-def regate(gate: GateVerdict, result: BootstrapResult, **overrides: object) -> GateVerdict:
+def regate(gate: GateVerdict, result: BootstrapResult, **overrides: bool) -> GateVerdict:
     arguments = {
         "estimate": gate.estimate,
         "p_value": gate.p_value,
@@ -557,18 +563,24 @@ def test_the_seed_is_this_runs_and_not_the_one_already_spent(corpus: Corpus) -> 
 
 
 def test_a_panel_whose_replicates_carry_no_spread_is_undecidable() -> None:
-    bootstrap = bootstrap_at(
+    spread_free = bootstrap_at(
         0.0001, estimate="5", n_clusters=220, degenerate=True, replicate_spread=0.0
     )
     holdout = readout_at(bootstrap_at(0.01, estimate="1.0", n_clusters=122), split=HOLDOUT)
+    discovery = readout_at(bootstrap_at(0.001, estimate="2.0", n_clusters=220), split=DISCOVERY)
 
-    gate = decide(readout_at(bootstrap, split=DISCOVERY), holdout).gate
+    gate = decide(readout_at(spread_free, split=DISCOVERY), holdout).gate
+    replication = decide(discovery, readout_at(spread_free, split=HOLDOUT)).replication
 
     assert gate is not None
     assert gate.economic is True
     assert gate.undecidable is True
     assert gate.significant is False
     assert gate.passed is False
+    assert replication is not None
+    assert replication.undecidable is True
+    assert replication.significant is False
+    assert replication.replicated is False
 
 
 def test_the_discovery_floor_is_two_hundred_event_days() -> None:
@@ -589,6 +601,7 @@ def test_the_discovery_floor_is_two_hundred_event_days() -> None:
     assert full.gate.powered is True
     assert full.gate.n_min == 200
     assert full.gate.n_unit == EVENT_DAYS
+    assert EVENT_DAYS == "event-days"
     assert full.verdict != UNDERPOWERED
 
 
@@ -644,8 +657,10 @@ def test_a_third_field_cannot_be_declared_exempt() -> None:
     with pytest.raises(ExemptionRefused, match="row_counts"):
         Exemption(field="row_counts", reason="f4 reads no rows")
 
-    assert {item.field for item in EXEMPTIONS} == {"latency_floor", "r0_fraction_invalid_max"}
-    assert all(item.reason for item in EXEMPTIONS)
+    reasons = {item.field: item.reason for item in EXEMPTIONS}
+    assert set(reasons) == {"latency_floor", "r0_fraction_invalid_max"}
+    assert reasons["r0_fraction_invalid_max"].startswith("f4 reads no ladder")
+    assert reasons["latency_floor"].startswith("no order is placed")
 
 
 def test_declaring_the_universe_exempt_while_supplying_it_is_refused(corpus: Corpus) -> None:
@@ -747,11 +762,11 @@ def test_the_run_resolves_one_gate_and_one_replication_over_the_whole_execute(
     gate_seen = forecast_class_run.evaluate_gate
     holdout_seen = forecast_class_run.evaluate_holdout
 
-    def counted_gate(**kwargs: object) -> object:
+    def counted_gate(**kwargs: object) -> GateVerdict:
         calls["gate"] += 1
         return gate_seen(**kwargs)
 
-    def counted_holdout(**kwargs: object) -> object:
+    def counted_holdout(**kwargs: object) -> HoldoutVerdict:
         calls["holdout"] += 1
         return holdout_seen(**kwargs)
 
@@ -775,6 +790,12 @@ def test_every_figure_beside_the_gate_publishes_that_it_gates_nothing(corpus: Co
     assert reported["lead_hours"] == REPORTED_LEAD
     assert "gate" not in reported
     assert "replication" not in reported
+    for block, label in (
+        (reported["walked_tick"], WALKED_TICK_REPORTED_ONLY),
+        (reported["sigma_band"], SIGMA_BAND_REPORTED_ONLY),
+    ):
+        assert block["gating"] is False
+        assert block["reported_only"] == label
     assert payload["walked_tick"]["gating"] is False
     assert payload["walked_tick"]["reported_only"] == WALKED_TICK_REPORTED_ONLY
     assert payload["walked_tick"]["tick_rule"] == WALKED_TICK_RULE
@@ -813,6 +834,7 @@ def test_the_blend_is_fitted_on_the_discovery_legs_and_never_refitted(corpus: Co
     refitted = refit_weights(corpus.paths)
 
     assert published["members"] == list(BLEND_MEMBERS)
+    assert BLEND_MEMBERS == (ECMWF, HRRR, ICON, NBM)
     assert published["fitted_on_split"] == DISCOVERY
     assert published["fitted_on_event_days"] == len(DISCOVERY_DAYS)
     assert published["sha256"] == refitted.sha256
@@ -852,6 +874,20 @@ def test_a_leg_missing_a_blend_member_is_excluded_and_counted(tmp_path: Path) ->
     assert payload["discovery"]["event_days"] == len(DISCOVERY_DAYS)
 
 
+def test_an_event_day_whose_every_leg_lacks_a_member_is_counted_as_lost(tmp_path: Path) -> None:
+    lost = MISSING_DAY[1]
+    paths = write_corpus(tmp_path, missing=(MISSING_DAY, ("KDEN", lost)))
+
+    payload = result_payload(run_at(paths, tmp_path / "tape_studies"))
+
+    entries = payload["entries"]
+    assert lost in DISCOVERY_DAYS
+    assert entries["not_blendable_event_days_lost"] == 1
+    assert entries["not_blendable_city_days"] == len(SERIES)
+    assert entries["not_blendable_legs"] == len(SERIES) * len(rungs(BASE["KXHIGHDEN"]))
+    assert payload["discovery"]["event_days"] == len(DISCOVERY_DAYS) - 1
+
+
 def test_an_untraded_leg_leaves_both_sides_of_the_ratio() -> None:
     tie = entry_of(leg_at(entry_price=Decimal("0.20")), Decimal("0.20"))
     traded = entry_of(leg_at(entry_price=Decimal("0.20"), event_date=DAYS[1]), Decimal("0.60"))
@@ -863,6 +899,21 @@ def test_an_untraded_leg_leaves_both_sides_of_the_ratio() -> None:
     assert [item.cluster for item in clusters] == [DAYS[1].isoformat()]
     assert cluster_aggregates([tie], walked=False) == []
     assert forecast_class_run.entry_counts([tie, traded]).untraded_n == 1
+
+
+def test_each_leg_enters_its_cluster_weighted_by_the_size_it_was_taken_at() -> None:
+    won = entry_of(leg_at(entry_price=Decimal("0.20")), Decimal("0.60"))
+    lost = entry_of(
+        leg_at(entry_price=Decimal("0.70"), ticker="KXHIGHDEN-25AUG10-B82.5"), Decimal("0.30")
+    )
+
+    cluster = cluster_aggregates([won, lost], walked=False)[0]
+
+    assert won.size == SIZE
+    assert lost.size == SIZE
+    assert cluster.weight == SIZE + SIZE
+    assert cluster.total == won.net_profit_cents * SIZE + lost.net_profit_cents * SIZE
+    assert cluster.total == Decimal("1179")
 
 
 def test_a_cluster_carrying_no_weight_is_refused_outright() -> None:
@@ -888,10 +939,44 @@ def test_the_sigma_band_at_one_is_the_gated_point_estimate(corpus: Corpus) -> No
     assert points["1"]["net_profit_cents_per_contract"] == payload["gate"]["estimate"]
     assert points["1"]["event_days"] == len(DISCOVERY_DAYS)
     assert all(point["traded"] > 0 for point in band["points"])
+    assert len({point["net_profit_cents_per_contract"] for point in band["points"]}) == 3
     assert {item["label"] for item in payload["sigma_band"]["bands"]} == {
         BLEND_LABEL,
         *ALL_MEMBERS,
     }
+
+
+def test_the_sigma_band_counts_only_the_legs_the_multiplier_left_off_the_price() -> None:
+    moved = leg_at(entry_price=Decimal("0.20"))
+    tied = leg_at(entry_price=Decimal("0.30"), event_date=DAYS[1], ticker="KXHIGHDEN-25AUG11-B80.5")
+    entries = [
+        (
+            moved,
+            {
+                Decimal("0.5"): Decimal("0.60"),
+                Decimal("1"): Decimal("0.55"),
+                Decimal("2"): Decimal("0.50"),
+            },
+        ),
+        (
+            tied,
+            {
+                Decimal("0.5"): Decimal("0.40"),
+                Decimal("1"): Decimal("0.35"),
+                Decimal("2"): Decimal("0.30"),
+            },
+        ),
+    ]
+
+    band = sigma_band(BLEND_LABEL, GATING_LEAD, entries)
+
+    points = {point.multiplier: point for point in band.points}
+    assert band.split == DISCOVERY
+    assert [point.multiplier for point in band.points] == list(SIGMA_MULTIPLIERS)
+    assert points[Decimal("1")].traded_n == 2
+    assert points[Decimal("2")].traded_n == 1
+    assert points[Decimal("1")].event_days == 2
+    assert points[Decimal("2")].event_days == 1
 
 
 def test_the_ladder_sum_check_reads_the_listed_ladder_and_not_the_survivors(
@@ -971,6 +1056,7 @@ def test_the_depth_screen_drops_the_shallow_day_and_publishes_both_distributions
 
 def test_the_results_carry_the_pinned_screen_and_tick_rules(corpus: Corpus) -> None:
     payload = corpus.payload
+    bootstrap = corpus.run.gating.blend.discovery.bootstrap
 
     assert payload["screen_rule"] == "trailing_contracts_ge_26"
     assert payload["tick_rule"] == "one_tick_constant"
@@ -983,6 +1069,8 @@ def test_the_results_carry_the_pinned_screen_and_tick_rules(corpus: Corpus) -> N
     assert payload["bar_is_strict"] is True
     assert payload["cohort"] == HIGH
     assert payload["bootstrap_resamples"] == BOOTSTRAP_RESAMPLES
+    assert bootstrap is not None
+    assert bootstrap.resamples == BOOTSTRAP_RESAMPLES
 
 
 def test_the_walked_tick_costs_a_tick_against_the_published_figure(corpus: Corpus) -> None:
@@ -993,6 +1081,9 @@ def test_the_walked_tick_costs_a_tick_against_the_published_figure(corpus: Corpu
     assert walked < published
     assert payload["walked_tick"]["discovery"]["event_days"] == len(DISCOVERY_DAYS)
     assert payload["walked_tick"]["holdout"]["split"] == HOLDOUT
+    assert Decimal(payload["walked_tick"]["holdout"]["net_profit_cents_per_contract"]) < Decimal(
+        payload["holdout"]["net_profit_cents_per_contract"]
+    )
 
 
 def test_both_leads_are_measured_and_only_one_of_them_gates(corpus: Corpus) -> None:
@@ -1022,6 +1113,28 @@ def test_every_class_carries_a_brier_against_the_market_baseline(corpus: Corpus)
             brier_skill(Decimal(item["brier"]), Decimal(item["baseline_brier"]))
         )
         assert name in {BLEND_LABEL, *ALL_MEMBERS}
+
+
+def test_the_blend_is_scored_against_the_market_price_and_not_against_itself(
+    corpus: Corpus,
+) -> None:
+    per_leg: dict[str, dict[str, ClassProbability]] = {}
+    for row in screened_rows(corpus.paths):
+        per_leg.setdefault(row.ticker, {})[row.member] = row
+    blendable = [
+        ticker for ticker in sorted(per_leg) if set(BLEND_MEMBERS) <= per_leg[ticker].keys()
+    ]
+
+    published = corpus.payload["briers"][BLEND_LABEL]
+
+    assert published["n"] == len(blendable)
+    assert published["baseline_brier"] == str(
+        brier_score(
+            [per_leg[ticker][ECMWF].entry_price for ticker in blendable],
+            [per_leg[ticker][ECMWF].outcome for ticker in blendable],
+        )
+    )
+    assert published["baseline_brier"] != published["brier"]
 
 
 @pytest.mark.parametrize("prec", AMBIENT_PRECISIONS)
@@ -1064,6 +1177,24 @@ def test_the_point_estimate_reads_the_same_ratio_the_bootstrap_publishes() -> No
     assert point_estimate(()) is None
     assert published.ci_level == CI_LEVEL
     assert published.seed == BOOTSTRAP_SEED
+    assert published.resamples == BOOTSTRAP_RESAMPLES
+    assert published.null_value == Decimal("0")
+    assert CI_LEVEL == 0.95
+
+
+def test_the_point_estimate_does_not_move_with_the_ambient_precision() -> None:
+    clusters = tuple(
+        ClusterAggregate(cluster=f"{index:04d}", total=Decimal(7 * index - 40), weight=SIZE)
+        for index in range(12)
+    )
+
+    published = point_estimate(clusters)
+
+    assert published is not None
+    assert len(published.as_tuple().digits) > NARROWED_PRECISION
+    for prec in (NARROWED_PRECISION, *AMBIENT_PRECISIONS):
+        with localcontext(prec=prec):
+            assert point_estimate(clusters) == published
 
 
 def test_the_same_seed_reads_the_same_p_value_twice(corpus: Corpus) -> None:

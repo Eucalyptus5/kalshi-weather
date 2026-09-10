@@ -100,11 +100,6 @@ def args_for(paths: dict[str, Path], run_root: Path) -> argparse.Namespace:
     return build_parser().parse_args(argv_for(paths, run_root))
 
 
-def without(argv: list[str], flag: str) -> list[str]:
-    index = argv.index(flag)
-    return argv[:index] + argv[index + 2 :]
-
-
 @pytest.fixture(scope="module")
 def reported(tmp_path_factory: pytest.TempPathFactory) -> dict:
     root = tmp_path_factory.mktemp("f4-report")
@@ -130,6 +125,9 @@ def test_a_complete_run_writes_the_manifest_and_the_results_beside_it(
     results = json.loads((run_root / RUN_ID / RESULTS_NAME).read_text())
     manifest = json.loads((run_root / RUN_ID / MANIFEST_NAME).read_text())
     assert results["manifest_sha256"] == manifest["sha256"]
+    assert manifest["economic_bar_price"] == "0"
+    assert manifest["economic_bar_price"] == results["bar"]
+    assert manifest["economic_bar_price"] == results["gate"]["threshold"]
     assert results["bootstrap_seed"] == BOOTSTRAP_SEED
     assert results["bootstrap_resamples"] == BOOTSTRAP_RESAMPLES
     assert manifest["bootstrap_seed"] == BOOTSTRAP_SEED
@@ -233,6 +231,10 @@ def test_the_defaults_name_the_tree_the_script_ships_in() -> None:
     assert args.markets == DEFAULT_MARKETS
     assert args.calibration == CALIBRATION_PATH
     assert args.cohort == HIGH
+    assert DEFAULT_RUN_ROOT == REPO_ROOT / "data" / "tape_studies"
+    assert DEFAULT_INPUTS == DEFAULT_RUN_ROOT / "f4_inputs"
+    assert DEFAULT_SAMPLE == DEFAULT_INPUTS / "sample.jsonl"
+    assert DEFAULT_MARKETS == REPO_ROOT / "data" / "backtest" / "weather_markets.parquet"
     # The manifest records the path it was handed, so an absolute default would put this host's
     # checkout inside every digest.
     assert args.preregistration == DEFAULT_PREREGISTRATION
@@ -254,11 +256,13 @@ def test_a_run_whose_preregistration_is_missing_writes_nothing(
 ) -> None:
     paths = write_corpus(tmp_path)
     run_root = tmp_path / "tape_studies"
-    argv = [*without(argv_for(paths, run_root), "--preregistration")]
+    absent = tmp_path / "absent.md"
+    argv = argv_for(paths | {"preregistration": absent}, run_root)
 
     assert run(build_parser().parse_args(argv)) != 0
 
     captured = capsys.readouterr()
+    assert not absent.exists()
     assert "preregistration_sha256" in captured.err
     assert captured.out == ""
     assert not run_root.exists()
