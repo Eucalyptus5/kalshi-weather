@@ -1,36 +1,43 @@
 # Kalshi Weather
 
-A research program on Kalshi's daily high and low temperature markets. It records the live order book, replays it offline, and tests specific claims about where a tradable edge might exist. Five hypotheses were pre-registered and all five were resolved. None of them became a strategy worth trading, and the section below says why.
+Research program on Kalshi's daily high and low temperature markets. It records the live order book, replays it offline, and tests specific claims about where a tradable edge might exist.
 
-Paper and demo only. No live orders and no real capital at any point.
+Five hypotheses were pre-registered. All five were resolved. None became a strategy worth trading.
 
-## What it found
+> Paper and demo only. No live orders and no real capital at any point.
 
-Each family got a written pre-registration, a fixed share of a 0.05 alpha budget, and a discovery and holdout split frozen before any tape was read.
+## Results
 
-**Maker-side economics: PASS, on a fee regime rather than a law.** 0.20 cents per contract over 416 discovery market-days and 0.28 over 152 holdout, both significant. The result rests entirely on weather paying no maker fee. Priced at the published 0.0175 rate, the same fills read negative on both splits. That rate is a live venue configuration readable off a series field, not something the venue promises, and the published fee schedule was already stale against it.
+| Family | Verdict | Measured | Why it does not trade |
+| --- | --- | --- | --- |
+| Maker-side economics | **PASS** | +0.20c / +0.28c | Holds only while weather pays no maker fee |
+| Settlement source | **PASS** | +33.5c / +39.7c | Entry instant is not identifiable in real time |
+| Forecast source | **CLOSED** | -1.18c / -1.85c | Negative at full power over 15 months |
+| Low-temp staleness | **UNDERPOWERED** | 5 of 30 station-days | A funded extension still projects 3x short |
+| Cross-series consistency | **CLOSED** | 0 of 60 pairs | Killed on ladder geometry before any tape |
+| Execution speed | **CLOSED** | 20s lag vs 79s floor | No latency advantage to build on |
 
-**Settlement source: PASS, on an instant nobody could trade.** 33.5 cents per contract over 39 discovery city event-days and 39.7 over 25 holdout. The entry instant is not identifiable while it is happening, because the official daily extreme does not exist until after the observation window closes. The effect is well defined after the fact and cannot be acted on as measured.
+Cent figures are per contract, discovery split first and holdout second. Each family got a written pre-registration, a fixed share of a 0.05 alpha budget, and a discovery and holdout split frozen before any tape was read.
 
-**Forecast source: CLOSED at full power.** Negative on both splits, -1.18 cents over 220 discovery event-days and -1.85 over 122 holdout, on a fifteen month sample. This is the one result that is not seasonal.
+### The catch on the two passes
 
-**Low-temperature staleness: UNDERPOWERED, no extension spent.** 5 discovery station-days carrying a mid-day clean lock against a floor of 30. An honest projection of a funded extension still missed the floor by a factor of three, so it was stopped instead of extended.
+**Maker-side economics.** Significant on 416 discovery market-days and 152 holdout. Priced at the published 0.0175 maker rate, the same fills read negative on both splits. The venue currently charges no maker fee on weather, which is a live configuration readable off a series field rather than a promise, and the published fee schedule was already stale against it.
 
-**Cross-series consistency: CLOSED on geometry, before any tape was read.** Across all 60 paired high and low city-days in the window, the gap between the two ladders' tail strikes ran 3F at its narrowest and 24F at its widest, and no pair ever expressed a jointly impossible statement.
+**Settlement source.** Significant on 39 discovery city event-days and 25 holdout. The official daily extreme does not exist until after the observation window closes, so nobody standing at the entry instant can know it is happening. The effect is well defined after the fact and cannot be acted on as measured.
 
-An earlier latency study closed the speed lane on its own. Median lag from event to observed book update was 20 seconds against a REST polling floor of 79 seconds, so there was no execution advantage to build on.
-
-Two passes are not two builds. Both carry a condition that decides whether they imply anything, and neither condition is settled by recording more tape.
+Neither condition is settled by recording more tape, so neither pass is a build.
 
 ## How it works
 
-A WebSocket recorder runs continuously on a GCP VM, capturing order book deltas and trades across 20 stations into SQLite, with a health watchdog and alerting. The tape has run unbroken since 2026-07-17 through a full host migration across cloud projects.
+**Recording.** A WebSocket recorder runs continuously on a GCP VM, capturing book deltas and trades across 20 stations into SQLite, with a health watchdog and alerting. The tape has run unbroken since 2026-07-17, through a full host migration across cloud projects.
 
-Studies never read the live venue. A replay engine reconstructs the book at any instant from the recorded deltas and serves it to the strategy code, so a run is reproducible from the tape alone. Every run writes a provenance manifest first, recording the git commit, a dirty flag, and a hash of every input file, then aborts if the pre-registration file is missing. Bootstrap seeds are recorded and never reused across runs that share evidence.
+**Replay.** Studies never read the live venue. A replay engine reconstructs the book at any instant from recorded deltas and serves it to the strategy code, so every run is reproducible from the tape alone.
 
-Forecasts come from Open-Meteo ensembles and the statistical guidance product, with GRIB decoding for the model backtests. Probabilities are calibrated against realised outcomes rather than trusted raw. All prices and fees are `Decimal`, never float.
+**Provenance.** Each run writes a manifest before any statistic touches the data, recording the git commit, a dirty flag, and a hash of every input. A missing pre-registration file aborts the run. Bootstrap seeds are recorded and never reused across runs that share evidence.
 
-Blind windows are counted rather than assumed away. Recorder resubscribes drop roughly ten seconds of book each, and candidate fills landing inside a gap, a quiet band, or a resubscribe are excluded and reported as a share of the funnel.
+**Forecasts.** Open-Meteo ensembles and the statistical guidance product, with GRIB decoding for model backtests. Probabilities are calibrated against realised outcomes rather than trusted raw. All prices and fees are `Decimal`, never float.
+
+**Blind windows.** Recorder resubscribes drop roughly ten seconds of book each. Candidate fills landing in a gap, a quiet band, or a resubscribe are excluded and reported as a share of the funnel rather than assumed away.
 
 ## Layout
 
@@ -50,7 +57,7 @@ bot/validation/     input and response validation
 scripts/            study runners, report generators, recorder, watchdog
 ```
 
-Around 35,000 lines across 167 modules, 160 test files, and a suite of roughly 4,600 tests that must be green before any commit.
+Roughly 35,000 lines across 167 modules, with 160 test files and about 4,600 tests that must be green before any commit.
 
 ## Setup
 
