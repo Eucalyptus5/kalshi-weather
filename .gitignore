@@ -41,3 +41,6 @@ dist/
 .idea/
 *.swp
 
+
+# private notes
+DEVLOG.md
