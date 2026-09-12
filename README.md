@@ -1,5 +1,7 @@
 # Kalshi Weather
 
+[![tests](https://github.com/Eucalyptus5/Kalshiweather/actions/workflows/tests.yml/badge.svg)](https://github.com/Eucalyptus5/Kalshiweather/actions/workflows/tests.yml)
+
 A systematic trading system for Kalshi's daily high and low temperature markets, and the research program that measured whether it made money. It did not, and establishing that to a publishable standard is what the repository is.
 
 Four months, 337 commits, one developer. The first half is a working forecast-driven trader: ensemble weather forecasts priced across strike ladders, calibrated against realised settlements, sized by fractional Kelly, gated on risk, routed to a depth-aware simulator and the demo exchange. The second half is the apparatus that tested it: a WebSocket recorder holding 458 million order-book events, a deterministic replay engine, and five hypotheses pre-registered against a fixed alpha budget with frozen discovery and holdout splits.
