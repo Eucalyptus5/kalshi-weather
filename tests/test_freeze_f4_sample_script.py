@@ -7,10 +7,22 @@ from pathlib import Path
 import pytest
 
 from bot.lag.forecast_sample import read_sample_freeze, sidecar_path
-from scripts.freeze_f4_sample import DEFAULT_OUT, FREEZE_NAME, REPO_ROOT, build_parser, main
+from scripts.freeze_f4_sample import (
+    DEFAULT_OUT,
+    FREEZE_NAME,
+    REPO_ROOT,
+    SAMPLE_PLAN,
+    build_parser,
+    main,
+)
 from tests.test_forecast_sample import tick_row, write_markets, write_ticks
 from tests.test_tape_studies import argument_flags
 
+
+pytestmark = pytest.mark.skipif(
+    not SAMPLE_PLAN.exists(),
+    reason="frozen study artifacts under data/ are not committed",
+)
 
 SCRIPT = REPO_ROOT / "scripts" / "freeze_f4_sample.py"
 UTC = timezone.utc

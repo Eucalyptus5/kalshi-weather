@@ -43,6 +43,11 @@ from scripts.freeze_f4_sample import (
 )
 
 
+pytestmark = pytest.mark.skipif(
+    not SAMPLE_PLAN.exists(),
+    reason="frozen study artifacts under data/ are not committed",
+)
+
 UTC = timezone.utc
 AMBIENT_PRECISIONS = (20, 28, 50)
 

@@ -18,6 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - run: sudo apt-get update && sudo apt-get install -y libeccodes-dev
+
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
@@ -28,5 +30,7 @@ jobs:
       - run: uv sync --locked
 
       - run: uv run ruff check .
+
+      - run: mkdir -p data
 
       - run: uv run pytest -q
