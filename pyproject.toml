@@ -1,7 +1,7 @@
 [project]
 name = "kalshi-weather"
 version = "0.0.0"
-description = "Paper trading bot for Kalshi weather markets."
+description = "Kalshi weather markets: paper trader, order-book recorder, and replay-based edge studies."
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.18.4",

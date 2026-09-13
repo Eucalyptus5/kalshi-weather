@@ -1,6 +1,6 @@
 # Kalshi Weather
 
-[![tests](https://github.com/Eucalyptus5/Kalshiweather/actions/workflows/tests.yml/badge.svg)](https://github.com/Eucalyptus5/Kalshiweather/actions/workflows/tests.yml)
+[![tests](https://github.com/Eucalyptus5/kalshi-weather/actions/workflows/tests.yml/badge.svg)](https://github.com/Eucalyptus5/kalshi-weather/actions/workflows/tests.yml)
 
 A systematic trading system for Kalshi's daily high and low temperature markets, and the research program that measured whether it made money. It did not. Proving that to a publishable standard is what the repository is.
 
